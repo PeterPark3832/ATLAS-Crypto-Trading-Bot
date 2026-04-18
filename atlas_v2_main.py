@@ -999,6 +999,7 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
     # 레짐 체크
     regime = get_cached_regime().regime
     if regime in (REGIME_CRISIS, REGIME_RANGING, 'UNKNOWN'):
+        log(f'[MA 스킵] {sym} 레짐={regime} (진입불가)')
         return
 
     if len(df) < 3:
@@ -1025,26 +1026,33 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
 
     # ADX 필터
     if adx_curr < V2_MA_ADX_MIN:
+        log(f'[MA 스킵] {sym} ADX={adx_curr:.1f} < 기준{V2_MA_ADX_MIN} (추세 약함) | 레짐={regime}')
         return
 
     # EMA 크로스오버 감지
     long_cross  = (ema20_prev <= ema50_prev) and (ema20_curr > ema50_curr)
     short_cross = (ema20_prev >= ema50_prev) and (ema20_curr < ema50_curr)
     if not long_cross and not short_cross:
+        gap = (ema20_curr - ema50_curr) / ema50_curr * 100
+        log(f'[MA 스킵] {sym} EMA크로스 없음 (EMA20-50 갭={gap:+.3f}%) ADX={adx_curr:.1f} | 레짐={regime}')
         return
 
     direction = 'LONG' if long_cross else 'SHORT'
 
     # 레짐-방향 필터
-    if direction == 'LONG'  and regime == REGIME_TRENDING_DOWN:
+    if direction == 'LONG' and regime == REGIME_TRENDING_DOWN:
+        log(f'[MA 스킵] {sym} LONG 신호이나 레짐=TRENDING_DOWN — 방향 불일치')
         return
     if direction == 'SHORT' and regime == REGIME_TRENDING_UP:
+        log(f'[MA 스킵] {sym} SHORT 신호이나 레짐=TRENDING_UP — 방향 불일치')
         return
 
     # EMA200 방향 필터 (심볼별 자체)
-    if direction == 'LONG'  and close_curr < ema200_curr:
+    if direction == 'LONG' and close_curr < ema200_curr:
+        log(f'[MA 스킵] {sym} LONG이나 종가({close_curr:.2f}) < EMA200({ema200_curr:.2f})')
         return
     if direction == 'SHORT' and close_curr > ema200_curr:
+        log(f'[MA 스킵] {sym} SHORT이나 종가({close_curr:.2f}) > EMA200({ema200_curr:.2f})')
         return
 
     # 펀딩비 필터
@@ -1172,6 +1180,7 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
     # RANGING 전용
     regime = get_cached_regime().regime
     if regime != REGIME_RANGING:
+        log(f'[MR 스킵] {sym} 레짐={regime} (RANGING 필요 — 대기 중)')
         return
 
     if len(df) < 3:
@@ -1194,6 +1203,7 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
         direction = 'SHORT'
 
     if direction is None:
+        log(f'[MR 스킵] {sym} RSI 크로스 없음 (RSI={rsi_curr:.1f}, 기준 L<{V2_MR_RSI_LONG}/S>{V2_MR_RSI_SHORT})')
         return
 
     # 펀딩비 필터
@@ -1454,11 +1464,13 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
     with _shared_lock:
         cd = _shared['mc_cooldowns'].get(sym, 0)
     if cd > 0:
+        log(f'[MC 스킵] {sym} 쿨다운 {cd}봉 남음')
         return
 
     # 레짐 체크
     regime = get_cached_regime().regime
     if regime in (REGIME_CRISIS, REGIME_RANGING, 'UNKNOWN'):
+        log(f'[MC 스킵] {sym} 레짐={regime} (진입불가)')
         return
 
     if len(df_15m) < V2_MC_VOL_LB + 3:
@@ -1480,7 +1492,10 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
         return
 
     # 거래량 스파이크 필터 (직전 완성 캔들 기준)
+    vol_ratio = prev_vol / vol_avg if vol_avg > 0 else 0.0
     if prev_vol <= vol_avg * V2_MC_VOL_MULT:
+        log(f'[MC 스킵] {sym} 볼륨 미충족 ({vol_ratio:.2f}x < {V2_MC_VOL_MULT}x) '
+            f'| 고={prev_high:.4f} 저={prev_low:.4f} 종={cur_close:.4f} | 레짐={regime}')
         return
 
     # HTF EMA 방향 필터 (0이면 데이터 없음 → 필터 면제)
@@ -1507,6 +1522,9 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
         breakout_level = prev_low
 
     if direction is None:
+        htf_str = f'HTF_EMA={htf_ema:.2f}' if htf_ema > 0 else 'HTF=없음'
+        log(f'[MC 스킵] {sym} 돌파 없음 (종={cur_close:.4f} 고={prev_high:.4f} 저={prev_low:.4f}) '
+            f'볼륨={vol_ratio:.2f}x {htf_str} | 레짐={regime}')
         return
 
     # 추격 거리 필터 — 슬리피지 제한 핵심 로직
