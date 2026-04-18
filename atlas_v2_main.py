@@ -1372,6 +1372,19 @@ def mc_enter_position(ccxt_sym: str, strategy: str, sym: str,
         log(f'[MC 진입차단] {sym}: 수량 {qty} < 최소 {min_qty}')
         return False
 
+    # 가용 마진 사전 체크 — -2019 Margin insufficient 방지
+    try:
+        bal          = ex.fetch_balance({'type': 'future'})
+        free_margin  = float(bal.get('USDT', {}).get('free', 0) or 0)
+        notional     = qty * entry_sig
+        required_margin = notional / leverage * 1.05  # 5% 버퍼
+        if free_margin < required_margin:
+            log(f'[MC 진입차단] {sym}: 가용 마진 부족 '
+                f'(필요=${required_margin:.1f}, 가용=${free_margin:.1f})')
+            return False
+    except Exception as e:
+        log(f'[MC] 마진 체크 실패 ({e}) — 진입 계속')
+
     set_leverage(ccxt_sym, leverage)
 
     side = 'buy' if direction == 'LONG' else 'sell'
