@@ -79,6 +79,17 @@ st.markdown("""
     text-align: center;
 }
 
+/* ── PC: 최대 너비 제한 (차트 무한 늘어짐 방지) ── */
+@media (min-width: 769px) {
+    .block-container {
+        max-width: 1280px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+    }
+}
+
 /* ── 모바일 대응 ── */
 @media (max-width: 640px) {
     /* 컬럼 세로 쌓기 */
@@ -536,20 +547,19 @@ with tab1:
 
     st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
 
-    # 스트릭 + MDD 게이지
-    col_streak, col_gauge = st.columns([1, 1])
+    # 스트릭 + MDD 게이지 + 일별 PnL (3열)
+    col_streak, col_gauge, col_daily = st.columns([1, 1, 2])
     with col_streak:
         streak_badge(streak_cnt, streak_kind)
     with col_gauge:
         st.plotly_chart(mdd_gauge(metrics['mdd_pct']),
                         use_container_width=True, config={'displayModeBar': False})
+    with col_daily:
+        st.plotly_chart(daily_bar(trades),
+                        use_container_width=True, config={'displayModeBar': False})
 
-    # 수익 곡선
+    # 수익 곡선 (전체 폭)
     st.plotly_chart(equity_chart(trades),
-                    use_container_width=True, config={'displayModeBar': False})
-
-    # 일별 PnL 바
-    st.plotly_chart(daily_bar(trades),
                     use_container_width=True, config={'displayModeBar': False})
 
 
@@ -636,28 +646,32 @@ with tab3:
     else:
         st.dataframe(sym_df, use_container_width=True, hide_index=True)
 
-    st.plotly_chart(pnl_by_strategy_bar(trades),
-                    use_container_width=True, config={'displayModeBar': False})
-
-    # 방향별 통계
-    if not trades.empty:
+    # 전략 PnL 바 + 방향별 성과 나란히
+    ch_col, dir_col = st.columns([3, 2])
+    with ch_col:
+        st.plotly_chart(pnl_by_strategy_bar(trades),
+                        use_container_width=True, config={'displayModeBar': False})
+    with dir_col:
         st.markdown('#### 방향별 성과')
-        dc1, dc2 = st.columns(2)
-        for col, direction, label in [(dc1, 'LONG', '🟢 LONG'), (dc2, 'SHORT', '🔴 SHORT')]:
-            sub = trades[trades['direction'] == direction]
-            if sub.empty:
-                col.info(f'{label} 거래 없음')
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        for direction, label in [('LONG', '🟢 LONG'), ('SHORT', '🔴 SHORT')]:
+            if trades.empty:
+                st.info(f'{label} 거래 없음')
             else:
-                wins = int((sub['pnl_usd'] > 0).sum())
-                col.markdown(
-                    f'<div class="kpi-card" style="border-color:#888">'
-                    f'<div class="kpi-label">{label}</div>'
-                    f'<div style="font-size:14px;margin-top:6px">'
-                    f'{len(sub)}건 · 승률 {wins/len(sub)*100:.0f}% · '
-                    f'${sub["pnl_usd"].sum():+.2f}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                sub = trades[trades['direction'] == direction]
+                if sub.empty:
+                    st.info(f'{label} 거래 없음')
+                else:
+                    wins = int((sub['pnl_usd'] > 0).sum())
+                    st.markdown(
+                        f'<div class="kpi-card" style="border-color:#888">'
+                        f'<div class="kpi-label">{label}</div>'
+                        f'<div style="font-size:14px;margin-top:6px">'
+                        f'{len(sub)}건 · 승률 {wins/len(sub)*100:.0f}% · '
+                        f'${sub["pnl_usd"].sum():+.2f}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
 
 # ── Tab 4: 상태 ────────────────────────────────────────────
