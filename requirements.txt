@@ -7,3 +7,6 @@ pytest>=7.0.0
 # MCP 서버
 fastmcp>=2.0.0
 paramiko>=3.0.0
+# 대시보드
+streamlit>=1.35.0
+plotly>=5.18.0
