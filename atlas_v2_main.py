@@ -86,6 +86,10 @@ from atlas_config import (
     V2_MC_CHASE_LIMIT, V2_MC_COOLDOWN, V2_MC_LIMIT_SEC,
     V2_MC_LEVERAGE, V2_MC_RISK_PCT,
     CANDLE_LIMIT_15M,
+    # Module D
+    V2_MD_SYMBOLS, V2_MD_FUNDING_ENTER, V2_MD_FUNDING_EXIT,
+    V2_MD_LEVERAGE, V2_MD_RISK_PCT, V2_MD_ATR_SL, V2_MD_ATR_PERIOD,
+    V2_MD_MAX_HOURS, V2_MD_LIMIT_SEC, V2_MD_CHECK_SEC,
 )
 from atlas_regime import (
     get_cached_regime, update_regime, regime_loop,
@@ -115,7 +119,7 @@ V2_MR_FUNDING_SHORT_MIN = -0.0005   # -0.05% 미만 → SHORT 차단
 V2_MA_FUNDING_LONG_MAX  =  0.0010
 V2_MA_FUNDING_SHORT_MIN = -0.0006
 
-ALL_V2_SYMBOLS = list(dict.fromkeys(V2_MA_SYMBOLS + V2_MR_SYMBOLS + V2_MC_SYMBOLS))
+ALL_V2_SYMBOLS = list(dict.fromkeys(V2_MA_SYMBOLS + V2_MR_SYMBOLS + V2_MC_SYMBOLS + V2_MD_SYMBOLS))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -162,6 +166,8 @@ _shared: dict = {
     'ma_cooldowns':   {},
     # Module C 쿨다운: sym → 잔여 봉수
     'mc_cooldowns':   {},
+    # Module D 쿨다운: sym → 재진입 금지 해제 timestamp
+    'md_cooldowns':   {},
 }
 
 
@@ -1634,6 +1640,197 @@ def update_corr_vol(cache: CandleCache):
         log(f'[Corr/Vol] 오류: {e}', 'error')
 
 
+# ══════════════════════════════════════════════════════════════
+#  14-D. Module D — 펀딩비 차익 (Funding Rate Harvest)
+# ══════════════════════════════════════════════════════════════
+
+def md_enter_position(sym: str) -> bool:
+    """
+    펀딩비 > V2_MD_FUNDING_ENTER 이면 SHORT 진입.
+    지정가 전용(Maker 0.02%) — 수수료 최소화.
+    """
+    strategy = 'V2_MD_SHORT'
+    ccxt_sym = sym.replace('USDT', '/USDT')
+    ex = _get_ex()
+
+    if load_position(strategy, sym) is not None:
+        return False
+
+    # 쿨다운 (직전 청산 후 1시간)
+    with _shared_lock:
+        cd_until = _shared['md_cooldowns'].get(sym, 0.0)
+    if time.time() < cd_until:
+        return False
+
+    with _shared_lock:
+        equity = _shared['equity']
+        paused = _shared['paused']
+    if paused or equity <= 0:
+        return False
+
+    if get_cached_regime().regime == REGIME_CRISIS:
+        return False
+
+    if count_open_positions() >= MAX_OPEN_POSITIONS:
+        return False
+
+    var_ok, var_reason = check_portfolio_var()
+    if not var_ok:
+        log(f'[MD 진입차단] {sym}: {var_reason}')
+        return False
+
+    # 현재 펀딩비 확인
+    fr = get_funding_rate(ccxt_sym)
+    if fr < V2_MD_FUNDING_ENTER:
+        log(f'[MD 스킵] {sym} 펀딩비 {fr:.4%} < 임계값 {V2_MD_FUNDING_ENTER:.4%}')
+        return False
+
+    entry_price = get_price(ccxt_sym)
+    if entry_price <= 0:
+        return False
+
+    # ATR 계산 (1H 캔들 기반)
+    try:
+        ohlcv = ex.fetch_ohlcv(ccxt_sym, '1h', limit=50)
+        df_h  = _ohlcv_to_df(ohlcv)
+        atr   = float(_calc_atr(df_h, V2_MD_ATR_PERIOD).iloc[-1])
+    except Exception:
+        atr = entry_price * 0.01  # fallback: 1%
+
+    if atr <= 0:
+        return False
+
+    sl_price = entry_price + atr * V2_MD_ATR_SL   # SHORT → SL 위
+    tp_price = entry_price - atr * V2_MD_ATR_SL * 3.0  # TP는 참고용 (실제 청산은 펀딩비 기준)
+
+    # 리스크 스케일링
+    regime_scale = get_risk_scale()
+    ratchet_scale = get_ratchet_scale()
+    final_risk = V2_MD_RISK_PCT * regime_scale * ratchet_scale
+    final_risk = max(0.001, min(0.03, final_risk))
+
+    qty_raw, risk_usd = calc_raw_qty(equity, entry_price, sl_price, final_risk)
+    if qty_raw <= 0:
+        return False
+
+    try:
+        qty = float(ex.amount_to_precision(ccxt_sym, qty_raw))
+    except Exception:
+        qty_prec, _ = get_qty_precision(ccxt_sym)
+        qty = round(qty_raw, qty_prec)
+
+    _, min_qty = get_qty_precision(ccxt_sym)
+    if qty < min_qty:
+        return False
+
+    # 가용 마진 사전 체크
+    try:
+        bal = ex.fetch_balance({'type': 'future'})
+        free_margin = float(bal.get('USDT', {}).get('free', 0) or 0)
+        required_margin = qty * entry_price / V2_MD_LEVERAGE * 1.05
+        if free_margin < required_margin:
+            log(f'[MD 진입차단] {sym}: 가용 마진 부족 '
+                f'(필요=${required_margin:.1f}, 가용=${free_margin:.1f})')
+            return False
+    except Exception as e:
+        log(f'[MD] 마진 체크 실패 ({e}) — 진입 계속')
+
+    set_leverage(ccxt_sym, V2_MD_LEVERAGE)
+
+    ok, fill, filled_qty, note = _limit_only_order(
+        ccxt_sym, 'sell', qty, entry_price, V2_MD_LIMIT_SEC)
+
+    if not ok or fill <= 0 or filled_qty <= 0:
+        log(f'[MD 진입스킵] {sym}: {note}')
+        return False
+
+    sl_final = fill + atr * V2_MD_ATR_SL
+    tp_final = fill - atr * V2_MD_ATR_SL * 3.0
+
+    sl_order_id = place_exchange_sl(ccxt_sym, 'short', filled_qty, sl_final)
+    save_position(strategy, sym, 'SHORT', fill, sl_final, tp_final,
+                  filled_qty, V2_MD_LEVERAGE, risk_usd, 'MD', 0.0, sl_order_id)
+
+    tg(f'[V2_MD_SHORT] {sym} SHORT 진입 (펀딩비 수집)\n'
+       f'  펀딩비: {fr:.4%}/8h  레버리지: {V2_MD_LEVERAGE}x\n'
+       f'  진입: {fill:,.4f}  SL: {sl_final:,.4f}\n'
+       f'  리스크: ${risk_usd:.1f}  최대보유: {V2_MD_MAX_HOURS}h')
+    log(f'[MD 진입] {sym} SHORT fill={fill:.4f} SL={sl_final:.4f} FR={fr:.4%}')
+    return True
+
+
+def manage_md_position(ccxt_sym: str, sym: str, pos: dict, price: float):
+    """
+    Module D 포지션 감시.
+    청산 조건: SL 히트 / 펀딩비 정상화 / 48h 초과
+    """
+    direction = pos['direction']  # 항상 SHORT
+
+    # SL 히트
+    if direction == 'SHORT' and price >= pos['sl']:
+        exit_position(ccxt_sym, pos, price, 'SL')
+        with _shared_lock:
+            _shared['md_cooldowns'][sym] = time.time() + 3600  # 1시간 쿨다운
+        return
+
+    # 보유 시간 초과
+    entry_ts = pos.get('entry_ts', '')
+    if entry_ts:
+        try:
+            et = datetime.fromisoformat(entry_ts.replace('Z', '+00:00'))
+            held_hours = (datetime.now(timezone.utc) - et).total_seconds() / 3600
+            if held_hours >= V2_MD_MAX_HOURS:
+                log(f'[MD] {sym} 최대 보유 {V2_MD_MAX_HOURS}h 초과 → 청산')
+                exit_position(ccxt_sym, pos, price, 'TIME')
+                with _shared_lock:
+                    _shared['md_cooldowns'][sym] = time.time() + 3600
+                return
+        except Exception:
+            pass
+
+    # 펀딩비 정상화 체크
+    fr = get_funding_rate(ccxt_sym)
+    if fr < V2_MD_FUNDING_EXIT:
+        log(f'[MD] {sym} 펀딩비 정상화 ({fr:.4%} < {V2_MD_FUNDING_EXIT:.4%}) → 청산')
+        exit_position(ccxt_sym, pos, price, 'FUNDING_NORM')
+        with _shared_lock:
+            _shared['md_cooldowns'][sym] = time.time() + 3600
+        return
+
+    log(f'[MD 유지] {sym} SHORT price={price:.4f} FR={fr:.4%} SL={pos["sl"]:.4f}')
+
+
+def md_symbol_loop(sym: str):
+    """Module D 심볼 루프 — 5분마다 펀딩비 확인."""
+    ccxt_sym = sym.replace('USDT', '/USDT')
+    log(f'[MD] {sym} 루프 시작')
+
+    while True:
+        if V2_KILL_SWITCH.exists():
+            break
+        try:
+            price = get_price(ccxt_sym)
+            if price <= 0:
+                time.sleep(V2_MD_CHECK_SEC)
+                continue
+
+            pos = load_position('V2_MD_SHORT', sym)
+            if pos:
+                manage_md_position(ccxt_sym, sym, pos, price)
+            else:
+                fr = get_funding_rate(ccxt_sym)
+                if fr >= V2_MD_FUNDING_ENTER:
+                    log(f'[MD] {sym} 펀딩비 {fr:.4%} — 진입 시도')
+                    md_enter_position(sym)
+                else:
+                    log(f'[MD 스킵] {sym} 펀딩비 {fr:.4%} < 임계값 {V2_MD_FUNDING_ENTER:.4%}')
+
+        except Exception as e:
+            log(f'[MD] {sym} 오류: {e}', 'error')
+
+        time.sleep(V2_MD_CHECK_SEC)
+
+
 def corr_vol_loop(cache: CandleCache):
     while True:
         update_corr_vol(cache)
@@ -1868,7 +2065,8 @@ def main():
         log(f'[초기화] 레짐 조회 실패: {e}', 'warning')
 
     tg(f'*ATLAS v2 봇 시작*\n{get_cached_regime().summary()}\n'
-       f'MA 심볼: {V2_MA_SYMBOLS}\nMR 심볼: {V2_MR_SYMBOLS}\nMC 심볼: {V2_MC_SYMBOLS}')
+       f'MA: {V2_MA_SYMBOLS}\nMR: {V2_MR_SYMBOLS}\n'
+       f'MC: {V2_MC_SYMBOLS}\nMD: {V2_MD_SYMBOLS}')
 
     # 스레드 기동
     threads = []
@@ -1894,10 +2092,14 @@ def main():
     for sym in V2_MC_SYMBOLS:
         _t(mc_symbol_loop, f'MC_{sym}', sym, cache)
 
+    for sym in V2_MD_SYMBOLS:
+        _t(md_symbol_loop, f'MD_{sym}', sym)
+
     log(f'[ATLAS v2] 스레드 {len(threads)}개 기동')
     log(f'  Module A 4H : {V2_MA_SYMBOLS}')
     log(f'  Module B 1D : {V2_MR_SYMBOLS}')
     log(f'  Module C 15m: {V2_MC_SYMBOLS}')
+    log(f'  Module D FR : {V2_MD_SYMBOLS}')
 
     try:
         while True:
