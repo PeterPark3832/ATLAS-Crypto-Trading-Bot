@@ -1,5 +1,5 @@
 """
-ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 1)
+ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 2)
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
 import os, time, secrets, sqlite3, subprocess
@@ -92,6 +92,76 @@ def _metrics(df: pd.DataFrame) -> dict:
                 pf=pf,avg_r=round(float(df['pnl_r'].mean()),3),
                 mdd_pct=round(mdd_p,1),mdd_usd=round(mdd_u,2),
                 sharpe=sharpe,equity=round(INITIAL_CAPITAL+pnl,2))
+
+# ── Stage 2: 리스크 지표 ─────────────────────────────────────────
+
+def _ratchet_scale(mdd_pct: float) -> dict:
+    """현재 MDD 기반 Ratchet 배율 계산 (봇과 동일 로직)."""
+    if mdd_pct >= 7.0:
+        scale, label = 0.4, '낙폭 7%+ → 리스크 40%'
+    elif mdd_pct >= 5.0:
+        scale, label = 0.7, '낙폭 5%+ → 리스크 70%'
+    else:
+        scale, label = 1.0, '정상'
+    return {'scale': scale, 'label': label, 'mdd': round(mdd_pct, 1)}
+
+def _kelly_stats(df: pd.DataFrame) -> list:
+    """전략별 Half-Kelly 배율 계산."""
+    if df.empty:
+        return []
+    rows = []
+    for strat, g in df.groupby('strategy'):
+        t  = len(g)
+        w  = int((g['pnl_usd'] > 0).sum())
+        wr = w / t if t > 0 else 0
+        rr = float(g['rr'].mean()) if 'rr' in g.columns and not g['rr'].isna().all() else 2.0
+        full_k  = max(0.0, wr - (1 - wr) / rr) if rr > 0 else 0.0
+        half_k  = full_k * 0.5
+        rows.append({
+            'strategy':  strat,
+            'trades':    t,
+            'wr':        round(wr * 100, 1),
+            'rr':        round(rr, 2),
+            'full_k':    round(full_k * 100, 1),
+            'half_k':    round(half_k * 100, 1),
+            'reliable':  t >= 20,
+        })
+    return sorted(rows, key=lambda x: x['trades'], reverse=True)
+
+def _rolling_wr(df: pd.DataFrame, n: int = 10) -> list:
+    """최근 N건 이동 승률."""
+    if df.empty or len(df) < 2:
+        return []
+    df  = df.sort_values('exit_ts')
+    wins = (df['pnl_usd'] > 0).astype(int).values
+    result = []
+    for i in range(len(wins)):
+        start  = max(0, i - n + 1)
+        window = wins[start:i + 1]
+        ts_val = df.iloc[i]['exit_ts']
+        result.append({
+            'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
+            'wr': round(float(window.mean()) * 100, 1),
+            'n':  len(window),
+        })
+    return result
+
+def _dd_curve(df: pd.DataFrame) -> list:
+    """수익 곡선 기준 Drawdown % 시계열."""
+    if df.empty:
+        return []
+    df  = df.sort_values('exit_ts').reset_index(drop=True)
+    cum = df['pnl_usd'].cumsum().values
+    peak = np.maximum.accumulate(cum)
+    dd   = (peak - cum) / INITIAL_CAPITAL * 100
+    result = []
+    for i, row in df.iterrows():
+        ts_val = row['exit_ts']
+        result.append({
+            'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
+            'dd': round(float(dd[i]), 2),
+        })
+    return result
 
 # ── 봇 상태 ──────────────────────────────────────────────────────
 def _bot_alive() -> bool:
@@ -245,6 +315,12 @@ async def dashboard(token: str, period: int = 0):
     # 심볼×방향
     sym_dir = _sym_dir_stats(df)
 
+    # Stage 2: 리스크 지표
+    ratchet    = _ratchet_scale(m['mdd_pct'])
+    kelly      = _kelly_stats(df)
+    rolling_wr = _rolling_wr(df, n=10)
+    dd_curve   = _dd_curve(df)
+
     # 최근 거래 50건
     recent = []
     if not df.empty:
@@ -320,6 +396,10 @@ async def dashboard(token: str, period: int = 0):
             'sym_dir':     sym_dir,
             'recent':      recent,
             'open_pos':    open_pos,
+            'ratchet':     ratchet,
+            'kelly':       kelly,
+            'rolling_wr':  rolling_wr,
+            'dd_curve':    dd_curve,
             'refresh_sec': REFRESH_SEC,
             'updated_at':  datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 

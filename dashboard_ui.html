@@ -190,6 +190,30 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 /* ── 구분선 ── */
 .divider{height:1px;background:var(--border);margin:16px 0}
 
+/* ── Stage 2: 리스크 카드 ── */
+.risk-card{background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;display:flex;flex-direction:column;gap:12px}
+.risk-row{display:flex;align-items:center;justify-content:space-between}
+.risk-label{font-size:11px;color:var(--dim2);text-transform:uppercase;letter-spacing:.6px}
+.risk-val{font-size:22px;font-weight:700;letter-spacing:-0.5px}
+.risk-sub{font-size:11px;color:var(--dim2);margin-top:2px}
+.scale-bar{height:6px;background:rgba(255,255,255,0.06);border-radius:3px;margin-top:6px;overflow:hidden}
+.scale-fill{height:100%;border-radius:3px;transition:width .4s ease}
+.kelly-row{display:flex;align-items:center;justify-content:space-between;
+  padding:7px 10px;background:rgba(255,255,255,0.03);border-radius:6px;
+  border:1px solid var(--border)}
+.kelly-strat{font-size:11px;color:var(--dim2);flex:1}
+.kelly-stats{display:flex;gap:12px;font-size:12px;font-weight:600}
+
+/* ── Stage 2: 거래 필터 ── */
+.trade-filter{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+.filter-label{font-size:11px;color:var(--dim2);margin-right:4px}
+.filter-btn{background:var(--card2);border:1px solid var(--border);color:var(--dim2);
+  padding:4px 10px;border-radius:5px;font-size:11px;font-weight:500;transition:all .15s}
+.filter-btn:hover{color:var(--text);border-color:var(--border2)}
+.filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.filter-sep{width:1px;height:16px;background:var(--border);margin:0 2px}
+
 /* ═══ 모바일 ═══ */
 @media(max-width:900px){
   .grid-3-2,.grid-2-1{grid-template-columns:1fr}
@@ -314,6 +338,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 
     <!-- ── Overview ── -->
     <div id="tab-overview" class="tab-content active">
+      <!-- 수익 곡선 + 일별 PnL -->
       <div class="grid-3-2">
         <div class="card">
           <div class="card-hdr">
@@ -325,6 +350,44 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         <div class="card">
           <div class="card-hdr"><span class="card-title">일별 PnL (최근 30일)</span></div>
           <div class="chart-wrap h240"><canvas id="daily-chart"></canvas></div>
+        </div>
+      </div>
+      <!-- Rolling WR + 리스크 카드 -->
+      <div class="grid-3-2">
+        <div class="card">
+          <div class="card-hdr">
+            <span class="card-title">Rolling 승률 (최근 10건)</span>
+            <span class="card-badge" style="color:var(--dim2)">이동 평균</span>
+          </div>
+          <div class="chart-wrap h200"><canvas id="wr-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">리스크 상태</span></div>
+          <div class="risk-card" id="risk-card">
+            <!-- Ratchet -->
+            <div>
+              <div class="risk-row">
+                <div>
+                  <div class="risk-label">Drawdown Ratchet</div>
+                  <div class="risk-val" id="ratchet-scale">1.0x</div>
+                  <div class="risk-sub" id="ratchet-label">—</div>
+                </div>
+                <div style="text-align:right">
+                  <div class="risk-label">현재 MDD</div>
+                  <div style="font-size:18px;font-weight:700" id="ratchet-mdd">—</div>
+                </div>
+              </div>
+              <div class="scale-bar">
+                <div class="scale-fill" id="ratchet-bar"></div>
+              </div>
+            </div>
+            <div class="divider" style="margin:4px 0"></div>
+            <!-- Kelly -->
+            <div>
+              <div class="risk-label" style="margin-bottom:8px">Half-Kelly 배율 (전략별)</div>
+              <div id="kelly-rows"><div style="color:var(--dim2);font-size:12px">데이터 없음</div></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -359,6 +422,14 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         </div>
         <div class="tbl-wrap" id="sym-dir-table"><div class="empty">데이터 없음</div></div>
       </div>
+      <!-- DD 차트 -->
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">Drawdown 시계열</span>
+          <span class="card-badge" style="color:var(--red)">낙폭 %</span>
+        </div>
+        <div class="chart-wrap h200"><canvas id="dd-chart"></canvas></div>
+      </div>
     </div>
 
     <!-- ── 거래 내역 ── -->
@@ -366,7 +437,26 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       <div class="card">
         <div class="card-hdr">
           <span class="card-title">최근 거래</span>
-          <span class="card-badge">최근 50건</span>
+          <span class="card-badge" id="trade-count-badge">50건</span>
+        </div>
+        <!-- 필터 -->
+        <div class="trade-filter">
+          <span class="filter-label">방향</span>
+          <button class="filter-btn active" data-filter="dir" data-val="ALL" onclick="setTradeFilter('dir','ALL',this)">전체</button>
+          <button class="filter-btn" data-filter="dir" data-val="LONG" onclick="setTradeFilter('dir','LONG',this)">🟢 LONG</button>
+          <button class="filter-btn" data-filter="dir" data-val="SHORT" onclick="setTradeFilter('dir','SHORT',this)">🔴 SHORT</button>
+          <div class="filter-sep"></div>
+          <span class="filter-label">심볼</span>
+          <button class="filter-btn active" data-filter="sym" data-val="ALL" onclick="setTradeFilter('sym','ALL',this)">전체</button>
+          <button class="filter-btn" data-filter="sym" data-val="BTC" onclick="setTradeFilter('sym','BTC',this)">BTC</button>
+          <button class="filter-btn" data-filter="sym" data-val="ETH" onclick="setTradeFilter('sym','ETH',this)">ETH</button>
+          <button class="filter-btn" data-filter="sym" data-val="SOL" onclick="setTradeFilter('sym','SOL',this)">SOL</button>
+          <button class="filter-btn" data-filter="sym" data-val="BNB" onclick="setTradeFilter('sym','BNB',this)">BNB</button>
+          <div class="filter-sep"></div>
+          <span class="filter-label">사유</span>
+          <button class="filter-btn active" data-filter="reason" data-val="ALL" onclick="setTradeFilter('reason','ALL',this)">전체</button>
+          <button class="filter-btn" data-filter="reason" data-val="TP" onclick="setTradeFilter('reason','TP',this)">TP</button>
+          <button class="filter-btn" data-filter="reason" data-val="SL" onclick="setTradeFilter('reason','SL',this)">SL</button>
         </div>
         <div class="tbl-wrap" id="trades-table"><div class="empty">거래 내역 없음</div></div>
       </div>
@@ -378,8 +468,10 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <script>
 let TOKEN = localStorage.getItem('atlas_token') || '';
 let currentPeriod = 0;
-let eqChart = null, dailyChart = null, modChart = null;
+let eqChart = null, dailyChart = null, modChart = null, wrChart = null, ddChart = null;
 let refreshTimer = null, countdownTimer = null, countdownVal = 60;
+let allTrades = [];
+let tradeFilters = {dir:'ALL', sym:'ALL', reason:'ALL'};
 
 // ── 인증 ──────────────────────────────────────────────────────
 async function doLogin() {
@@ -483,7 +575,12 @@ function render(d) {
   renderModuleTable(d.module_stats);
   renderSymDirTable(d.sym_dir || []);
   renderPositions(d.open_pos || []);
-  renderTrades(d.recent || []);
+  // Stage 2
+  renderWRChart(d.rolling_wr || []);
+  renderDDChart(d.dd_curve || []);
+  renderRiskCard(d.ratchet, d.kelly || []);
+  allTrades = d.recent || [];
+  applyTradeFilters();
 }
 
 // ── 봇 상태 ──────────────────────────────────────────────────
@@ -757,15 +854,32 @@ async function renderPositions(pos) {
   </table>`;
 }
 
-// ── 거래 테이블 ───────────────────────────────────────────────
+// ── 거래 필터 ─────────────────────────────────────────────────
+function setTradeFilter(type, val, btn) {
+  tradeFilters[type] = val;
+  document.querySelectorAll(`[data-filter="${type}"]`).forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyTradeFilters();
+}
+
+function applyTradeFilters() {
+  let trades = allTrades;
+  if (tradeFilters.dir !== 'ALL')
+    trades = trades.filter(t => t.direction === tradeFilters.dir);
+  if (tradeFilters.sym !== 'ALL')
+    trades = trades.filter(t => t.symbol.includes(tradeFilters.sym));
+  if (tradeFilters.reason !== 'ALL')
+    trades = trades.filter(t => t.reason === tradeFilters.reason);
+  document.getElementById('trade-count-badge').textContent = `${trades.length}건`;
+  renderTrades(trades);
+}
+
 function renderTrades(trades) {
   const el = document.getElementById('trades-table');
-  if (!trades.length) { el.innerHTML='<div class="empty">거래 내역 없음</div>'; return; }
+  if (!trades.length) { el.innerHTML='<div class="empty">조건에 맞는 거래 없음</div>'; return; }
   const reasonTag = r => {
-    if(r==='TP') return 'tag-tp';
-    if(r==='SL') return 'tag-sl';
-    if(r==='TIME') return 'tag-time';
-    return 'tag-fn';
+    if(r==='TP') return 'tag-tp'; if(r==='SL') return 'tag-sl';
+    if(r==='TIME') return 'tag-time'; return 'tag-fn';
   };
   el.innerHTML = `<table>
     <thead><tr>
@@ -786,6 +900,110 @@ function renderTrades(trades) {
       <td class="td-dim">${t.regime||'—'}</td>
     </tr>`).join('')}</tbody>
   </table>`;
+}
+
+// ── Rolling WR 차트 ──────────────────────────────────────────
+function renderWRChart(data) {
+  const ctx = document.getElementById('wr-chart').getContext('2d');
+  if (wrChart) wrChart.destroy();
+  if (!data || data.length < 2) return;
+
+  const labels = data.map((d, i) => i + 1);
+  const values = data.map(d => d.wr);
+  const grad   = ctx.createLinearGradient(0, 0, 0, 200);
+  grad.addColorStop(0, 'rgba(79,142,247,0.25)');
+  grad.addColorStop(1, 'rgba(79,142,247,0.0)');
+
+  wrChart = new Chart(ctx, {type:'line', data:{
+    labels,
+    datasets:[
+      {data:values, borderColor:'#4f8ef7', borderWidth:2,
+       fill:true, backgroundColor:grad,
+       pointRadius:3, pointBackgroundColor:'#4f8ef7', tension:0.4},
+      {data:Array(values.length).fill(33.3),
+       borderColor:'rgba(244,63,94,0.4)', borderWidth:1,
+       borderDash:[4,4], pointRadius:0, fill:false},
+      {data:Array(values.length).fill(40),
+       borderColor:'rgba(16,185,129,0.4)', borderWidth:1,
+       borderDash:[4,4], pointRadius:0, fill:false},
+    ]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{
+          title: items => `거래 #${items[0].dataIndex+1}`,
+          label: ctx => ctx.datasetIndex===0 ? `승률 ${ctx.parsed.y.toFixed(1)}%` : null,
+          filter: item => item.datasetIndex === 0,
+        }}},
+    scales:{...DARK.scales,
+      x:{...DARK.scales.x, title:{display:true,text:'거래 순서',color:'#4a5568',font:{size:10}}},
+      y:{...DARK.scales.y,
+         min:0, max:100,
+         ticks:{...DARK.scales.y.ticks, callback:v=>`${v}%`}}}}});
+}
+
+// ── DD 차트 ──────────────────────────────────────────────────
+function renderDDChart(data) {
+  const ctx = document.getElementById('dd-chart').getContext('2d');
+  if (ddChart) ddChart.destroy();
+  if (!data || data.length < 2) return;
+
+  const labels = data.map(d => {
+    if (!d.ts) return '';
+    const dt = new Date(d.ts);
+    return `${String(dt.getMonth()+1).padStart(2,'0')}/${String(dt.getDate()).padStart(2,'0')}`;
+  });
+  const values = data.map(d => d.dd);
+  const grad   = ctx.createLinearGradient(0, 0, 0, 200);
+  grad.addColorStop(0, 'rgba(244,63,94,0.3)');
+  grad.addColorStop(1, 'rgba(244,63,94,0.0)');
+
+  ddChart = new Chart(ctx, {type:'line', data:{
+    labels,
+    datasets:[{data:values, borderColor:'#f43f5e', borderWidth:1.5,
+      fill:true, backgroundColor:grad, pointRadius:0, tension:0.35}]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{label:c=>`낙폭 ${c.parsed.y.toFixed(2)}%`}}},
+    scales:{...DARK.scales,
+      y:{...DARK.scales.y,
+         reverse:true, min:0,
+         ticks:{...DARK.scales.y.ticks, callback:v=>`${v.toFixed(0)}%`}}}}});
+}
+
+// ── 리스크 카드 ──────────────────────────────────────────────
+function renderRiskCard(ratchet, kelly) {
+  if (!ratchet) return;
+
+  // Ratchet
+  const rColor = ratchet.scale >= 1.0 ? 'var(--green)' : ratchet.scale >= 0.7 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('ratchet-scale').textContent = `${ratchet.scale.toFixed(1)}x`;
+  document.getElementById('ratchet-scale').style.color = rColor;
+  document.getElementById('ratchet-label').textContent = ratchet.label;
+  document.getElementById('ratchet-mdd').textContent = `${ratchet.mdd}%`;
+  document.getElementById('ratchet-mdd').style.color = rColor;
+  const bar = document.getElementById('ratchet-bar');
+  bar.style.width  = `${ratchet.scale * 100}%`;
+  bar.style.background = rColor;
+
+  // Kelly
+  const kellyEl = document.getElementById('kelly-rows');
+  if (!kelly || !kelly.length) {
+    kellyEl.innerHTML = '<div style="color:var(--dim2);font-size:12px">거래 데이터 없음</div>';
+    return;
+  }
+  kellyEl.innerHTML = kelly.slice(0, 6).map(k => {
+    const hkColor = k.half_k > 3 ? 'var(--green)' : k.half_k > 0 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="kelly-row">
+      <span class="kelly-strat">${k.strategy.replace('V2_','')}</span>
+      <div class="kelly-stats">
+        <span style="color:var(--dim2)">${k.trades}건</span>
+        <span style="color:var(--dim2)">${k.wr}%</span>
+        <span style="color:${hkColor}">½K ${k.half_k}%</span>
+      </div>
+    </div>`;
+  }).join('');
 }
 </script>
 </body>
