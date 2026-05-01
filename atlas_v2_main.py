@@ -1035,22 +1035,47 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         log(f'[MA 스킵] {sym} ADX={adx_curr:.1f} < 기준{V2_MA_ADX_MIN} (추세 약함) | 레짐={regime}')
         return
 
-    # EMA 크로스오버 감지
+    low_prev  = float(row_prev['low'])
+    high_prev = float(row_prev['high'])
+
+    # ── 신호 A: EMA 크로스오버 ──────────────────────────────────
     long_cross  = (ema20_prev <= ema50_prev) and (ema20_curr > ema50_curr)
     short_cross = (ema20_prev >= ema50_prev) and (ema20_curr < ema50_curr)
-    if not long_cross and not short_cross:
+
+    # ── 신호 B: EMA20 눌림목 (추세 중 되돌림 후 반등/거부) ──────
+    # LONG: EMA20>EMA50 (상승추세) + 전봉 저점이 EMA20 터치 + 현봉 종가가 EMA20 위 (반등 확인)
+    # SHORT: EMA20<EMA50 (하락추세) + 전봉 고점이 EMA20 터치 + 현봉 종가가 EMA20 아래 (거부 확인)
+    long_pb  = (ema20_curr > ema50_curr and
+                low_prev   <= ema20_prev and
+                close_curr  > ema20_curr)
+    short_pb = (ema20_curr < ema50_curr and
+                high_prev  >= ema20_prev and
+                close_curr  < ema20_curr)
+
+    # 신호 없으면 스킵
+    if not (long_cross or short_cross or long_pb or short_pb):
         gap = (ema20_curr - ema50_curr) / ema50_curr * 100
-        log(f'[MA 스킵] {sym} EMA크로스 없음 (EMA20-50 갭={gap:+.3f}%) ADX={adx_curr:.1f} | 레짐={regime}')
+        log(f'[MA 스킵] {sym} 크로스/눌림목 없음 (EMA갭={gap:+.3f}%) ADX={adx_curr:.1f} | 레짐={regime}')
         return
 
-    direction = 'LONG' if long_cross else 'SHORT'
+    # 방향 결정 (크로스오버 > 눌림목 우선순위, 신호 충돌 시 스킵)
+    if long_cross:
+        direction, sig_type = 'LONG',  'CROSS'
+    elif short_cross:
+        direction, sig_type = 'SHORT', 'CROSS'
+    elif long_pb and not short_pb:
+        direction, sig_type = 'LONG',  'PULLBACK'
+    elif short_pb and not long_pb:
+        direction, sig_type = 'SHORT', 'PULLBACK'
+    else:
+        return  # 신호 충돌
 
     # 레짐-방향 필터
     if direction == 'LONG' and regime == REGIME_TRENDING_DOWN:
-        log(f'[MA 스킵] {sym} LONG 신호이나 레짐=TRENDING_DOWN — 방향 불일치')
+        log(f'[MA 스킵] {sym} {sig_type} LONG이나 레짐=TRENDING_DOWN — 방향 불일치')
         return
     if direction == 'SHORT' and regime == REGIME_TRENDING_UP:
-        log(f'[MA 스킵] {sym} SHORT 신호이나 레짐=TRENDING_UP — 방향 불일치')
+        log(f'[MA 스킵] {sym} {sig_type} SHORT이나 레짐=TRENDING_UP — 방향 불일치')
         return
 
     # EMA200 방향 필터 (심볼별 자체)
@@ -1083,6 +1108,7 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         tp_price = entry_price - atr_curr * V2_MA_ATR_SL * 2.0
 
     strategy = strategy_long if direction == 'LONG' else strategy_short
+    log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} 레짐={regime}')
     enter_position(ccxt_sym, strategy, sym, direction, 'MA', 2.0,
                    entry_price, sl_price, tp_price,
                    V2_MA_LEVERAGE, V2_MA_RISK_PCT)
@@ -1183,10 +1209,10 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
             load_position(strategy_short, sym) is not None):
         return
 
-    # RANGING 전용
+    # RANGING + WEAK_TREND 허용 (RANGING 전용 → 약추세 포함으로 확장)
     regime = get_cached_regime().regime
-    if regime != REGIME_RANGING:
-        log(f'[MR 스킵] {sym} 레짐={regime} (RANGING 필요 — 대기 중)')
+    if regime not in (REGIME_RANGING, REGIME_WEAK_TREND):
+        log(f'[MR 스킵] {sym} 레짐={regime} (RANGING/WEAK_TREND 필요 — 대기 중)')
         return
 
     if len(df) < 3:
@@ -1194,9 +1220,12 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
     row      = df.iloc[-1]
     row_prev = df.iloc[-2]
 
-    rsi_curr = float(row['rsi'])      if not pd.isna(row['rsi'])      else 50.0
-    rsi_prev = float(row_prev['rsi']) if not pd.isna(row_prev['rsi']) else 50.0
-    atr      = float(row['atr'])      if not pd.isna(row['atr'])      else 0.0
+    rsi_curr   = float(row['rsi'])      if not pd.isna(row['rsi'])      else 50.0
+    rsi_prev   = float(row_prev['rsi']) if not pd.isna(row_prev['rsi']) else 50.0
+    atr        = float(row['atr'])      if not pd.isna(row['atr'])      else 0.0
+    close_curr = float(row['close'])
+    bb_upper   = float(row['bb_upper']) if not pd.isna(row['bb_upper']) else 0.0
+    bb_lower   = float(row['bb_lower']) if not pd.isna(row['bb_lower']) else 0.0
 
     if atr <= 0:
         return
@@ -1210,6 +1239,20 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
 
     if direction is None:
         log(f'[MR 스킵] {sym} RSI 크로스 없음 (RSI={rsi_curr:.1f}, 기준 L<{V2_MR_RSI_LONG}/S>{V2_MR_RSI_SHORT})')
+        return
+
+    # BB 위치 필터 — 단일 RSI 신호 약점 보완
+    # LONG: 종가가 BB 하단 근처여야 함 (과매도 극단 확인)
+    # SHORT: 종가가 BB 상단 근처여야 함 (과매수 극단 확인)
+    # WEAK_TREND는 완화 적용 (BB 폭이 좁을 수 있음)
+    bb_tolerance = 0.02 if regime == REGIME_RANGING else 0.03
+    if direction == 'LONG' and bb_lower > 0 and close_curr > bb_lower * (1 + bb_tolerance):
+        log(f'[MR 스킵] {sym} LONG BB 미충족 '
+            f'(종가={close_curr:.2f} > BB하단×{1+bb_tolerance:.3f}={bb_lower*(1+bb_tolerance):.2f})')
+        return
+    if direction == 'SHORT' and bb_upper > 0 and close_curr < bb_upper * (1 - bb_tolerance):
+        log(f'[MR 스킵] {sym} SHORT BB 미충족 '
+            f'(종가={close_curr:.2f} < BB상단×{1-bb_tolerance:.3f}={bb_upper*(1-bb_tolerance):.2f})')
         return
 
     # 펀딩비 필터
@@ -1497,61 +1540,83 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
     if atr <= 0 or vol_avg <= 0:
         return
 
-    # 거래량 스파이크 필터 (직전 완성 캔들 기준)
     vol_ratio = prev_vol / vol_avg if vol_avg > 0 else 0.0
-    if prev_vol <= vol_avg * V2_MC_VOL_MULT:
-        log(f'[MC 스킵] {sym} 볼륨 미충족 ({vol_ratio:.2f}x < {V2_MC_VOL_MULT}x) '
-            f'| 고={prev_high:.4f} 저={prev_low:.4f} 종={cur_close:.4f} | 레짐={regime}')
-        return
-
-    # HTF EMA 방향 필터 (0이면 데이터 없음 → 필터 면제)
-    htf_up   = htf_ema <= 0 or cur_close > htf_ema
-    htf_down = htf_ema <= 0 or cur_close < htf_ema
-
-    # 돌파 신호
-    long_break  = cur_close > prev_high and htf_up
-    short_break = cur_close < prev_low  and htf_down
-
-    # 레짐 방향 제한
-    if regime == REGIME_TRENDING_UP:
-        short_break = False
-    elif regime == REGIME_TRENDING_DOWN:
-        long_break = False
-
-    direction     = None
+    htf_up    = htf_ema <= 0 or cur_close > htf_ema
+    htf_down  = htf_ema <= 0 or cur_close < htf_ema
+    direction      = None
     breakout_level = 0.0
-    if long_break:
-        direction      = 'LONG'
-        breakout_level = prev_high
-    elif short_break:
-        direction      = 'SHORT'
-        breakout_level = prev_low
+    sig_type       = 'BREAKOUT'
+
+    # ── 신호 A: 즉시 브레이크아웃 (거래량 스파이크 필요) ─────────
+    if prev_vol > vol_avg * V2_MC_VOL_MULT:
+        long_break  = cur_close > prev_high and htf_up
+        short_break = cur_close < prev_low  and htf_down
+        if regime == REGIME_TRENDING_UP:   short_break = False
+        elif regime == REGIME_TRENDING_DOWN: long_break = False
+
+        if long_break:
+            direction = 'LONG';  breakout_level = prev_high
+        elif short_break:
+            direction = 'SHORT'; breakout_level = prev_low
+
+    # ── 신호 B: 브레이크아웃 리테스트 (2~4봉 전 돌파 레벨 복귀) ─
+    # 현재 캔들 거래량 조건 없음 — 돌파 당시 거래량으로 유효성 판단
+    if direction is None and len(df_15m) >= 6:
+        for lb in range(2, 5):
+            r_break = df_15m.iloc[-lb]
+            r_base  = df_15m.iloc[-lb - 1]
+            bo_vol    = float(r_break['volume'])
+            base_vavg = float(r_base['vol_avg']) if not pd.isna(r_base['vol_avg']) else 0.0
+            if base_vavg <= 0 or bo_vol <= base_vavg * V2_MC_VOL_MULT:
+                continue  # 해당 봉은 거래량 스파이크 없음 → 스킵
+
+            base_high = float(r_base['high'])
+            base_low  = float(r_base['low'])
+
+            # LONG 리테스트: 돌파 봉이 전봉 고점 위로 닫힘 + 현재가가 그 레벨 근처
+            if (float(r_break['close']) > base_high and htf_up and
+                    regime != REGIME_TRENDING_DOWN and
+                    base_high * 0.998 <= cur_close <= base_high * 1.004):
+                direction = 'LONG'; breakout_level = base_high; sig_type = 'RETEST'
+                break
+
+            # SHORT 리테스트: 돌파 봉이 전봉 저점 아래로 닫힘 + 현재가가 그 레벨 근처
+            if (float(r_break['close']) < base_low and htf_down and
+                    regime != REGIME_TRENDING_UP and
+                    base_low * 0.996 <= cur_close <= base_low * 1.002):
+                direction = 'SHORT'; breakout_level = base_low; sig_type = 'RETEST'
+                break
 
     if direction is None:
-        htf_str = f'HTF_EMA={htf_ema:.2f}' if htf_ema > 0 else 'HTF=없음'
-        log(f'[MC 스킵] {sym} 돌파 없음 (종={cur_close:.4f} 고={prev_high:.4f} 저={prev_low:.4f}) '
-            f'볼륨={vol_ratio:.2f}x {htf_str} | 레짐={regime}')
+        htf_str = f'HTF={htf_ema:.2f}' if htf_ema > 0 else 'HTF=없음'
+        log(f'[MC 스킵] {sym} 볼륨({vol_ratio:.2f}x) 브레이크아웃/리테스트 없음 '
+            f'(종={cur_close:.4f}) {htf_str} | 레짐={regime}')
         return
 
-    # 추격 거리 필터 — 슬리피지 제한 핵심 로직
-    if direction == 'LONG':
-        if cur_close > breakout_level * (1 + V2_MC_CHASE_LIMIT):
+    # 추격 거리 필터 — 리테스트는 레벨 근처 진입이므로 추격 필터 면제
+    if sig_type == 'BREAKOUT':
+        if direction == 'LONG' and cur_close > breakout_level * (1 + V2_MC_CHASE_LIMIT):
             log(f'[MC] {sym} LONG 추격 초과 ({cur_close:.4f} > {breakout_level*(1+V2_MC_CHASE_LIMIT):.4f})')
             return
-        entry_sig = breakout_level * (1 + LIMIT_OFFSET_PCT)
-        sl_price  = entry_sig - atr * V2_MC_ATR_SL
-        tp_price  = entry_sig + atr * V2_MC_ATR_SL * V2_MC_RR
-    else:
-        if cur_close < breakout_level * (1 - V2_MC_CHASE_LIMIT):
+        if direction == 'SHORT' and cur_close < breakout_level * (1 - V2_MC_CHASE_LIMIT):
             log(f'[MC] {sym} SHORT 추격 초과 ({cur_close:.4f} < {breakout_level*(1-V2_MC_CHASE_LIMIT):.4f})')
             return
+
+    # SL/TP 계산 (리테스트는 SL 0.8× 적용 — 레벨 복귀 시점이라 더 타이트하게)
+    sl_mult = V2_MC_ATR_SL if sig_type == 'BREAKOUT' else V2_MC_ATR_SL * 0.8
+    if direction == 'LONG':
+        entry_sig = breakout_level * (1 + LIMIT_OFFSET_PCT)
+        sl_price  = entry_sig - atr * sl_mult
+        tp_price  = entry_sig + atr * sl_mult * V2_MC_RR
+    else:
         entry_sig = breakout_level * (1 - LIMIT_OFFSET_PCT)
-        sl_price  = entry_sig + atr * V2_MC_ATR_SL
-        tp_price  = entry_sig - atr * V2_MC_ATR_SL * V2_MC_RR
+        sl_price  = entry_sig + atr * sl_mult
+        tp_price  = entry_sig - atr * sl_mult * V2_MC_RR
 
     leverage = V2_MC_LEVERAGE.get(sym, 3)
     risk_pct = V2_MC_RISK_PCT.get(sym, 0.008)
     strategy = strategy_long if direction == 'LONG' else strategy_short
+    log(f'[MC 신호] {sym} {direction} {sig_type} 레벨={breakout_level:.4f} | 레짐={regime}')
 
     mc_enter_position(ccxt_sym, strategy, sym, direction,
                       entry_sig, sl_price, tp_price, leverage, risk_pct)
