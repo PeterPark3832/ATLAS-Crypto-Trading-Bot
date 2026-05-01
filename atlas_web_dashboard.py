@@ -171,9 +171,6 @@ async def dashboard(token: str, period: int = 0):
     if not df.empty:
         s = df.sort_values('exit_ts',ascending=False)
         is_win = float(s.iloc[0]['pnl_usd']) > 0
-        cnt = sum(1 for _,r in s.iterrows() if (float(r['pnl_usd'])>0)==is_win
-                  else (setattr(s,'_stop',True) or False))
-        # simpler streak
         cnt = 0
         for _, r in s.iterrows():
             if (float(r['pnl_usd'])>0) == is_win: cnt+=1
