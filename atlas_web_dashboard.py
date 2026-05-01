@@ -1,10 +1,10 @@
 """
-ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 2)
+ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 3)
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import os, time, secrets, sqlite3, subprocess
+import os, time, secrets, sqlite3, subprocess, logging
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -15,12 +15,29 @@ from fastapi.responses import HTMLResponse
 
 load_dotenv(Path(__file__).parent / '.env')
 
-DB_FILE         = Path(os.getenv('DB_FILE', str(Path(__file__).parent / 'state' / 'atlas_v2.db')))
-LOG_DIR         = Path(os.getenv('REMOTE_LOG_DIR', str(Path(__file__).parent / 'logs')))
-INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
-DASH_PASSWORD   = os.getenv('DASH_PASSWORD', 'atlas2026')
-REFRESH_SEC     = int(os.getenv('DASH_REFRESH_SEC', '60'))
-HTML_PATH       = Path(__file__).parent / 'dashboard_ui.html'
+DB_FILE            = Path(os.getenv('DB_FILE', str(Path(__file__).parent / 'state' / 'atlas_v2.db')))
+LOG_DIR            = Path(os.getenv('REMOTE_LOG_DIR', str(Path(__file__).parent / 'logs')))
+BOT_DIR            = Path(__file__).parent
+INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '1000'))
+DASH_PASSWORD      = os.getenv('DASH_PASSWORD', 'atlas2026')
+REFRESH_SEC        = int(os.getenv('DASH_REFRESH_SEC', '60'))
+BINANCE_API_KEY    = os.getenv('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
+TG_TOKEN           = os.getenv('TG_TOKEN', '')
+TG_CHAT_ID         = os.getenv('TG_CHAT_ID', '')
+KILL_SWITCH        = Path('/tmp/ATLAS_V2_STOP')
+HTML_PATH          = BOT_DIR / 'dashboard_ui.html'
+
+# ── 로깅 ─────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(str(LOG_DIR / 'dashboard_errors.log'), encoding='utf-8'),
+        logging.StreamHandler(),
+    ]
+)
+log = logging.getLogger(__name__)
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
@@ -43,6 +60,18 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
+# ── Telegram ──────────────────────────────────────────────────────
+def _tg(msg: str):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
+            data={'chat_id': TG_CHAT_ID, 'text': msg}, timeout=8
+        )
+    except Exception as e:
+        log.error(f'TG 전송 실패: {e}')
+
 # ── DB ───────────────────────────────────────────────────────────
 def _q(sql: str, params=()) -> pd.DataFrame:
     if not DB_FILE.exists():
@@ -52,13 +81,14 @@ def _q(sql: str, params=()) -> pd.DataFrame:
         df  = pd.read_sql_query(sql, con, params=params)
         con.close()
         return df
-    except Exception:
+    except Exception as e:
+        log.error(f'DB 쿼리 실패: {e}')
         return pd.DataFrame()
 
 def _trades(days: int = 9999) -> pd.DataFrame:
     w = '' if days >= 9999 else f"WHERE exit_ts >= datetime('now','-{days} days')"
     df = _q(f"""SELECT strategy,symbol,direction,entry_price,exit_price,
-                       qty,leverage,pnl_usd,pnl_r,reason,regime,entry_ts,exit_ts
+                       qty,leverage,pnl_usd,pnl_r,rr,reason,regime,entry_ts,exit_ts
                 FROM trades {w} ORDER BY exit_ts ASC""")
     if not df.empty:
         df['exit_ts']  = pd.to_datetime(df['exit_ts'],  utc=True, errors='coerce')
@@ -93,133 +123,104 @@ def _metrics(df: pd.DataFrame) -> dict:
                 mdd_pct=round(mdd_p,1),mdd_usd=round(mdd_u,2),
                 sharpe=sharpe,equity=round(INITIAL_CAPITAL+pnl,2))
 
-# ── Stage 2: 리스크 지표 ─────────────────────────────────────────
-
+# ── 리스크 지표 (Stage 2) ─────────────────────────────────────────
 def _ratchet_scale(mdd_pct: float) -> dict:
-    """현재 MDD 기반 Ratchet 배율 계산 (봇과 동일 로직)."""
-    if mdd_pct >= 7.0:
-        scale, label = 0.4, '낙폭 7%+ → 리스크 40%'
-    elif mdd_pct >= 5.0:
-        scale, label = 0.7, '낙폭 5%+ → 리스크 70%'
-    else:
-        scale, label = 1.0, '정상'
+    if mdd_pct >= 7.0:   scale, label = 0.4, '낙폭 7%+ → 리스크 40%'
+    elif mdd_pct >= 5.0: scale, label = 0.7, '낙폭 5%+ → 리스크 70%'
+    else:                scale, label = 1.0, '정상'
     return {'scale': scale, 'label': label, 'mdd': round(mdd_pct, 1)}
 
 def _kelly_stats(df: pd.DataFrame) -> list:
-    """전략별 Half-Kelly 배율 계산."""
-    if df.empty:
-        return []
+    if df.empty: return []
     rows = []
     for strat, g in df.groupby('strategy'):
-        t  = len(g)
-        w  = int((g['pnl_usd'] > 0).sum())
-        wr = w / t if t > 0 else 0
+        t=len(g); w=int((g['pnl_usd']>0).sum()); wr=w/t if t>0 else 0
         rr = float(g['rr'].mean()) if 'rr' in g.columns and not g['rr'].isna().all() else 2.0
-        full_k  = max(0.0, wr - (1 - wr) / rr) if rr > 0 else 0.0
-        half_k  = full_k * 0.5
-        rows.append({
-            'strategy':  strat,
-            'trades':    t,
-            'wr':        round(wr * 100, 1),
-            'rr':        round(rr, 2),
-            'full_k':    round(full_k * 100, 1),
-            'half_k':    round(half_k * 100, 1),
-            'reliable':  t >= 20,
-        })
+        full_k = max(0.0, wr-(1-wr)/rr) if rr>0 else 0.0
+        rows.append({'strategy':strat,'trades':t,'wr':round(wr*100,1),'rr':round(rr,2),
+                     'full_k':round(full_k*100,1),'half_k':round(full_k*50,1),'reliable':t>=20})
     return sorted(rows, key=lambda x: x['trades'], reverse=True)
 
 def _rolling_wr(df: pd.DataFrame, n: int = 10) -> list:
-    """최근 N건 이동 승률."""
-    if df.empty or len(df) < 2:
-        return []
-    df  = df.sort_values('exit_ts')
-    wins = (df['pnl_usd'] > 0).astype(int).values
+    if df.empty or len(df)<2: return []
+    df = df.sort_values('exit_ts')
+    wins = (df['pnl_usd']>0).astype(int).values
     result = []
     for i in range(len(wins)):
-        start  = max(0, i - n + 1)
-        window = wins[start:i + 1]
+        start = max(0, i-n+1); window = wins[start:i+1]
         ts_val = df.iloc[i]['exit_ts']
-        result.append({
-            'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
-            'wr': round(float(window.mean()) * 100, 1),
-            'n':  len(window),
-        })
+        result.append({'ts':ts_val.isoformat() if pd.notna(ts_val) else None,
+                       'wr':round(float(window.mean())*100,1),'n':len(window)})
     return result
 
 def _dd_curve(df: pd.DataFrame) -> list:
-    """수익 곡선 기준 Drawdown % 시계열."""
-    if df.empty:
-        return []
-    df  = df.sort_values('exit_ts').reset_index(drop=True)
+    if df.empty: return []
+    df = df.sort_values('exit_ts').reset_index(drop=True)
     cum = df['pnl_usd'].cumsum().values
-    peak = np.maximum.accumulate(cum)
-    dd   = (peak - cum) / INITIAL_CAPITAL * 100
+    dd  = (np.maximum.accumulate(cum) - cum) / INITIAL_CAPITAL * 100
     result = []
     for i, row in df.iterrows():
         ts_val = row['exit_ts']
-        result.append({
-            'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
-            'dd': round(float(dd[i]), 2),
-        })
+        result.append({'ts':ts_val.isoformat() if pd.notna(ts_val) else None,'dd':round(float(dd[i]),2)})
     return result
+
+# ── 월별 PnL 히트맵 (Stage 3) ────────────────────────────────────
+def _monthly_pnl(df: pd.DataFrame) -> list:
+    if df.empty or df['exit_ts'].isna().all():
+        return []
+    d = df.copy()
+    d['month'] = d['exit_ts'].dt.strftime('%Y-%m')
+    rows = []
+    for month, g in d.groupby('month'):
+        t=len(g); w=int((g['pnl_usd']>0).sum())
+        rows.append({'month':month,'pnl':round(float(g['pnl_usd'].sum()),2),
+                     'trades':t,'wr':round(w/t*100,0)})
+    return sorted(rows, key=lambda x: x['month'])
 
 # ── 봇 상태 ──────────────────────────────────────────────────────
 def _bot_alive() -> bool:
     try:
-        r = subprocess.run(['pgrep','-f','atlas_v2_main.py'],
-                           capture_output=True, timeout=3)
+        r = subprocess.run(['pgrep','-f','atlas_v2_main.py'], capture_output=True, timeout=3)
         return r.returncode == 0
-    except Exception:
+    except Exception as e:
+        log.error(f'bot_alive 체크 실패: {e}')
         return False
 
 def _last_log_time() -> str:
     try:
-        logs = sorted(LOG_DIR.glob('atlas_v2_*.log'),
-                      key=lambda x: x.stat().st_mtime, reverse=True)
-        if not logs:
-            return None
-        mtime = logs[0].stat().st_mtime
-        dt    = datetime.fromtimestamp(mtime, tz=timezone.utc)
-        diff  = (datetime.now(timezone.utc) - dt).total_seconds()
-        if diff < 120:   return f'{int(diff)}초 전'
-        if diff < 3600:  return f'{int(diff/60)}분 전'
+        logs = sorted(LOG_DIR.glob('atlas_v2_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+        if not logs: return None
+        diff = (datetime.now(timezone.utc) - datetime.fromtimestamp(logs[0].stat().st_mtime, tz=timezone.utc)).total_seconds()
+        if diff < 120:  return f'{int(diff)}초 전'
+        if diff < 3600: return f'{int(diff/60)}분 전'
         return f'{int(diff/3600)}시간 전'
-    except Exception:
+    except Exception as e:
+        log.error(f'last_log_time 실패: {e}')
         return None
 
 def _regime_from_log() -> str:
-    """로그 파일 마지막 200줄에서 최신 레짐 파싱."""
     try:
-        logs = sorted(LOG_DIR.glob('atlas_v2_*.log'),
-                      key=lambda x: x.stat().st_mtime, reverse=True)
-        if not logs:
-            return None
+        logs = sorted(LOG_DIR.glob('atlas_v2_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+        if not logs: return None
         lines = logs[0].read_text(encoding='utf-8', errors='ignore').splitlines()[-300:]
         for line in reversed(lines):
             for regime in ['TRENDING_UP','TRENDING_DOWN','RANGING','WEAK_TREND','CRISIS']:
                 if regime in line:
                     return regime
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f'regime_from_log 실패: {e}')
     return None
 
 # ── 심볼×방향 통계 ────────────────────────────────────────────────
 def _sym_dir_stats(df: pd.DataFrame) -> list:
-    if df.empty:
-        return []
+    if df.empty: return []
     rows = []
     for (sym, direction), g in df.groupby(['symbol','direction']):
-        t = len(g); w = int((g['pnl_usd']>0).sum())
-        rows.append({
-            'symbol':    sym.replace('USDT',''),
-            'direction': direction,
-            'trades':    t,
-            'wr':        round(w/t*100, 0),
-            'pnl':       round(float(g['pnl_usd'].sum()), 2),
-            'avg_r':     round(float(g['pnl_r'].mean()), 3),
-            'best':      round(float(g['pnl_usd'].max()), 2),
-            'worst':     round(float(g['pnl_usd'].min()), 2),
-        })
+        t=len(g); w=int((g['pnl_usd']>0).sum())
+        rows.append({'symbol':sym.replace('USDT',''),'direction':direction,'trades':t,
+                     'wr':round(w/t*100,0),'pnl':round(float(g['pnl_usd'].sum()),2),
+                     'avg_r':round(float(g['pnl_r'].mean()),3),
+                     'best':round(float(g['pnl_usd'].max()),2),'worst':round(float(g['pnl_usd'].min()),2)})
     return sorted(rows, key=lambda x: abs(x['pnl']), reverse=True)
 
 # ── 경고 판정 ─────────────────────────────────────────────────────
@@ -238,7 +239,10 @@ def _alerts(m: dict, bot_alive: bool) -> list:
             alerts.append({'level':'warn','msg':f'PF {m["pf"]:.2f} — 손실 구간'})
     return alerts
 
-# ── API ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  API
+# ══════════════════════════════════════════════════════════════════
+
 @app.post('/api/auth')
 async def auth(req: Request):
     body = await req.json()
@@ -249,11 +253,108 @@ async def auth(req: Request):
 @app.get('/api/status')
 async def status(token: str):
     _auth(token)
-    alive    = _bot_alive()
-    log_time = _last_log_time()
-    regime   = _regime_from_log()
-    return {'bot_alive': alive, 'last_log': log_time, 'regime': regime}
+    return {'bot_alive':_bot_alive(),'last_log':_last_log_time(),'regime':_regime_from_log()}
 
+# ── Stage 3: 봇 제어 ─────────────────────────────────────────────
+@app.post('/api/control')
+async def control(req: Request):
+    body   = await req.json()
+    _auth(body.get('token', ''))
+    action = body.get('action', '')
+
+    if action == 'stop':
+        KILL_SWITCH.touch()
+        _tg('🛑 [대시보드] 봇 중지 명령 실행')
+        log.info('봇 중지 명령 실행 (대시보드)')
+        return {'ok': True, 'msg': '봇 중지 신호 전송 완료'}
+
+    elif action == 'start':
+        if _bot_alive():
+            return {'ok': False, 'msg': '봇이 이미 실행 중입니다'}
+        if KILL_SWITCH.exists():
+            KILL_SWITCH.unlink()
+        log_path = LOG_DIR / f'atlas_v2_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        subprocess.Popen(
+            ['python3', 'atlas_v2_main.py'],
+            cwd=str(BOT_DIR),
+            stdout=open(log_path, 'w'),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        _tg('▶️ [대시보드] 봇 시작 명령 실행')
+        log.info('봇 시작 명령 실행 (대시보드)')
+        return {'ok': True, 'msg': '봇 시작 완료. 몇 초 후 상태를 확인하세요.'}
+
+    return {'ok': False, 'msg': f'알 수 없는 명령: {action}'}
+
+# ── Stage 3: 패닉 버튼 ───────────────────────────────────────────
+@app.post('/api/panic')
+async def panic(req: Request):
+    body    = await req.json()
+    _auth(body.get('token', ''))
+    confirm = body.get('confirm', '')
+    if confirm != 'PANIC':
+        raise HTTPException(400, '확인 코드가 틀렸습니다 (PANIC 입력 필요)')
+
+    results = []
+    log.warning('패닉 버튼 실행 — 전 포지션 강제 청산 시작')
+
+    # 1. 봇 즉시 중지
+    KILL_SWITCH.touch()
+    results.append('✅ 봇 중지 신호 전송')
+
+    # 2. CCXT 강제 청산
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        try:
+            import ccxt
+            ex = ccxt.binanceusdm({
+                'apiKey': BINANCE_API_KEY,
+                'secret': BINANCE_API_SECRET,
+                'enableRateLimit': True,
+            })
+            ex.load_markets()
+
+            # 미체결 주문 전체 취소
+            cancel_count = 0
+            for sym in ['BTC/USDT','ETH/USDT','SOL/USDT','BNB/USDT']:
+                try:
+                    ex.cancel_all_orders(sym)
+                    cancel_count += 1
+                except Exception as e:
+                    log.error(f'주문 취소 실패 {sym}: {e}')
+            results.append(f'✅ 미체결 주문 취소 ({cancel_count}개 심볼)')
+
+            # 포지션 강제 청산
+            positions = ex.fetch_positions()
+            closed = 0
+            for pos in positions:
+                contracts = float(pos.get('contracts') or 0)
+                if contracts <= 0:
+                    continue
+                side = 'sell' if pos['side'] == 'long' else 'buy'
+                try:
+                    ex.create_order(
+                        pos['symbol'], 'market', side, contracts,
+                        params={'reduceOnly': True}
+                    )
+                    closed += 1
+                    log.warning(f'강제 청산: {pos["symbol"]} {pos["side"]} {contracts}')
+                except Exception as e:
+                    log.error(f'강제 청산 실패 {pos["symbol"]}: {e}')
+                    results.append(f'⚠️ {pos["symbol"]} 청산 실패: {str(e)[:40]}')
+            results.append(f'✅ 포지션 {closed}개 강제 청산')
+
+        except Exception as e:
+            log.error(f'패닉 CCXT 오류: {e}')
+            results.append(f'❌ CCXT 오류: {str(e)[:60]}')
+    else:
+        results.append('⚠️ API 키 미설정 — 포지션 수동 청산 필요')
+
+    msg = '🚨 [패닉 버튼] 강제 청산 실행\n' + '\n'.join(f'  {r}' for r in results)
+    _tg(msg)
+    return {'ok': True, 'results': results}
+
+# ── 대시보드 데이터 ───────────────────────────────────────────────
 @app.get('/api/dashboard')
 async def dashboard(token: str, period: int = 0):
     _auth(token)
@@ -261,19 +362,15 @@ async def dashboard(token: str, period: int = 0):
     pos = _positions()
     m   = _metrics(df)
 
-    # 봇 상태
     bot_alive = _bot_alive()
     log_time  = _last_log_time()
 
-    # 레짐 (로그 우선, fallback: 마지막 거래)
     regime = _regime_from_log()
     if not regime and not df.empty:
         last = df.sort_values('exit_ts').dropna(subset=['regime'])
-        if not last.empty:
-            regime = str(last.iloc[-1]['regime'])
+        if not last.empty: regime = str(last.iloc[-1]['regime'])
     regime = regime or 'UNKNOWN'
 
-    # 경고
     alerts = _alerts(m, bot_alive)
 
     # 수익 곡선
@@ -282,16 +379,15 @@ async def dashboard(token: str, period: int = 0):
         d = df.sort_values('exit_ts').copy()
         d['eq'] = INITIAL_CAPITAL + d['pnl_usd'].cumsum()
         for _, r in d.iterrows():
-            eq_curve.append({'ts':  r['exit_ts'].isoformat() if pd.notna(r['exit_ts']) else None,
-                             'eq':  round(float(r['eq']), 2),
-                             'reason': r['reason'],
-                             'pnl': round(float(r['pnl_usd']), 2)})
+            eq_curve.append({'ts':r['exit_ts'].isoformat() if pd.notna(r['exit_ts']) else None,
+                             'eq':round(float(r['eq']),2),'reason':r['reason'],
+                             'pnl':round(float(r['pnl_usd']),2)})
 
     # 일별 PnL
     daily = []
     if not df.empty and not df['exit_ts'].isna().all():
         for ts, v in df.set_index('exit_ts')['pnl_usd'].resample('1D').sum().tail(30).items():
-            daily.append({'date': ts.strftime('%m/%d'), 'pnl': round(float(v), 2)})
+            daily.append({'date':ts.strftime('%m/%d'),'pnl':round(float(v),2)})
 
     # 모듈별
     MOD = {'V2_MA_LONG':'A 추세','V2_MA_SHORT':'A 추세',
@@ -300,8 +396,7 @@ async def dashboard(token: str, period: int = 0):
            'V2_MD_SHORT':'D 펀딩비'}
     module_stats = []
     if not df.empty:
-        d2 = df.copy()
-        d2['mod'] = d2['strategy'].map(MOD).fillna(d2['strategy'])
+        d2 = df.copy(); d2['mod'] = d2['strategy'].map(MOD).fillna(d2['strategy'])
         for mod, g in d2.groupby('mod'):
             t=len(g); w=int((g['pnl_usd']>0).sum())
             gw=float(g[g['pnl_usd']>0]['pnl_usd'].sum())
@@ -309,99 +404,60 @@ async def dashboard(token: str, period: int = 0):
             module_stats.append({'module':mod,'trades':t,'wr':round(w/t*100,0),
                                  'pf':round(gw/gl,2) if gl>0 else 0,
                                  'pnl':round(float(g['pnl_usd'].sum()),2),
-                                 'avg_r':round(float(g['pnl_r'].mean()),3),
-                                 'reliable':t>=20})
+                                 'avg_r':round(float(g['pnl_r'].mean()),3),'reliable':t>=20})
 
-    # 심볼×방향
-    sym_dir = _sym_dir_stats(df)
-
-    # Stage 2: 리스크 지표
-    ratchet    = _ratchet_scale(m['mdd_pct'])
-    kelly      = _kelly_stats(df)
-    rolling_wr = _rolling_wr(df, n=10)
-    dd_curve   = _dd_curve(df)
+    # 열린 포지션
+    open_pos = []; now_utc = datetime.now(timezone.utc)
+    if not pos.empty:
+        for _, p in pos.iterrows():
+            entry=float(p['entry_price']); sl=float(p['sl'])
+            hold_str='—'
+            try:
+                et = pd.to_datetime(p['entry_ts'], utc=True, errors='coerce')
+                if pd.notna(et):
+                    diff=(now_utc-et).total_seconds(); h,mr=divmod(int(diff),3600)
+                    hold_str=f'{h}h {mr//60}m'
+            except Exception as e:
+                log.error(f'보유시간 계산 실패: {e}')
+            sl_dist='—'
+            try:
+                if entry>0: sl_dist=f'{abs(entry-sl)/entry*100:.2f}%'
+            except Exception as e:
+                log.error(f'SL거리 계산 실패: {e}')
+            open_pos.append({'strategy':p['strategy'],'symbol':p['symbol'],
+                             'direction':p['direction'],'entry':round(entry,4),
+                             'sl':round(sl,4),'tp':round(float(p['tp']),4),
+                             'qty':float(p['qty']),'leverage':int(p['leverage']),
+                             'entry_ts':str(p['entry_ts']),'hold':hold_str,'sl_dist':sl_dist})
 
     # 최근 거래 50건
     recent = []
     if not df.empty:
-        for _, r in df.sort_values('exit_ts', ascending=False).head(50).iterrows():
-            recent.append({'ts':        r['exit_ts'].strftime('%m-%d %H:%M') if pd.notna(r['exit_ts']) else '-',
-                           'strategy':  r['strategy'],
-                           'symbol':    r['symbol'],
-                           'direction': r['direction'],
-                           'entry':     round(float(r['entry_price']), 4),
-                           'exit':      round(float(r['exit_price']),  4),
-                           'pnl':       round(float(r['pnl_usd']), 2),
-                           'r':         round(float(r['pnl_r']),   2),
-                           'reason':    r['reason'],
-                           'regime':    r['regime'] or ''})
-
-    # 열린 포지션 (보유시간 + SL거리 추가)
-    open_pos = []
-    now_utc  = datetime.now(timezone.utc)
-    if not pos.empty:
-        for _, p in pos.iterrows():
-            entry = float(p['entry_price'])
-            sl    = float(p['sl'])
-            # 보유시간
-            hold_str = '—'
-            try:
-                et  = pd.to_datetime(p['entry_ts'], utc=True, errors='coerce')
-                if pd.notna(et):
-                    diff = (now_utc - et).total_seconds()
-                    h, m_rem = divmod(int(diff), 3600)
-                    hold_str = f'{h}h {m_rem//60}m'
-            except Exception:
-                pass
-            # SL까지 거리 %
-            sl_dist = '—'
-            try:
-                if entry > 0:
-                    pct = abs(entry - sl) / entry * 100
-                    sl_dist = f'{pct:.2f}%'
-            except Exception:
-                pass
-            open_pos.append({'strategy':  p['strategy'],
-                             'symbol':    p['symbol'],
-                             'direction': p['direction'],
-                             'entry':     round(entry, 4),
-                             'sl':        round(sl, 4),
-                             'tp':        round(float(p['tp']), 4),
-                             'qty':       float(p['qty']),
-                             'leverage':  int(p['leverage']),
-                             'entry_ts':  str(p['entry_ts']),
-                             'hold':      hold_str,
-                             'sl_dist':   sl_dist})
+        for _, r in df.sort_values('exit_ts',ascending=False).head(50).iterrows():
+            recent.append({'ts':r['exit_ts'].strftime('%m-%d %H:%M') if pd.notna(r['exit_ts']) else '-',
+                           'strategy':r['strategy'],'symbol':r['symbol'],'direction':r['direction'],
+                           'entry':round(float(r['entry_price']),4),'exit':round(float(r['exit_price']),4),
+                           'pnl':round(float(r['pnl_usd']),2),'r':round(float(r['pnl_r']),2),
+                           'reason':r['reason'],'regime':r['regime'] or ''})
 
     # 스트릭
-    streak = {'count':0,'kind':'none'}
+    streak={'count':0,'kind':'none'}
     if not df.empty:
-        s = df.sort_values('exit_ts', ascending=False)
-        is_win = float(s.iloc[0]['pnl_usd']) > 0
-        cnt = 0
-        for _, r in s.iterrows():
-            if (float(r['pnl_usd'])>0) == is_win: cnt+=1
+        s=df.sort_values('exit_ts',ascending=False); is_win=float(s.iloc[0]['pnl_usd'])>0; cnt=0
+        for _,r in s.iterrows():
+            if (float(r['pnl_usd'])>0)==is_win: cnt+=1
             else: break
-        streak = {'count':cnt,'kind':'win' if is_win else 'loss'}
+        streak={'count':cnt,'kind':'win' if is_win else 'loss'}
 
-    return {'metrics':     m,
-            'regime':      regime,
-            'streak':      streak,
-            'bot_alive':   bot_alive,
-            'log_time':    log_time,
-            'alerts':      alerts,
-            'eq_curve':    eq_curve,
-            'daily':       daily,
-            'module_stats':module_stats,
-            'sym_dir':     sym_dir,
-            'recent':      recent,
-            'open_pos':    open_pos,
-            'ratchet':     ratchet,
-            'kelly':       kelly,
-            'rolling_wr':  rolling_wr,
-            'dd_curve':    dd_curve,
-            'refresh_sec': REFRESH_SEC,
-            'updated_at':  datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+    return {'metrics':m,'regime':regime,'streak':streak,
+            'bot_alive':bot_alive,'log_time':log_time,'alerts':alerts,
+            'eq_curve':eq_curve,'daily':daily,'module_stats':module_stats,
+            'sym_dir':_sym_dir_stats(df),'recent':recent,'open_pos':open_pos,
+            'ratchet':_ratchet_scale(m['mdd_pct']),'kelly':_kelly_stats(df),
+            'rolling_wr':_rolling_wr(df,n=10),'dd_curve':_dd_curve(df),
+            'monthly_pnl':_monthly_pnl(df),
+            'refresh_sec':REFRESH_SEC,
+            'updated_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 
 @app.get('/api/prices')
 async def prices(token: str, symbols: str = ''):
@@ -412,7 +468,8 @@ async def prices(token: str, symbols: str = ''):
             r = requests.get('https://fapi.binance.com/fapi/v1/ticker/price',
                              params={'symbol': sym}, timeout=5)
             if r.ok: result[sym] = float(r.json().get('price', 0))
-        except Exception: pass
+        except Exception as e:
+            log.error(f'가격 조회 실패 {sym}: {e}')
     return result
 
 @app.get('/', response_class=HTMLResponse)

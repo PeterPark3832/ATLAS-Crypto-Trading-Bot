@@ -214,6 +214,73 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
 .filter-sep{width:1px;height:16px;background:var(--border);margin:0 2px}
 
+/* ── Stage 3: 제어 패널 ── */
+.ctrl-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.ctrl-card{background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.ctrl-status-row{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.status-dot-lg{width:14px;height:14px;border-radius:50%;flex-shrink:0}
+.status-dot-lg.alive{background:var(--green);box-shadow:0 0 10px var(--green)}
+.status-dot-lg.dead{background:var(--red);box-shadow:0 0 10px var(--red)}
+.ctrl-status-info h3{font-size:14px;font-weight:600;margin-bottom:2px}
+.ctrl-status-info p{font-size:11px;color:var(--dim2)}
+.ctrl-btns{display:flex;gap:8px}
+.btn-start{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
+  color:var(--green);padding:10px 20px;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:600;transition:all .2s;width:100%}
+.btn-start:hover:not(:disabled){background:rgba(16,185,129,0.25);border-color:var(--green)}
+.btn-stop{background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.25);
+  color:var(--red);padding:10px 20px;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:600;transition:all .2s;width:100%}
+.btn-stop:hover:not(:disabled){background:rgba(244,63,94,0.2);border-color:var(--red)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.btn-panic{width:100%;background:rgba(244,63,94,0.08);
+  border:1px solid rgba(244,63,94,0.3);color:var(--red);
+  padding:14px;border-radius:var(--radius-sm);font-size:14px;font-weight:700;
+  letter-spacing:.5px;transition:all .2s;margin-top:12px}
+.btn-panic:hover{background:rgba(244,63,94,0.18);border-color:var(--red);
+  box-shadow:0 0 20px rgba(244,63,94,0.2)}
+.panic-warn{font-size:11px;color:var(--dim2);margin-top:8px;line-height:1.6;text-align:center}
+.ctrl-log{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;font-size:11px;color:var(--dim2);font-family:monospace;
+  min-height:60px;max-height:120px;overflow-y:auto;margin-top:12px}
+
+/* ── Stage 3: 패닉 모달 ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.75);
+  display:flex;align-items:center;justify-content:center;z-index:999;
+  backdrop-filter:blur(4px)}
+.modal-box{background:var(--card);border:1px solid rgba(244,63,94,0.4);
+  border-radius:16px;padding:32px;width:420px;text-align:center;
+  box-shadow:0 0 40px rgba(244,63,94,0.15)}
+.modal-box h2{font-size:18px;font-weight:700;margin-bottom:12px;color:var(--red)}
+.modal-box p{font-size:13px;color:var(--dim2);margin-bottom:20px;line-height:1.7}
+.modal-box input{width:100%;background:var(--bg2);border:2px solid rgba(244,63,94,0.3);
+  border-radius:var(--radius-sm);padding:12px;color:var(--text);font-size:16px;
+  text-align:center;font-weight:700;letter-spacing:4px;margin-bottom:16px;
+  transition:border-color .2s}
+.modal-box input:focus{outline:none;border-color:var(--red)}
+.modal-btns{display:flex;gap:8px}
+.btn-modal-cancel{flex:1;background:var(--bg2);border:1px solid var(--border);
+  color:var(--dim2);padding:11px;border-radius:var(--radius-sm);font-size:13px;font-weight:600}
+.btn-modal-confirm{flex:1;background:var(--red);color:#fff;
+  padding:11px;border-radius:var(--radius-sm);font-size:13px;font-weight:700;
+  transition:opacity .2s}
+.btn-modal-confirm:hover{opacity:.85}
+
+/* ── Stage 3: 월별 히트맵 ── */
+.heatmap{display:flex;flex-wrap:wrap;gap:8px}
+.hm-cell{flex:1;min-width:80px;max-width:140px;background:var(--card2);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:12px 10px;text-align:center;transition:border-color .2s}
+.hm-cell:hover{border-color:var(--border2)}
+.hm-month{font-size:10px;color:var(--dim2);text-transform:uppercase;margin-bottom:4px}
+.hm-pnl{font-size:16px;font-weight:700;letter-spacing:-0.5px}
+.hm-meta{font-size:10px;color:var(--dim2);margin-top:3px}
+@media(max-width:768px){
+  .ctrl-panel{grid-template-columns:1fr}
+  .hm-cell{min-width:60px}
+  .modal-box{width:90%;padding:24px}
+}
+
 /* ═══ 모바일 ═══ */
 @media(max-width:900px){
   .grid-3-2,.grid-2-1{grid-template-columns:1fr}
@@ -334,6 +401,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       <div class="tab" onclick="switchTab('positions',this)">포지션 <span id="tab-pos-cnt" style="font-size:10px;opacity:.6"></span></div>
       <div class="tab" onclick="switchTab('analysis',this)">분석</div>
       <div class="tab" onclick="switchTab('trades',this)">거래 내역</div>
+      <div class="tab" onclick="switchTab('control',this)">⚙️ 제어</div>
     </div>
 
     <!-- ── Overview ── -->
@@ -430,6 +498,16 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         </div>
         <div class="chart-wrap h200"><canvas id="dd-chart"></canvas></div>
       </div>
+      <!-- 월별 히트맵 -->
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">월별 PnL 히트맵</span>
+          <span class="card-badge">월간 성과</span>
+        </div>
+        <div class="heatmap" id="monthly-heatmap">
+          <div class="empty">데이터 없음</div>
+        </div>
+      </div>
     </div>
 
     <!-- ── 거래 내역 ── -->
@@ -462,8 +540,66 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </div>
     </div>
 
+    <!-- ── 제어 탭 ── -->
+    <div id="tab-control" class="tab-content">
+      <div class="ctrl-panel">
+        <!-- 봇 제어 -->
+        <div class="ctrl-card">
+          <div class="card-hdr"><span class="card-title">봇 프로세스 제어</span></div>
+          <div class="ctrl-status-row">
+            <div class="status-dot-lg unknown" id="ctrl-dot"></div>
+            <div class="ctrl-status-info">
+              <h3 id="ctrl-status-title">확인 중...</h3>
+              <p id="ctrl-status-sub">봇 프로세스 상태</p>
+            </div>
+          </div>
+          <div class="ctrl-btns">
+            <button class="btn-start" id="btn-start" onclick="botControl('start')">▶ 봇 시작</button>
+            <button class="btn-stop"  id="btn-stop"  onclick="botControl('stop')">■ 봇 중지</button>
+          </div>
+          <div class="ctrl-log" id="ctrl-log">대기 중...</div>
+        </div>
+        <!-- 패닉 버튼 -->
+        <div class="ctrl-card">
+          <div class="card-hdr"><span class="card-title" style="color:var(--red)">⚠️ 긴급 패닉 청산</span></div>
+          <p style="font-size:12px;color:var(--dim2);line-height:1.7;margin-bottom:8px">
+            시장 급변 시 모든 열린 포지션을 <strong style="color:var(--text)">즉시 시장가로 강제 청산</strong>하고
+            봇을 중지합니다.<br>이 작업은 <strong style="color:var(--red)">되돌릴 수 없습니다.</strong>
+          </p>
+          <div style="background:rgba(244,63,94,0.06);border:1px solid rgba(244,63,94,0.15);
+               border-radius:8px;padding:12px;margin-bottom:8px;font-size:11px;color:var(--dim2)">
+            실행 순서: 봇 중지 → 미체결 주문 전체 취소 → 포지션 시장가 청산 → TG 알림
+          </div>
+          <button class="btn-panic" onclick="showPanicModal()">🚨 전 포지션 강제 청산</button>
+          <div class="panic-warn">이중 확인이 필요합니다 — 클릭 후 "PANIC" 직접 입력</div>
+          <div class="ctrl-log" id="panic-log" style="margin-top:12px">대기 중...</div>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 </div><!-- /app -->
+
+<!-- 패닉 확인 모달 -->
+<div id="panic-modal" style="display:none">
+  <div class="modal-overlay">
+    <div class="modal-box">
+      <h2>🚨 패닉 청산 확인</h2>
+      <p>
+        모든 포지션이 <strong style="color:var(--red)">시장가로 즉시 청산</strong>됩니다.<br>
+        봇도 함께 중지됩니다.<br><br>
+        계속하려면 아래 입력란에 <strong style="color:var(--red)">PANIC</strong> 을 입력하세요.
+      </p>
+      <input type="text" id="panic-input" placeholder="PANIC"
+             oninput="this.value=this.value.toUpperCase()"
+             onkeydown="if(event.key==='Enter')executePanic()">
+      <div class="modal-btns">
+        <button class="btn-modal-cancel" onclick="closePanicModal()">취소</button>
+        <button class="btn-modal-confirm" onclick="executePanic()">강제 청산 실행</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 let TOKEN = localStorage.getItem('atlas_token') || '';
@@ -579,6 +715,8 @@ function render(d) {
   renderWRChart(d.rolling_wr || []);
   renderDDChart(d.dd_curve || []);
   renderRiskCard(d.ratchet, d.kelly || []);
+  renderMonthlyHeatmap(d.monthly_pnl || []);
+  updateControlPanel(d.bot_alive, d.log_time);
   allTrades = d.recent || [];
   applyTradeFilters();
 }
@@ -970,6 +1108,101 @@ function renderDDChart(data) {
       y:{...DARK.scales.y,
          reverse:true, min:0,
          ticks:{...DARK.scales.y.ticks, callback:v=>`${v.toFixed(0)}%`}}}}});
+}
+
+// ── 월별 히트맵 ──────────────────────────────────────────────
+function renderMonthlyHeatmap(data) {
+  const el = document.getElementById('monthly-heatmap');
+  if (!data || !data.length) { el.innerHTML='<div class="empty">데이터 없음</div>'; return; }
+  el.innerHTML = data.map(m => {
+    const color = m.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const bg    = m.pnl >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(244,63,94,0.08)';
+    const border= m.pnl >= 0 ? 'rgba(16,185,129,0.2)' : 'rgba(244,63,94,0.2)';
+    return `<div class="hm-cell" style="background:${bg};border-color:${border}">
+      <div class="hm-month">${m.month}</div>
+      <div class="hm-pnl" style="color:${color}">${m.pnl>=0?'+':''}$${m.pnl.toFixed(1)}</div>
+      <div class="hm-meta">${m.trades}건 · ${m.wr}%</div>
+    </div>`;
+  }).join('');
+}
+
+// ── 제어 패널 ─────────────────────────────────────────────────
+function updateControlPanel(alive, logTime) {
+  const dot   = document.getElementById('ctrl-dot');
+  const title = document.getElementById('ctrl-status-title');
+  const sub   = document.getElementById('ctrl-status-sub');
+  const btnS  = document.getElementById('btn-start');
+  const btnX  = document.getElementById('btn-stop');
+
+  if (alive === true) {
+    dot.className = 'status-dot-lg alive';
+    title.textContent = '정상 가동 중';
+    title.style.color = 'var(--green)';
+    sub.textContent   = logTime ? `마지막 로그: ${logTime}` : '봇 실행 중';
+    btnS.disabled = true; btnX.disabled = false;
+  } else {
+    dot.className = 'status-dot-lg dead';
+    title.textContent = '봇 중지됨';
+    title.style.color = 'var(--red)';
+    sub.textContent   = '프로세스 없음';
+    btnS.disabled = false; btnX.disabled = true;
+  }
+}
+
+async function botControl(action) {
+  const logEl = document.getElementById('ctrl-log');
+  const labels = {start:'▶ 봇 시작 중...', stop:'■ 봇 중지 중...'};
+  logEl.textContent = labels[action] || '처리 중...';
+  try {
+    const res  = await fetch('/api/control', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token:TOKEN, action})
+    });
+    if (res.status === 401) { logout(); return; }
+    const d = await res.json();
+    logEl.textContent = `${new Date().toLocaleTimeString()} — ${d.msg}`;
+    setTimeout(() => loadDashboard(), 3000);
+  } catch(e) {
+    logEl.textContent = `오류: ${e.message}`;
+  }
+}
+
+// ── 패닉 모달 ────────────────────────────────────────────────
+function showPanicModal() {
+  document.getElementById('panic-input').value = '';
+  document.getElementById('panic-modal').style.display = 'block';
+  setTimeout(() => document.getElementById('panic-input').focus(), 100);
+}
+
+function closePanicModal() {
+  document.getElementById('panic-modal').style.display = 'none';
+}
+
+async function executePanic() {
+  const confirm = document.getElementById('panic-input').value.trim();
+  const logEl   = document.getElementById('panic-log');
+  if (confirm !== 'PANIC') {
+    document.getElementById('panic-input').style.borderColor = 'var(--red)';
+    setTimeout(() => document.getElementById('panic-input').style.borderColor = '', 1000);
+    return;
+  }
+  closePanicModal();
+  logEl.textContent = '🚨 패닉 청산 실행 중... (최대 30초 소요)';
+  try {
+    const res = await fetch('/api/panic', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token:TOKEN, confirm:'PANIC'})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      logEl.innerHTML = d.results.map(r => `• ${r}`).join('<br>');
+      setTimeout(() => loadDashboard(), 3000);
+    } else {
+      logEl.textContent = `오류: ${d.detail || '알 수 없는 오류'}`;
+    }
+  } catch(e) {
+    logEl.textContent = `네트워크 오류: ${e.message}`;
+  }
 }
 
 // ── 리스크 카드 ──────────────────────────────────────────────
