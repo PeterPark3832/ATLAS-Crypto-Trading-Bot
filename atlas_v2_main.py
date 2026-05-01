@@ -801,8 +801,16 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     try:
         _get_ex().create_market_order(ccxt_sym, side, qty, params={'reduceOnly': True})
     except Exception as e:
-        log(f'[청산실패] {sym} {strategy}: {e}', 'error')
-        return False
+        err = str(e).lower()
+        # 거래소에 포지션이 이미 없는 경우 (수동 청산 등) → DB만 정리하고 정상 처리
+        if any(k in err for k in ('no open', 'position not found', '-4021', '-2022',
+                                   'does not exist', 'reduceonly')):
+            log(f'[수동청산 감지] {sym} {strategy}: 포지션이 거래소에 없음 — DB 정리')
+            tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\nDB 자동 정리 완료')
+            # 아래 log_trade + delete_position 으로 진행 (return False 하지 않음)
+        else:
+            log(f'[청산실패] {sym} {strategy}: {e}', 'error')
+            return False
 
     # 잔여 포지션 재청산
     time.sleep(2)
@@ -1896,6 +1904,59 @@ def md_symbol_loop(sym: str):
         time.sleep(V2_MD_CHECK_SEC)
 
 
+def position_reconcile_loop():
+    """
+    5분마다 SQLite DB 포지션 ↔ 바이낸스 실제 포지션 비교.
+    수동 청산 / 강제 청산 등으로 거래소에서 사라진 포지션을 DB에서 자동 제거.
+    """
+    log('[정합성] 포지션 정합성 검사 루프 시작')
+    while True:
+        if V2_KILL_SWITCH.exists():
+            break
+        try:
+            db_positions = load_all_positions()
+            if db_positions:
+                ex = _get_ex()
+                for pos in db_positions:
+                    sym      = pos['symbol']
+                    strategy = pos['strategy']
+                    direction= pos['direction']
+                    ccxt_sym = sym.replace('USDT', '/USDT')
+                    try:
+                        ex_pos    = ex.fetch_position(ccxt_sym)
+                        contracts = abs(float(ex_pos.get('contracts', 0) or 0))
+                        ex_side   = (ex_pos.get('side') or '').lower()
+                        expected  = 'long' if direction == 'LONG' else 'short'
+
+                        if contracts == 0 or ex_side != expected:
+                            cur_price = get_price(ccxt_sym)
+                            log(f'[정합성] {sym} {strategy} {direction} — 거래소 포지션 없음 → 수동청산 처리')
+                            cancel_exchange_sl(ccxt_sym, pos.get('sl_order_id', ''))
+                            entry    = float(pos['entry_price'])
+                            sl_dist  = abs(entry - float(pos['sl']))
+                            pnl_pct  = (cur_price - entry)/entry if direction=='LONG' else (entry-cur_price)/entry
+                            pnl_usd  = pnl_pct * float(pos['qty']) * entry
+                            pnl_r    = pnl_usd / (float(pos['qty'])*sl_dist) if sl_dist > 0 else 0
+                            try:
+                                entry_dt = datetime.fromisoformat(str(pos['entry_ts']).replace('Z','+00:00'))
+                                hold_h   = (datetime.now(timezone.utc)-entry_dt).total_seconds()/3600
+                            except Exception:
+                                hold_h = 0
+                            log_trade(strategy, sym, direction, pos.get('mode',''), entry, cur_price,
+                                      float(pos['qty']), int(pos['leverage']), pnl_usd, pnl_r,
+                                      float(pos.get('rr',2.0)), hold_h, 'MANUAL',
+                                      str(pos['entry_ts']), get_cached_regime().regime)
+                            delete_position(strategy, sym)
+                            tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\n'
+                               f'  추정PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
+                               f'  DB 자동 정리 완료 — 신규 진입 재개')
+                    except Exception as e:
+                        log(f'[정합성] {sym} 조회 실패: {e}', 'warning')
+        except Exception as e:
+            log(f'[정합성] 루프 오류: {e}', 'error')
+        time.sleep(300)  # 5분마다 검사
+
+
 def corr_vol_loop(cache: CandleCache):
     while True:
         update_corr_vol(cache)
@@ -2174,7 +2235,8 @@ def main():
     _t(corr_vol_loop,    'CorrVolLoop',  cache)
     _t(daily_reset_loop, 'DailyReset')
     _t(tg_cmd_loop,      'TGCmdLoop')
-    _t(recovery_loop,    'RecoveryLoop')
+    _t(recovery_loop,         'RecoveryLoop')
+    _t(position_reconcile_loop, 'ReconcileLoop')
 
     for sym in V2_MA_SYMBOLS:
         _t(ma_symbol_loop, f'MA_{sym}', sym, cache)
