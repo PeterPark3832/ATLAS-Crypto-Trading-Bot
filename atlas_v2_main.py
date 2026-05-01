@@ -1842,9 +1842,37 @@ def corr_vol_loop(cache: CandleCache):
 # ══════════════════════════════════════════════════════════════
 
 def daily_reset_loop():
-    last_day = None
+    last_day      = None
+    last_heartbeat = None
     while True:
         now = datetime.now(timezone.utc)
+
+        # ── 09:00 UTC 하트비트 (하루 1회) ──────────────────────
+        if now.hour == 9 and now.minute < 5 and now.date() != last_heartbeat:
+            with _shared_lock:
+                eq     = _shared['equity']
+                paused = _shared['paused']
+            positions = load_all_positions()
+            regime    = get_cached_regime().regime
+            fr_lines  = []
+            for s in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']:
+                try:
+                    fr = get_funding_rate(s.replace('USDT', '/USDT'))
+                    fr_lines.append(f"  {s}: {fr:.4%}")
+                except Exception:
+                    pass
+            fr_str = '\n'.join(fr_lines) if fr_lines else '  조회 실패'
+            status = '⏸ 일시정지' if paused else '✅ 정상 가동'
+            tg(
+                f'💓 ATLAS v2 일일 하트비트\n'
+                f'  상태: {status}\n'
+                f'  레짐: {regime}\n'
+                f'  잔고: ${eq:,.2f}\n'
+                f'  열린포지션: {len(positions)}개\n'
+                f'펀딩비 현황:\n{fr_str}'
+            )
+            last_heartbeat = now.date()
+
         if now.date() != last_day and now.hour == 0 and now.minute < 5:
             with _shared_lock:
                 eq = _shared['equity']
