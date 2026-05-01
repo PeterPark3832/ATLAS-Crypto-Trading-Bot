@@ -1929,26 +1929,54 @@ def position_reconcile_loop():
                         expected  = 'long' if direction == 'LONG' else 'short'
 
                         if contracts == 0 or ex_side != expected:
-                            cur_price = get_price(ccxt_sym)
                             log(f'[정합성] {sym} {strategy} {direction} — 거래소 포지션 없음 → 수동청산 처리')
                             cancel_exchange_sl(ccxt_sym, pos.get('sl_order_id', ''))
                             entry    = float(pos['entry_price'])
+                            qty      = float(pos['qty'])
                             sl_dist  = abs(entry - float(pos['sl']))
-                            pnl_pct  = (cur_price - entry)/entry if direction=='LONG' else (entry-cur_price)/entry
-                            pnl_usd  = pnl_pct * float(pos['qty']) * entry
-                            pnl_r    = pnl_usd / (float(pos['qty'])*sl_dist) if sl_dist > 0 else 0
+
+                            # ── 실제 체결가 조회 (fetch_my_trades) ──────────────
+                            close_price = get_price(ccxt_sym)  # fallback: 현재가
+                            price_source = '추정가'
                             try:
-                                entry_dt = datetime.fromisoformat(str(pos['entry_ts']).replace('Z','+00:00'))
-                                hold_h   = (datetime.now(timezone.utc)-entry_dt).total_seconds()/3600
+                                entry_ts_str = str(pos['entry_ts']).replace('Z', '+00:00')
+                                entry_dt     = datetime.fromisoformat(entry_ts_str)
+                                entry_ms     = int(entry_dt.timestamp() * 1000)
+                                close_side   = 'sell' if direction == 'LONG' else 'buy'
+                                my_trades    = ex.fetch_my_trades(ccxt_sym, limit=20)
+                                close_trades = [t for t in my_trades
+                                                if t['timestamp'] > entry_ms
+                                                and (t.get('side') or '').lower() == close_side]
+                                if close_trades:
+                                    total_qty  = sum(abs(float(t['amount'])) for t in close_trades)
+                                    total_cost = sum(abs(float(t['amount'])) * float(t['price'])
+                                                     for t in close_trades)
+                                    if total_qty > 0:
+                                        close_price  = total_cost / total_qty
+                                        price_source = '실제체결가'
+                            except Exception as te:
+                                log(f'[정합성] {sym} 체결가 조회 실패 ({te}) — 현재가로 대체')
+
+                            try:
+                                entry_dt_c = datetime.fromisoformat(
+                                    str(pos['entry_ts']).replace('Z', '+00:00'))
+                                hold_h = (datetime.now(timezone.utc) - entry_dt_c).total_seconds() / 3600
                             except Exception:
                                 hold_h = 0
-                            log_trade(strategy, sym, direction, pos.get('mode',''), entry, cur_price,
-                                      float(pos['qty']), int(pos['leverage']), pnl_usd, pnl_r,
-                                      float(pos.get('rr',2.0)), hold_h, 'MANUAL',
+
+                            pnl_pct = ((close_price - entry) / entry if direction == 'LONG'
+                                       else (entry - close_price) / entry)
+                            pnl_usd = pnl_pct * qty * entry
+                            pnl_r   = pnl_usd / (qty * sl_dist) if sl_dist > 0 else 0
+
+                            log_trade(strategy, sym, direction, pos.get('mode', ''), entry, close_price,
+                                      qty, int(pos['leverage']), pnl_usd, pnl_r,
+                                      float(pos.get('rr', 2.0)), hold_h, 'MANUAL',
                                       str(pos['entry_ts']), get_cached_regime().regime)
                             delete_position(strategy, sym)
                             tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\n'
-                               f'  추정PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
+                               f'  청산가: {close_price:,.4f} ({price_source})\n'
+                               f'  PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
                                f'  DB 자동 정리 완료 — 신규 진입 재개')
                     except Exception as e:
                         log(f'[정합성] {sym} 조회 실패: {e}', 'warning')

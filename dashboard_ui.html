@@ -172,6 +172,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .tag-sl{background:rgba(244,63,94,.12);color:var(--red)}
 .tag-time{background:rgba(79,142,247,.12);color:var(--blue)}
 .tag-fn{background:rgba(6,182,212,.12);color:var(--cyan)}
+.tag-manual{background:rgba(245,158,11,.12);color:var(--yellow)}
 .warn-txt{color:var(--yellow);font-size:11px}
 .ok-txt{color:var(--green);font-size:11px}
 
@@ -1016,8 +1017,11 @@ function renderTrades(trades) {
   const el = document.getElementById('trades-table');
   if (!trades.length) { el.innerHTML='<div class="empty">조건에 맞는 거래 없음</div>'; return; }
   const reasonTag = r => {
-    if(r==='TP') return 'tag-tp'; if(r==='SL') return 'tag-sl';
-    if(r==='TIME') return 'tag-time'; return 'tag-fn';
+    if(r==='TP')     return 'tag-tp';
+    if(r==='SL')     return 'tag-sl';
+    if(r==='TIME')   return 'tag-time';
+    if(r==='MANUAL') return 'tag-manual';
+    return 'tag-fn';
   };
   el.innerHTML = `<table>
     <thead><tr>
