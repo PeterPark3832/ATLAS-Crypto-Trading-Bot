@@ -203,7 +203,10 @@ WF_CANDLE_LIMIT     = 500      # Walk-Forward 전용: IS 75% + OOS 25% 통계적
 #   ATR 기간(14), 볼륨 룩백(20) → A/B와 동일 파라미터 재사용
 #   RR 2.0 고정 (수수료 손익분기 확보, 튜닝 대상 아님)
 #   심볼별 신호 파라미터 미분리 (레버리지/리스크만 변동성 차등)
-V2_MC_SYMBOLS     = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+V2_MC_SYMBOLS     = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT',                          # 기존
+    'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
+]
 V2_MC_ATR_PERIOD  = 14      # A/B와 동일 (신규 하이퍼파라미터 없음)
 V2_MC_ATR_SL      = 1.0     # SL = ATR × 1.0
 V2_MC_RR          = 2.0     # 고정 RR — 변경 금지 (수수료 드래그 임계값)
@@ -215,8 +218,16 @@ V2_MC_COOLDOWN    = 3       # 청산 후 재진입 금지 봉수 (×15분 = 45�
 V2_MC_LIMIT_SEC   = 30      # 지정가 타임아웃 — 시장가 폴백 없음 (슬리피지 제어)
 
 # 심볼별 레버리지/리스크 (변동성 차등: SOL 고변동 → 레버리지 축소)
-V2_MC_LEVERAGE = {'BTCUSDT': 5, 'ETHUSDT': 5, 'SOLUSDT': 3}
-V2_MC_RISK_PCT = {'BTCUSDT': 0.010, 'ETHUSDT': 0.010, 'SOLUSDT': 0.008}
+V2_MC_LEVERAGE = {
+    'BTCUSDT': 5, 'ETHUSDT': 5, 'SOLUSDT': 3,                          # 기존
+    'XRPUSDT': 3, 'ADAUSDT': 3, 'AVAXUSDT': 3, 'LINKUSDT': 3,         # 1차 확장
+    'DOTUSDT': 2,
+}
+V2_MC_RISK_PCT = {
+    'BTCUSDT': 0.010, 'ETHUSDT': 0.010, 'SOLUSDT': 0.008,              # 기존
+    'XRPUSDT': 0.007, 'ADAUSDT': 0.007, 'AVAXUSDT': 0.007, 'LINKUSDT': 0.007,  # 1차 확장
+    'DOTUSDT': 0.006,
+}
 
 CANDLE_LIMIT_15M  = 100     # 15분봉 캔들 수 (ATR14 + VOL20 + 여유분)
 
@@ -225,7 +236,10 @@ CANDLE_LIMIT_15M  = 100     # 15분봉 캔들 수 (ATR14 + VOL20 + 여유분)
 # 펀딩비 > 임계값 → SHORT 진입, 8h마다 펀딩비 수령
 # 정상화(<0.01%) 또는 48h 초과 시 청산. 레짐 무관 (CRISIS만 제외)
 # 지정가 전용 (Maker 0.02%) — 수수료 최소화 핵심
-V2_MD_SYMBOLS        = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
+V2_MD_SYMBOLS        = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',               # 기존
+    'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
+]
 V2_MD_FUNDING_ENTER  = 0.0005   # 진입 임계값: +0.05%/8h 이상
 V2_MD_FUNDING_EXIT   = 0.0001   # 청산 임계값: +0.01%/8h 이하로 정상화
 V2_MD_LEVERAGE       = 2        # 레버리지 (방향성 리스크 최소화)
@@ -239,8 +253,11 @@ V2_MD_CHECK_SEC      = 300      # 펀딩비 확인 주기 (5분)
 # ─────────────────────────────────────────────────────────────
 # ATLAS v2 심볼 배분
 # ─────────────────────────────────────────────────────────────
-V2_MA_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']  # Module A: 추세추종 4H
-V2_MR_SYMBOLS = ['ETHUSDT', 'BNBUSDT']                         # Module B: 평균회귀 1D
+V2_MA_SYMBOLS = [                                               # Module A: 추세추종 4H
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',               # 기존 (검증됨)
+    'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장 (보수적 파라미터)
+]
+V2_MR_SYMBOLS = ['ETHUSDT', 'BNBUSDT', 'XRPUSDT']             # Module B: 평균회귀 1D
 
 # ─────────────────────────────────────────────────────────────
 # Module A: Trend Follow 4H
@@ -253,8 +270,18 @@ V2_MA_EMA_SLOW   = 50      # 진입 신호 EMA (slow)
 V2_MA_ATR_PERIOD = 14      # ATR 기간
 V2_MA_ATR_SL     = 2.5     # SL/Trailing 배수
 V2_MA_TRAIL_R    = 1.0     # BEP 트리거: 1R 이익 시 SL → 진입가
-V2_MA_RISK_PCT   = 0.018   # 거래당 리스크 1.8% (1.0% → 1.8% / MDD ~12% 허용 범위 내 수익 최대화)
-V2_MA_LEVERAGE   = 5       # 레버리지 (리스크 계산용)
+# 심볼별 레버리지/리스크 — 신규 심볼은 백테스트 없으므로 보수적 시작 (3x / 1.0%)
+# 트랙레코드 30건 이상 쌓이면 단계적 상향 검토
+V2_MA_LEVERAGE = {
+    'BTCUSDT': 5, 'ETHUSDT': 5, 'SOLUSDT': 3, 'BNBUSDT': 5,          # 기존
+    'XRPUSDT': 3, 'ADAUSDT': 3, 'AVAXUSDT': 3, 'LINKUSDT': 3,        # 1차 확장
+    'DOTUSDT': 2,                                                        # DOT: 낮은 유동성 → 2x
+}
+V2_MA_RISK_PCT = {
+    'BTCUSDT': 0.018, 'ETHUSDT': 0.018, 'SOLUSDT': 0.018, 'BNBUSDT': 0.018,  # 기존
+    'XRPUSDT': 0.010, 'ADAUSDT': 0.010, 'AVAXUSDT': 0.010, 'LINKUSDT': 0.010, # 1차 확장
+    'DOTUSDT': 0.008,                                                            # DOT: 더 보수적
+}
 V2_MA_COOLDOWN   = 2       # 청산 후 쿨다운 봉수 (4H 기준 → 8H)
 V2_MA_ADX_MIN    = 20      # EMA 크로스 진입 시 ADX 최소값 (방향성 모멘텀 확인)
 

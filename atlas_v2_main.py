@@ -1116,10 +1116,12 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         tp_price = entry_price - atr_curr * V2_MA_ATR_SL * 2.0
 
     strategy = strategy_long if direction == 'LONG' else strategy_short
-    log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} 레짐={regime}')
+    leverage = V2_MA_LEVERAGE.get(sym, 3)
+    risk_pct = V2_MA_RISK_PCT.get(sym, 0.010)
+    log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} 레짐={regime} {leverage}x/{risk_pct*100:.1f}%')
     enter_position(ccxt_sym, strategy, sym, direction, 'MA', 2.0,
                    entry_price, sl_price, tp_price,
-                   V2_MA_LEVERAGE, V2_MA_RISK_PCT)
+                   leverage, risk_pct)
 
 
 def ma_symbol_loop(sym: str, cache: CandleCache):
@@ -1283,8 +1285,13 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
         sl_price = entry_price + atr * V2_MR_ATR_SL
         tp_price = entry_price - atr * V2_MR_ATR_SL * 2.0
 
-    # BNB: IS 7건으로 통계 불충분 → 리스크 절반. 실전 20건 이상 축적 후 상향 검토
-    risk_pct = V2_MR_RISK_PCT_BNB if sym == 'BNBUSDT' else V2_MR_RISK_PCT
+    # 심볼별 리스크 — 백테스트 미검증 심볼은 최소 리스크로 시작
+    _MR_RISK = {
+        'ETHUSDT': V2_MR_RISK_PCT,
+        'BNBUSDT': V2_MR_RISK_PCT_BNB,   # IS 7건 → 0.4%
+        'XRPUSDT': 0.004,                 # 신규: 0.4% (검증 후 상향)
+    }
+    risk_pct = _MR_RISK.get(sym, 0.004)
 
     strategy = strategy_long if direction == 'LONG' else strategy_short
     enter_position(ccxt_sym, strategy, sym, direction, 'MR', 2.0,
