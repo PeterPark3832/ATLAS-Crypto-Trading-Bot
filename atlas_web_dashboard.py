@@ -60,6 +60,31 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
+# ── 실잔고 캐시 (Binance API, 5분 TTL) ───────────────────────────
+_balance_cache: dict = {'val': None, 'ts': 0.0}
+_BALANCE_TTL = 300
+
+def _actual_balance() -> float | None:
+    now = time.time()
+    if _balance_cache['val'] is not None and now - _balance_cache['ts'] < _BALANCE_TTL:
+        return _balance_cache['val']
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return None
+    try:
+        import ccxt as _ccxt
+        ex = _ccxt.binanceusdm({
+            'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET,
+            'enableRateLimit': True, 'options': {'defaultType': 'future'},
+        })
+        bal = ex.fetch_balance()
+        val = float(bal['USDT']['total'])
+        _balance_cache['val'] = val
+        _balance_cache['ts']  = now
+        return val
+    except Exception as e:
+        log.error(f'실잔고 조회 실패: {e}')
+        return _balance_cache['val']
+
 # ── Telegram ──────────────────────────────────────────────────────
 def _tg(msg: str):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -88,11 +113,13 @@ def _q(sql: str, params=()) -> pd.DataFrame:
 def _trades(days: int = 9999) -> pd.DataFrame:
     w = '' if days >= 9999 else f"WHERE exit_ts >= datetime('now','-{days} days')"
     df = _q(f"""SELECT strategy,symbol,direction,entry_price,exit_price,
-                       qty,leverage,pnl_usd,pnl_r,rr,reason,regime,entry_ts,exit_ts
+                       qty,leverage,pnl_usd,pnl_r,rr,reason,regime,entry_ts,exit_ts,
+                       COALESCE(fee_usd,0) AS fee_usd
                 FROM trades {w} ORDER BY exit_ts ASC""")
     if not df.empty:
         df['exit_ts']  = pd.to_datetime(df['exit_ts'],  utc=True, errors='coerce')
         df['entry_ts'] = pd.to_datetime(df['entry_ts'], utc=True, errors='coerce')
+        df['net_pnl']  = df['pnl_usd'] - df['fee_usd']
     return df
 
 def _positions() -> pd.DataFrame:
@@ -101,24 +128,28 @@ def _positions() -> pd.DataFrame:
                  FROM positions ORDER BY entry_ts DESC""")
 
 def _metrics(df: pd.DataFrame) -> dict:
-    empty = dict(total=0,wins=0,wr=0,total_pnl=0,pf=0,avg_r=0,
-                 mdd_pct=0,mdd_usd=0,sharpe=0,equity=INITIAL_CAPITAL)
+    empty = dict(total=0,wins=0,wr=0,total_pnl=0,gross_pnl=0,total_fee=0,
+                 pf=0,avg_r=0,mdd_pct=0,mdd_usd=0,sharpe=0,equity=INITIAL_CAPITAL)
     if df.empty:
         return empty
-    total = len(df); wins = int((df['pnl_usd']>0).sum())
-    pnl   = float(df['pnl_usd'].sum())
-    gw    = float(df[df['pnl_usd']>0]['pnl_usd'].sum())
-    gl    = abs(float(df[df['pnl_usd']<0]['pnl_usd'].sum()))
+    net   = df['net_pnl'] if 'net_pnl' in df.columns else df['pnl_usd']
+    total = len(df); wins = int((net>0).sum())
+    pnl   = float(net.sum())                          # 순수익 (수수료 차감)
+    gross = float(df['pnl_usd'].sum())                # 총수익 (수수료 전)
+    fee   = float(df['fee_usd'].sum()) if 'fee_usd' in df.columns else 0
+    gw    = float(net[net>0].sum())
+    gl    = abs(float(net[net<0].sum()))
     pf    = round(gw/gl, 2) if gl>0 else 0
-    cum   = df['pnl_usd'].cumsum().values
+    cum   = net.cumsum().values
     dd    = np.maximum.accumulate(cum) - cum
     mdd_u = float(dd.max()); mdd_p = mdd_u/INITIAL_CAPITAL*100
     sharpe = 0.0
     if not df['exit_ts'].isna().all():
-        d = df.set_index('exit_ts')['pnl_usd'].resample('1D').sum().fillna(0)
+        d = df.set_index('exit_ts')['net_pnl'].resample('1D').sum().fillna(0) if 'net_pnl' in df.columns else df.set_index('exit_ts')['pnl_usd'].resample('1D').sum().fillna(0)
         if len(d)>1 and d.std()>0:
             sharpe = round(d.mean()/d.std()*(365**0.5), 2)
-    return dict(total=total,wins=wins,wr=round(wins/total*100,1),total_pnl=round(pnl,2),
+    return dict(total=total,wins=wins,wr=round(wins/total*100,1),
+                total_pnl=round(pnl,2),gross_pnl=round(gross,2),total_fee=round(fee,2),
                 pf=pf,avg_r=round(float(df['pnl_r'].mean()),3),
                 mdd_pct=round(mdd_p,1),mdd_usd=round(mdd_u,2),
                 sharpe=sharpe,equity=round(INITIAL_CAPITAL+pnl,2))
@@ -373,23 +404,29 @@ async def dashboard(token: str, period: int = 0):
 
     alerts = _alerts(m, bot_alive)
 
-    # 수익 곡선
+    # 실잔고 조회 (Binance API)
+    actual_bal = _actual_balance()
+
+    # 수익 곡선 (net_pnl 기반)
     eq_curve = []
     if not df.empty:
         d = df.sort_values('exit_ts').copy()
-        d['eq'] = INITIAL_CAPITAL + d['pnl_usd'].cumsum()
+        net_col = 'net_pnl' if 'net_pnl' in d.columns else 'pnl_usd'
+        d['eq'] = INITIAL_CAPITAL + d[net_col].cumsum()
         for _, r in d.iterrows():
             eq_curve.append({'ts':r['exit_ts'].isoformat() if pd.notna(r['exit_ts']) else None,
                              'eq':round(float(r['eq']),2),'reason':r['reason'],
-                             'pnl':round(float(r['pnl_usd']),2)})
+                             'pnl':round(float(r[net_col]),2),
+                             'fee':round(float(r.get('fee_usd',0)),2)})
 
-    # 일별 PnL
+    # 일별 PnL (net_pnl 기반)
     daily = []
     if not df.empty and not df['exit_ts'].isna().all():
-        for ts, v in df.set_index('exit_ts')['pnl_usd'].resample('1D').sum().tail(30).items():
+        net_col = 'net_pnl' if 'net_pnl' in df.columns else 'pnl_usd'
+        for ts, v in df.set_index('exit_ts')[net_col].resample('1D').sum().tail(30).items():
             daily.append({'date':ts.strftime('%m/%d'),'pnl':round(float(v),2)})
 
-    # 모듈별
+    # 모듈별 (net_pnl 기반)
     MOD = {'V2_MA_LONG':'A 추세','V2_MA_SHORT':'A 추세',
            'V2_MR_LONG':'B 평균회귀','V2_MR_SHORT':'B 평균회귀',
            'V2_MC_LONG':'C 브레이크아웃','V2_MC_SHORT':'C 브레이크아웃',
@@ -397,13 +434,15 @@ async def dashboard(token: str, period: int = 0):
     module_stats = []
     if not df.empty:
         d2 = df.copy(); d2['mod'] = d2['strategy'].map(MOD).fillna(d2['strategy'])
+        net_col = 'net_pnl' if 'net_pnl' in d2.columns else 'pnl_usd'
         for mod, g in d2.groupby('mod'):
-            t=len(g); w=int((g['pnl_usd']>0).sum())
-            gw=float(g[g['pnl_usd']>0]['pnl_usd'].sum())
-            gl=abs(float(g[g['pnl_usd']<0]['pnl_usd'].sum()))
+            t=len(g); w=int((g[net_col]>0).sum())
+            gw=float(g[g[net_col]>0][net_col].sum())
+            gl=abs(float(g[g[net_col]<0][net_col].sum()))
             module_stats.append({'module':mod,'trades':t,'wr':round(w/t*100,0),
                                  'pf':round(gw/gl,2) if gl>0 else 0,
-                                 'pnl':round(float(g['pnl_usd'].sum()),2),
+                                 'pnl':round(float(g[net_col].sum()),2),
+                                 'fee':round(float(g['fee_usd'].sum()),2) if 'fee_usd' in g.columns else 0,
                                  'avg_r':round(float(g['pnl_r'].mean()),3),'reliable':t>=20})
 
     # 열린 포지션
@@ -450,6 +489,7 @@ async def dashboard(token: str, period: int = 0):
         streak={'count':cnt,'kind':'win' if is_win else 'loss'}
 
     return {'metrics':m,'regime':regime,'streak':streak,
+            'actual_balance': actual_bal,
             'bot_alive':bot_alive,'log_time':log_time,'alerts':alerts,
             'eq_curve':eq_curve,'daily':daily,'module_stats':module_stats,
             'sym_dir':_sym_dir_stats(df),'recent':recent,'open_pos':open_pos,

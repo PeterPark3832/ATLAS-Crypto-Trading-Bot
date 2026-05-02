@@ -774,7 +774,7 @@ function render(d) {
   renderAlerts(d.alerts || []);
   renderRegimeBadge(d.regime);
   renderStreakBadge(d.streak);
-  renderKPIs(m, d.regime);
+  renderKPIs(m, d.regime, d.actual_balance);
   renderEqChart(d.eq_curve);
   renderDailyChart(d.daily);
   renderModChart(d.module_stats);
@@ -851,12 +851,17 @@ function setKPI(id, val, cls) {
   const el = document.getElementById(id);
   el.textContent = val; el.className = 'kpi-val ' + (cls || '');
 }
-function renderKPIs(m, regime) {
-  // PnL
+function renderKPIs(m, regime, actualBal) {
+  // PnL (순수익 = 수수료 차감)
   const pnlC = m.total_pnl >= 0 ? 'pos' : 'neg';
   setKPI('k-pnl', `${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)}`, pnlC);
-  document.getElementById('k-equity').textContent = `잔고 $${m.equity.toFixed(2)}`;
   document.getElementById('kpi-pnl-acc').style.background = m.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // 잔고 표시: 실잔고(API) 우선, 없으면 계산값
+  const dispBal  = actualBal != null ? actualBal : m.equity;
+  const feeStr   = m.total_fee > 0 ? ` · 수수료 -$${m.total_fee.toFixed(2)}` : '';
+  const balLabel = actualBal != null ? `거래소 $${dispBal.toFixed(2)}${feeStr}` : `잔고 $${dispBal.toFixed(2)}${feeStr}`;
+  document.getElementById('k-equity').textContent = balLabel;
 
   // WR
   const wrC = m.wr >= 40 ? 'pos' : m.wr >= 33 ? '' : 'neg';
@@ -885,9 +890,11 @@ function renderKPIs(m, regime) {
   document.getElementById('k-regime-sub').textContent = regime || '—';
   document.getElementById('tab-pos-cnt').textContent = '';
 
-  // eq badge
+  // eq badge: 실잔고 기준으로 수익률 표시
+  const refBal = actualBal != null ? actualBal : m.equity;
+  const retPct = (refBal - 1000) / 1000 * 100;
   document.getElementById('eq-badge').textContent =
-    `$${m.equity.toFixed(2)} (${m.total_pnl>=0?'+':''}${(m.total_pnl/1000*100).toFixed(1)}%)`;
+    `$${refBal.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
 }
 
 // ── 차트 공통 ─────────────────────────────────────────────────

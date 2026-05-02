@@ -279,12 +279,25 @@ def init_db():
             reason      TEXT,
             entry_ts    TEXT,
             exit_ts     TEXT,
-            regime      TEXT
+            regime      TEXT,
+            fee_usd     REAL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
             value TEXT
         );
+        """)
+    # 기존 DB 마이그레이션: fee_usd 컬럼 추가 + 과거 거래 소급 계산
+    with _db_conn() as con:
+        try:
+            con.execute('ALTER TABLE trades ADD COLUMN fee_usd REAL DEFAULT 0')
+        except Exception:
+            pass  # 이미 존재
+        # 과거 거래 수수료 소급 (entry/exit 가격 기반 추정)
+        con.execute("""
+            UPDATE trades
+            SET fee_usd = ROUND(entry_price * qty * 0.0002 + exit_price * qty * 0.0005, 6)
+            WHERE (fee_usd = 0 OR fee_usd IS NULL) AND entry_price > 0
         """)
     log('[DB] atlas_v2.db 초기화 완료')
 
@@ -341,14 +354,16 @@ def update_position_bep(strategy, symbol):
 def log_trade(strategy, symbol, direction, mode, entry, exit_px,
               qty, leverage, pnl_usd, pnl_r, rr, hold_h, reason,
               entry_ts, regime_name):
+    # 수수료: 진입 maker 0.02% + 청산 taker 0.05%
+    fee_usd = round(entry * qty * 0.0002 + exit_px * qty * 0.0005, 6)
     _db_exec("""
         INSERT INTO trades
         (strategy,symbol,direction,mode,entry_price,exit_price,qty,leverage,
-         pnl_usd,pnl_r,rr,hold_hours,reason,entry_ts,exit_ts,regime)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         pnl_usd,pnl_r,rr,hold_hours,reason,entry_ts,exit_ts,regime,fee_usd)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (strategy, symbol, direction, mode, entry, exit_px, qty, leverage,
           pnl_usd, pnl_r, rr, hold_h, reason, entry_ts,
-          datetime.now(timezone.utc).isoformat(), regime_name))
+          datetime.now(timezone.utc).isoformat(), regime_name, fee_usd))
 
     # Kelly 통계 갱신
     with _shared_lock:
