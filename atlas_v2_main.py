@@ -75,8 +75,10 @@ from atlas_config import (
     V2_MA_EMA_FAST, V2_MA_EMA_SLOW, V2_MA_ATR_PERIOD,
     V2_MA_ATR_SL, V2_MA_TRAIL_R, V2_MA_RISK_PCT,
     V2_MA_LEVERAGE, V2_MA_COOLDOWN, V2_MA_ADX_MIN,
+    V2_MA_WEAK_TREND_RISK_MULT,
     # Module B
     V2_MR_RSI_PERIOD, V2_MR_RSI_LONG, V2_MR_RSI_SHORT,
+    V2_MR_RSI_LONG_WEAK, V2_MR_RSI_SHORT_WEAK,
     V2_MR_BB_PERIOD, V2_MR_BB_SIGMA, V2_MR_ATR_PERIOD,
     V2_MR_ATR_SL, V2_MR_MAX_BARS,
     V2_MR_RISK_PCT, V2_MR_RISK_PCT_BNB, V2_MR_LEVERAGE,
@@ -582,7 +584,7 @@ def place_exchange_sl(ccxt_sym: str, pos_side: str, qty: float, sl_price: float)
     try:
         order = _get_ex().create_order(
             ccxt_sym, 'stop_market', close_side, qty,
-            params={'stopPrice': sl_price, 'closePosition': True, 'reduceOnly': True})
+            params={'stopPrice': sl_price, 'closePosition': True})
         return order.get('id', '')
     except Exception as e:
         log(f'[SL Order] {ccxt_sym} 등록 실패: {e}', 'warning')
@@ -1129,6 +1131,8 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
     strategy = strategy_long if direction == 'LONG' else strategy_short
     leverage = V2_MA_LEVERAGE.get(sym, 3)
     risk_pct = V2_MA_RISK_PCT.get(sym, 0.010)
+    if regime == REGIME_WEAK_TREND:
+        risk_pct *= V2_MA_WEAK_TREND_RISK_MULT
     log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} 레짐={regime} {leverage}x/{risk_pct*100:.1f}%')
     enter_position(ccxt_sym, strategy, sym, direction, 'MA', 2.0,
                    entry_price, sl_price, tp_price,
@@ -1251,19 +1255,31 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
     if atr <= 0:
         return
 
-    # RSI 크로스오버 신호
+    # RSI 크로스오버 신호 — 레짐별 임계값 분리
+    if regime == REGIME_WEAK_TREND:
+        rsi_long_thr  = V2_MR_RSI_LONG_WEAK   # 40 (완화)
+        rsi_short_thr = V2_MR_RSI_SHORT_WEAK  # 60 (완화)
+    else:
+        rsi_long_thr  = V2_MR_RSI_LONG        # 35 (RANGING 전용 극단값)
+        rsi_short_thr = V2_MR_RSI_SHORT       # 65
+
     direction = None
-    if rsi_prev < V2_MR_RSI_LONG and rsi_curr >= V2_MR_RSI_LONG:
+    if rsi_prev < rsi_long_thr and rsi_curr >= rsi_long_thr:
         direction = 'LONG'
-    elif rsi_prev > V2_MR_RSI_SHORT and rsi_curr <= V2_MR_RSI_SHORT:
+    elif rsi_prev > rsi_short_thr and rsi_curr <= rsi_short_thr:
         direction = 'SHORT'
 
     if direction is None:
-        log(f'[MR 스킵] {sym} RSI 크로스 없음 (RSI={rsi_curr:.1f}, 기준 L<{V2_MR_RSI_LONG}/S>{V2_MR_RSI_SHORT})')
+        log(f'[MR 스킵] {sym} RSI 크로스 없음 (RSI={rsi_curr:.1f}, 기준 L<{rsi_long_thr}/S>{rsi_short_thr}) 레짐={regime}')
         return
 
-    # BB 위치 필터 — 단일 RSI 신호 약점 보완
-    bb_tolerance = 0.02 if regime == REGIME_RANGING else 0.03
+    # BB 위치 필터 — WEAK_TREND는 중간 되돌림 포착이라 허용 범위 더 넓게
+    if regime == REGIME_RANGING:
+        bb_tolerance = 0.02
+    elif regime == REGIME_WEAK_TREND:
+        bb_tolerance = 0.05  # 5% 허용 (WEAK_TREND RSI 40/60은 BB 극단이 아닐 수 있음)
+    else:
+        bb_tolerance = 0.03
     if direction == 'LONG' and bb_lower > 0 and close_curr > bb_lower * (1 + bb_tolerance):
         log(f'[MR 스킵] {sym} LONG BB 미충족 '
             f'(종가={close_curr:.2f} > BB하단×{1+bb_tolerance:.3f}={bb_lower*(1+bb_tolerance):.2f})')

@@ -204,14 +204,14 @@ WF_CANDLE_LIMIT     = 500      # Walk-Forward 전용: IS 75% + OOS 25% 통계적
 #   RR 2.0 고정 (수수료 손익분기 확보, 튜닝 대상 아님)
 #   심볼별 신호 파라미터 미분리 (레버리지/리스크만 변동성 차등)
 V2_MC_SYMBOLS     = [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT',                          # 기존
+    'ETHUSDT', 'SOLUSDT',                                      # BTC 제외 (실거래 PF 0.50, 마진 부족 반복)
     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
 ]
 V2_MC_ATR_PERIOD  = 14      # A/B와 동일 (신규 하이퍼파라미터 없음)
 V2_MC_ATR_SL      = 1.0     # SL = ATR × 1.0
 V2_MC_RR          = 2.0     # 고정 RR — 변경 금지 (수수료 드래그 임계값)
 V2_MC_VOL_LB      = 20      # 거래량 평균 룩백
-V2_MC_VOL_MULT    = 1.5     # 거래량 스파이크 배수
+V2_MC_VOL_MULT    = 1.2     # 거래량 스파이크 배수 (1.5→1.2: 실거래 스킵 2941건/15일 → 신호 빈도 개선)
 V2_MC_HTF_EMA     = 21      # 1H EMA 방향 필터 (단일 파라미터)
 V2_MC_CHASE_LIMIT = 0.005   # 브레이크아웃 레벨 대비 최대 추격 거리 0.5% (0.3%→0.5% 완화, 타임아웃 스킵 감소)
 V2_MC_COOLDOWN    = 3       # 청산 후 재진입 금지 봉수 (×15분 = 45분)
@@ -224,7 +224,7 @@ V2_MC_LEVERAGE = {
     'DOTUSDT': 2,
 }
 V2_MC_RISK_PCT = {
-    'BTCUSDT': 0.010, 'ETHUSDT': 0.010, 'SOLUSDT': 0.008,              # 기존
+    'BTCUSDT': 0.010, 'ETHUSDT': 0.010, 'SOLUSDT': 0.007,              # SOL 0.008→0.007 (실거래 PF 1.01)
     'XRPUSDT': 0.007, 'ADAUSDT': 0.007, 'AVAXUSDT': 0.007, 'LINKUSDT': 0.007,  # 1차 확장
     'DOTUSDT': 0.006,
 }
@@ -240,7 +240,7 @@ V2_MD_SYMBOLS        = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',               # 기존
     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
 ]
-V2_MD_FUNDING_ENTER  = 0.0005   # 진입 임계값: +0.05%/8h 이상
+V2_MD_FUNDING_ENTER  = 0.0003   # 진입 임계값: +0.03%/8h 이상 (0.05%→0.03%: 바이낸스 평균 펀딩비 0.01% 대비 너무 높아 MD 미발동)
 V2_MD_FUNDING_EXIT   = 0.0001   # 청산 임계값: +0.01%/8h 이하로 정상화
 V2_MD_LEVERAGE       = 2        # 레버리지 (방향성 리스크 최소화)
 V2_MD_RISK_PCT       = 0.010    # 거래당 리스크 1.0%
@@ -282,17 +282,20 @@ V2_MA_RISK_PCT = {
     'XRPUSDT': 0.010, 'ADAUSDT': 0.010, 'AVAXUSDT': 0.010, 'LINKUSDT': 0.010, # 1차 확장
     'DOTUSDT': 0.008,                                                            # DOT: 더 보수적
 }
-V2_MA_COOLDOWN   = 2       # 청산 후 쿨다운 봉수 (4H 기준 → 8H)
-V2_MA_ADX_MIN    = 20      # EMA 크로스 진입 시 ADX 최소값 (방향성 모멘텀 확인)
+V2_MA_COOLDOWN            = 2    # 청산 후 쿨다운 봉수 (4H 기준 → 8H)
+V2_MA_ADX_MIN             = 15   # EMA 크로스 진입 시 ADX 최소값 (20→15: 실거래 ADX 스킵 227건/15일 → 신호 빈도 개선)
+V2_MA_WEAK_TREND_RISK_MULT = 0.7  # WEAK_TREND 레짐 진입 시 리스크 70% 적용 (노이즈 보정)
 
 # ─────────────────────────────────────────────────────────────
 # Module B: Mean Reversion 1D
 # ─────────────────────────────────────────────────────────────
 # RSI < 30 + 종가 ≤ BB_lower → LONG / RSI > 70 + 종가 ≥ BB_upper → SHORT
 # 레짐: RANGING 전용 / TP: BB_mid(SMA20) / 최대보유: 15봉
-V2_MR_RSI_PERIOD = 14
-V2_MR_RSI_LONG   = 35      # RSI < 35 = 과매도 구간 (회복 크로스 후 LONG)
-V2_MR_RSI_SHORT  = 65      # RSI > 65 = 과매수 구간 (하락 크로스 후 SHORT)
+V2_MR_RSI_PERIOD    = 14
+V2_MR_RSI_LONG      = 35   # RSI < 35 = 과매도 구간 (RANGING 전용)
+V2_MR_RSI_SHORT     = 65   # RSI > 65 = 과매수 구간 (RANGING 전용)
+V2_MR_RSI_LONG_WEAK  = 40  # WEAK_TREND 완화 임계값 (35→40: 횡보-약추세 구간 중간 되돌림 포착)
+V2_MR_RSI_SHORT_WEAK = 60  # WEAK_TREND 완화 임계값 (65→60)
 V2_MR_BB_PERIOD  = 20      # BB / SMA 기간
 V2_MR_BB_SIGMA   = 2.0     # BB 표준편차 배수
 V2_MR_ATR_PERIOD = 14      # ATR 기간
