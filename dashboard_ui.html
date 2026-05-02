@@ -207,13 +207,15 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .kelly-stats{display:flex;gap:12px;font-size:12px;font-weight:600}
 
 /* ── Stage 2: 거래 필터 ── */
-.trade-filter{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-.filter-label{font-size:11px;color:var(--dim2);margin-right:4px}
+.filter-label{font-size:11px;color:var(--dim2);min-width:28px;flex-shrink:0}
 .filter-btn{background:var(--card2);border:1px solid var(--border);color:var(--dim2);
   padding:4px 10px;border-radius:5px;font-size:11px;font-weight:500;transition:all .15s}
 .filter-btn:hover{color:var(--text);border-color:var(--border2)}
 .filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
-.filter-sep{width:1px;height:16px;background:var(--border);margin:0 2px}
+/* 3줄 필터 그리드 */
+.trade-filter-grid{display:flex;flex-direction:column;gap:7px;margin-bottom:14px}
+.filter-row{display:flex;align-items:center;gap:8px}
+.filter-btns-wrap{display:flex;flex-wrap:wrap;gap:4px}
 
 /* ── Stage 3: 제어 패널 ── */
 .ctrl-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
@@ -317,6 +319,13 @@ button:disabled{opacity:.4;cursor:not-allowed}
   th,td{padding:7px 8px;font-size:12px}
   .updated-text{display:none}
   .status-label{display:none}
+  /* 모바일 상단바 버튼 텍스트 숨김 */
+  .btn-text{display:none}
+  .btn-icon-mobile{display:inline}
+  .btn-icon{padding:6px 9px;min-width:32px;justify-content:center}
+}
+@media(min-width:769px){
+  .btn-icon-mobile{display:none}
 }
 @media(max-width:480px){
   .kpi-row{grid-template-columns:1fr 1fr}
@@ -349,7 +358,6 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div class="topbar-left">
       <div class="logo">📈 <span class="logo-text">ATLAS v2</span></div>
       <div id="regime-badge-wrap"></div>
-      <div id="streak-badge-wrap"></div>
     </div>
     <div class="topbar-right">
       <div style="display:flex;align-items:center;gap:6px">
@@ -358,9 +366,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
       </div>
       <div class="countdown" id="countdown">—</div>
       <button class="btn-icon" onclick="manualRefresh()">
-        <span id="refresh-icon">↻</span> 갱신
+        <span id="refresh-icon">↻</span><span class="btn-text"> 갱신</span>
       </button>
-      <button class="btn-icon" onclick="logout()">나가기</button>
+      <button class="btn-icon" onclick="logout()"><span class="btn-text">나가기</span><span class="btn-icon-mobile">✕</span></button>
     </div>
   </div>
 
@@ -374,7 +382,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
         <button class="period-btn" data-days="7" onclick="setPeriod(this)">7일</button>
         <button class="period-btn" data-days="1" onclick="setPeriod(this)">오늘</button>
       </div>
-      <span class="updated-text" id="updated-at"></span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div id="streak-badge-wrap"></div>
+        <span class="updated-text" id="updated-at"></span>
+      </div>
     </div>
 
     <!-- 경고 배너 -->
@@ -541,28 +552,38 @@ button:disabled{opacity:.4;cursor:not-allowed}
           </div>
         </div>
         <!-- 필터 -->
-        <div class="trade-filter">
-          <span class="filter-label">방향</span>
-          <button class="filter-btn active" data-filter="dir" data-val="ALL" onclick="setTradeFilter('dir','ALL',this)">전체</button>
-          <button class="filter-btn" data-filter="dir" data-val="LONG" onclick="setTradeFilter('dir','LONG',this)">🟢 LONG</button>
-          <button class="filter-btn" data-filter="dir" data-val="SHORT" onclick="setTradeFilter('dir','SHORT',this)">🔴 SHORT</button>
-          <div class="filter-sep"></div>
-          <span class="filter-label">심볼</span>
-          <button class="filter-btn active" data-filter="sym" data-val="ALL" onclick="setTradeFilter('sym','ALL',this)">전체</button>
-          <button class="filter-btn" data-filter="sym" data-val="BTC" onclick="setTradeFilter('sym','BTC',this)">BTC</button>
-          <button class="filter-btn" data-filter="sym" data-val="ETH" onclick="setTradeFilter('sym','ETH',this)">ETH</button>
-          <button class="filter-btn" data-filter="sym" data-val="SOL" onclick="setTradeFilter('sym','SOL',this)">SOL</button>
-          <button class="filter-btn" data-filter="sym" data-val="BNB" onclick="setTradeFilter('sym','BNB',this)">BNB</button>
-          <button class="filter-btn" data-filter="sym" data-val="XRP" onclick="setTradeFilter('sym','XRP',this)">XRP</button>
-          <button class="filter-btn" data-filter="sym" data-val="ADA" onclick="setTradeFilter('sym','ADA',this)">ADA</button>
-          <button class="filter-btn" data-filter="sym" data-val="AVAX" onclick="setTradeFilter('sym','AVAX',this)">AVAX</button>
-          <button class="filter-btn" data-filter="sym" data-val="LINK" onclick="setTradeFilter('sym','LINK',this)">LINK</button>
-          <button class="filter-btn" data-filter="sym" data-val="DOT" onclick="setTradeFilter('sym','DOT',this)">DOT</button>
-          <div class="filter-sep"></div>
-          <span class="filter-label">사유</span>
-          <button class="filter-btn active" data-filter="reason" data-val="ALL" onclick="setTradeFilter('reason','ALL',this)">전체</button>
-          <button class="filter-btn" data-filter="reason" data-val="TP" onclick="setTradeFilter('reason','TP',this)">TP</button>
-          <button class="filter-btn" data-filter="reason" data-val="SL" onclick="setTradeFilter('reason','SL',this)">SL</button>
+        <div class="trade-filter-grid">
+          <div class="filter-row">
+            <span class="filter-label">방향</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="dir" data-val="ALL"   onclick="setTradeFilter('dir','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="dir" data-val="LONG"  onclick="setTradeFilter('dir','LONG',this)">🟢 LONG</button>
+              <button class="filter-btn"        data-filter="dir" data-val="SHORT" onclick="setTradeFilter('dir','SHORT',this)">🔴 SHORT</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">심볼</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="sym" data-val="ALL"  onclick="setTradeFilter('sym','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="sym" data-val="BTC"  onclick="setTradeFilter('sym','BTC',this)">BTC</button>
+              <button class="filter-btn"        data-filter="sym" data-val="ETH"  onclick="setTradeFilter('sym','ETH',this)">ETH</button>
+              <button class="filter-btn"        data-filter="sym" data-val="SOL"  onclick="setTradeFilter('sym','SOL',this)">SOL</button>
+              <button class="filter-btn"        data-filter="sym" data-val="BNB"  onclick="setTradeFilter('sym','BNB',this)">BNB</button>
+              <button class="filter-btn"        data-filter="sym" data-val="XRP"  onclick="setTradeFilter('sym','XRP',this)">XRP</button>
+              <button class="filter-btn"        data-filter="sym" data-val="ADA"  onclick="setTradeFilter('sym','ADA',this)">ADA</button>
+              <button class="filter-btn"        data-filter="sym" data-val="AVAX" onclick="setTradeFilter('sym','AVAX',this)">AVAX</button>
+              <button class="filter-btn"        data-filter="sym" data-val="LINK" onclick="setTradeFilter('sym','LINK',this)">LINK</button>
+              <button class="filter-btn"        data-filter="sym" data-val="DOT"  onclick="setTradeFilter('sym','DOT',this)">DOT</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">사유</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="reason" data-val="ALL" onclick="setTradeFilter('reason','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="reason" data-val="TP"  onclick="setTradeFilter('reason','TP',this)">TP</button>
+              <button class="filter-btn"        data-filter="reason" data-val="SL"  onclick="setTradeFilter('reason','SL',this)">SL</button>
+            </div>
+          </div>
         </div>
         <div class="tbl-wrap" id="trades-table"><div class="empty">거래 내역 없음</div></div>
       </div>
