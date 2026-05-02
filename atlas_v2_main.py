@@ -827,27 +827,44 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     cancel_exchange_sl(ccxt_sym, pos.get('sl_order_id', ''))
 
     side = 'sell' if direction == 'LONG' else 'buy'
-    actual_fill = 0.0
+    actual_fill  = 0.0
+    already_gone = False
     try:
         order = _get_ex().create_market_order(ccxt_sym, side, qty, params={'reduceOnly': True})
-        # 실제 체결가 추출 (슬리피지 반영)
         actual_fill = float(order.get('average') or order.get('price') or 0)
     except Exception as e:
         err = str(e).lower()
-        # 거래소에 포지션이 이미 없는 경우 (수동 청산 등) → DB만 정리하고 정상 처리
         if any(k in err for k in ('no open', 'position not found', '-4021', '-2022',
                                    'does not exist', 'reduceonly')):
+            # 거래소 SL이 먼저 발동돼 포지션이 이미 없음 — 실체결가 조회
             log(f'[수동청산 감지] {sym} {strategy}: 포지션이 거래소에 없음 — DB 정리')
             tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\nDB 자동 정리 완료')
-            # 아래 log_trade + delete_position 으로 진행 (return False 하지 않음)
+            already_gone = True
         else:
             log(f'[청산실패] {sym} {strategy}: {e}', 'error')
             return False
 
-    # 실제 체결가가 있으면 사용, 없으면 ticker 가격으로 폴백
+    # 실체결가 우선 사용. 포지션이 거래소 SL로 먼저 소멸된 경우 fetch_my_trades로 재조회
     if actual_fill > 0:
-        log(f'[청산체결] {sym} 실체결가={actual_fill:.4f} (ticker={exit_price:.4f}, 차이={actual_fill-exit_price:+.4f})')
+        log(f'[청산체결] {sym} 실체결가={actual_fill:.4f} (ticker={exit_price:.4f} diff={actual_fill-exit_price:+.4f})')
         exit_price = actual_fill
+    elif already_gone:
+        try:
+            entry_ms   = int(datetime.fromisoformat(
+                entry_ts.replace('Z', '+00:00')).timestamp() * 1000)
+            my_trades  = _get_ex().fetch_my_trades(ccxt_sym, limit=20)
+            close_side = side  # 'sell' for LONG, 'buy' for SHORT
+            ct = [t for t in my_trades
+                  if t['timestamp'] > entry_ms and (t.get('side') or '').lower() == close_side]
+            if ct:
+                tq = sum(abs(float(t['amount'])) for t in ct)
+                tc = sum(abs(float(t['amount'])) * float(t['price']) for t in ct)
+                if tq > 0:
+                    actual_fill = tc / tq
+                    log(f'[청산체결] {sym} 거래소SL 실체결가={actual_fill:.4f} (ticker={exit_price:.4f} diff={actual_fill-exit_price:+.4f})')
+                    exit_price = actual_fill
+        except Exception as fe:
+            log(f'[청산체결] {sym} 실체결가 조회 실패: {fe} — ticker 가격 사용', 'warning')
 
     # 잔여 포지션 재청산
     time.sleep(2)
