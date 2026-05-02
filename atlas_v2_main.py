@@ -836,10 +836,14 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
         err = str(e).lower()
         if any(k in err for k in ('no open', 'position not found', '-4021', '-2022',
                                    'does not exist', 'reduceonly')):
-            # 거래소 SL이 먼저 발동돼 포지션이 이미 없음 — 실체결가 조회
-            log(f'[수동청산 감지] {sym} {strategy}: 포지션이 거래소에 없음 — DB 정리')
-            tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\nDB 자동 정리 완료')
             already_gone = True
+            if reason in ('SL', 'TP', 'BEP-SL', 'TIME'):
+                # 봇이 설정한 거래소 주문(stop_market 등)이 먼저 체결된 것 — 정상 흐름
+                log(f'[거래소 선체결] {sym} {strategy}: 거래소 {reason} 주문 선체결 감지 — 실체결가 조회')
+            else:
+                # 사용자 수동청산
+                log(f'[수동청산 감지] {sym} {strategy}: 포지션이 거래소에 없음 — DB 정리')
+                tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\nDB 자동 정리 완료')
         else:
             log(f'[청산실패] {sym} {strategy}: {e}', 'error')
             return False
