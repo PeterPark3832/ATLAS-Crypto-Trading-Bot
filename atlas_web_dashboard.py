@@ -1,8 +1,8 @@
 """
-ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 3)
+ATLAS v2 Web Dashboard — FastAPI 백엔드  (Stage 4)
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import os, time, secrets, sqlite3, subprocess, logging
+import io, os, time, secrets, sqlite3, subprocess, logging
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -11,7 +11,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 load_dotenv(Path(__file__).parent / '.env')
 
@@ -458,6 +458,49 @@ async def dashboard(token: str, period: int = 0):
             'monthly_pnl':_monthly_pnl(df),
             'refresh_sec':REFRESH_SEC,
             'updated_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+
+# ── Stage 4: 로그 뷰어 ──────────────────────────────────────────
+def _tail_log(path: Path, n: int) -> list[str]:
+    with open(path, 'rb') as f:
+        f.seek(0, 2)
+        size = f.tell()
+        chunk = min(size, n * 120)
+        f.seek(max(0, size - chunk))
+        data = f.read()
+    return data.decode('utf-8', errors='replace').splitlines()[-n:]
+
+@app.get('/api/logs')
+async def get_logs(token: str, lines: int = 200, filter: str = ''):
+    _auth(token)
+    try:
+        logs = sorted(LOG_DIR.glob('atlas_v2_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+        if not logs:
+            return {'lines': [], 'file': '로그 없음'}
+        raw = _tail_log(logs[0], lines)
+        if filter:
+            kws = [k.strip().lower() for k in filter.split(',') if k.strip()]
+            raw = [l for l in raw if any(k in l.lower() for k in kws)]
+        return {'lines': raw, 'file': logs[0].name}
+    except Exception as e:
+        log.error(f'로그 조회 실패: {e}')
+        return {'lines': [], 'file': '오류'}
+
+# ── Stage 4: 거래 내역 CSV ────────────────────────────────────────
+@app.get('/api/trades/csv')
+async def trades_csv(token: str, period: int = 0):
+    _auth(token)
+    df = _trades(period if period > 0 else 9999)
+    if df.empty:
+        return StreamingResponse(iter(['no data']), media_type='text/plain')
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding='utf-8-sig')
+    buf.seek(0)
+    fname = f'atlas_trades_{datetime.now().strftime("%Y%m%d")}.csv'
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type='text/csv; charset=utf-8-sig',
+        headers={'Content-Disposition': f'attachment; filename={fname}'}
+    )
 
 @app.get('/api/prices')
 async def prices(token: str, symbols: str = ''):

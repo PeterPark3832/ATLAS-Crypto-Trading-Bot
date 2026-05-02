@@ -282,6 +282,25 @@ button:disabled{opacity:.4;cursor:not-allowed}
   .modal-box{width:90%;padding:24px}
 }
 
+/* ── Stage 4: 로그 뷰어 ── */
+.log-viewer{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:'Courier New',Courier,monospace;font-size:11px;
+  line-height:1.6;height:380px;overflow-y:auto;color:var(--dim2)}
+.log-viewer .le{white-space:pre-wrap;word-break:break-all;margin-bottom:1px;padding:1px 0}
+.log-viewer .le.enter{color:#10b981}
+.log-viewer .le.exit{color:#06b6d4}
+.log-viewer .le.warn{color:#f59e0b}
+.log-viewer .le.err{color:#f43f5e}
+.log-viewer .le.skip{color:#374151}
+.log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px}
+.log-filters{display:flex;gap:4px;align-items:center}
+.log-fname{font-size:10px;color:var(--dim);font-family:monospace}
+/* ── Stage 4: CSV 버튼 ── */
+.btn-csv{background:rgba(79,142,247,0.1);border:1px solid rgba(79,142,247,0.25);
+  color:var(--blue);padding:5px 12px;border-radius:var(--radius-sm);font-size:12px;
+  font-weight:600;transition:all .15s;cursor:pointer}
+.btn-csv:hover{background:rgba(79,142,247,0.2);border-color:var(--blue)}
+
 /* ═══ 모바일 ═══ */
 @media(max-width:900px){
   .grid-3-2,.grid-2-1{grid-template-columns:1fr}
@@ -516,7 +535,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
       <div class="card">
         <div class="card-hdr">
           <span class="card-title">최근 거래</span>
-          <span class="card-badge" id="trade-count-badge">50건</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="card-badge" id="trade-count-badge">50건</span>
+            <button class="btn-csv" onclick="downloadCSV()">⬇ CSV</button>
+          </div>
         </div>
         <!-- 필터 -->
         <div class="trade-filter">
@@ -531,6 +553,11 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <button class="filter-btn" data-filter="sym" data-val="ETH" onclick="setTradeFilter('sym','ETH',this)">ETH</button>
           <button class="filter-btn" data-filter="sym" data-val="SOL" onclick="setTradeFilter('sym','SOL',this)">SOL</button>
           <button class="filter-btn" data-filter="sym" data-val="BNB" onclick="setTradeFilter('sym','BNB',this)">BNB</button>
+          <button class="filter-btn" data-filter="sym" data-val="XRP" onclick="setTradeFilter('sym','XRP',this)">XRP</button>
+          <button class="filter-btn" data-filter="sym" data-val="ADA" onclick="setTradeFilter('sym','ADA',this)">ADA</button>
+          <button class="filter-btn" data-filter="sym" data-val="AVAX" onclick="setTradeFilter('sym','AVAX',this)">AVAX</button>
+          <button class="filter-btn" data-filter="sym" data-val="LINK" onclick="setTradeFilter('sym','LINK',this)">LINK</button>
+          <button class="filter-btn" data-filter="sym" data-val="DOT" onclick="setTradeFilter('sym','DOT',this)">DOT</button>
           <div class="filter-sep"></div>
           <span class="filter-label">사유</span>
           <button class="filter-btn active" data-filter="reason" data-val="ALL" onclick="setTradeFilter('reason','ALL',this)">전체</button>
@@ -576,6 +603,23 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <div class="ctrl-log" id="panic-log" style="margin-top:12px">대기 중...</div>
         </div>
       </div>
+      <!-- Stage 4: 로그 뷰어 -->
+      <div class="card" style="margin-top:12px">
+        <div class="log-hdr">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="card-title">실시간 로그</span>
+            <span class="log-fname" id="log-file-name"></span>
+          </div>
+          <div class="log-filters">
+            <button class="filter-btn active" data-lf="ALL"   onclick="setLogFilter('ALL',this)">전체</button>
+            <button class="filter-btn"        data-lf="TRADE" onclick="setLogFilter('TRADE',this)">진입·청산</button>
+            <button class="filter-btn"        data-lf="WARN"  onclick="setLogFilter('WARN',this)">경고·에러</button>
+            <button class="filter-btn"        data-lf="SKIP"  onclick="setLogFilter('SKIP',this)">스킵</button>
+            <button class="btn-icon" onclick="loadLogs()" style="margin-left:4px">↻</button>
+          </div>
+        </div>
+        <div class="log-viewer" id="log-viewer"><div class="le">제어 탭에 접속하면 로그가 표시됩니다.</div></div>
+      </div>
     </div>
 
   </div><!-- /main -->
@@ -609,6 +653,8 @@ let eqChart = null, dailyChart = null, modChart = null, wrChart = null, ddChart 
 let refreshTimer = null, countdownTimer = null, countdownVal = 60;
 let allTrades = [];
 let tradeFilters = {dir:'ALL', sym:'ALL', reason:'ALL'};
+// Stage 4
+let logFilter = 'ALL', logInterval = null, posRefreshInterval = null;
 
 // ── 인증 ──────────────────────────────────────────────────────
 async function doLogin() {
@@ -694,6 +740,8 @@ function switchTab(name, el) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
+  clearInterval(logInterval); logInterval = null;
+  if (name === 'control') { loadLogs(); logInterval = setInterval(loadLogs, 15000); }
 }
 
 // ── 렌더 ─────────────────────────────────────────────────────
@@ -976,13 +1024,13 @@ async function renderPositions(pos) {
         const v = p.direction==='LONG'?(cur-p.entry)*p.qty:(p.entry-cur)*p.qty;
         upnl = `${v>=0?'+':''}$${v.toFixed(2)}`; upnlC = v>=0?'pos':'neg';
       }
-      return `<tr>
+      return `<tr data-sym="${p.symbol}" data-entry="${p.entry}" data-qty="${p.qty}" data-dir="${p.direction}">
         <td class="td-dim">${p.strategy}</td>
         <td class="td-bold">${p.symbol.replace('USDT','')}</td>
         <td><span class="tag ${p.direction==='LONG'?'tag-long':'tag-short'}">${p.direction==='LONG'?'L':'S'}</span></td>
         <td>${p.entry.toLocaleString()}</td>
-        <td>${cur>0?cur.toLocaleString():'—'}</td>
-        <td class="${upnlC} td-bold">${upnl}</td>
+        <td class="pos-cur">${cur>0?cur.toLocaleString():'—'}</td>
+        <td class="pos-upnl ${upnlC} td-bold">${upnl}</td>
         <td class="neg">${p.sl_dist}</td>
         <td class="neg">${p.sl.toLocaleString()}</td>
         <td class="pos">${p.tp.toLocaleString()}</td>
@@ -991,6 +1039,10 @@ async function renderPositions(pos) {
       </tr>`;
     }).join('')}</tbody>
   </table>`;
+
+  // 포지션 있을 때 5초마다 가격만 갱신
+  clearInterval(posRefreshInterval); posRefreshInterval = null;
+  if (pos.length > 0) posRefreshInterval = setInterval(refreshPosPrices, 5000);
 }
 
 // ── 거래 필터 ─────────────────────────────────────────────────
@@ -1206,6 +1258,81 @@ async function executePanic() {
     }
   } catch(e) {
     logEl.textContent = `네트워크 오류: ${e.message}`;
+  }
+}
+
+// ── Stage 4: 포지션 빠른 가격 갱신 (5초) ────────────────────
+async function refreshPosPrices() {
+  const rows = document.querySelectorAll('#pos-table tbody tr[data-sym]');
+  if (!rows.length) { clearInterval(posRefreshInterval); return; }
+  const syms = [...new Set([...rows].map(r => r.dataset.sym))].join(',');
+  try {
+    const r = await fetch(`/api/prices?token=${TOKEN}&symbols=${syms}`);
+    if (!r.ok) return;
+    const prices = await r.json();
+    rows.forEach(row => {
+      const cur = prices[row.dataset.sym];
+      if (!cur) return;
+      const entry = parseFloat(row.dataset.entry);
+      const qty   = parseFloat(row.dataset.qty);
+      const dir   = row.dataset.dir;
+      row.querySelector('.pos-cur').textContent = cur.toLocaleString();
+      if (entry && qty) {
+        const v = dir === 'LONG' ? (cur - entry) * qty : (entry - cur) * qty;
+        const cell = row.querySelector('.pos-upnl');
+        cell.textContent = `${v>=0?'+':''}$${v.toFixed(2)}`;
+        cell.className   = `pos-upnl td-bold ${v>=0?'pos':'neg'}`;
+      }
+    });
+  } catch(e) {}
+}
+
+// ── Stage 4: CSV 다운로드 ────────────────────────────────────
+function downloadCSV() {
+  window.open(`/api/trades/csv?token=${TOKEN}&period=${currentPeriod}`, '_blank');
+}
+
+// ── Stage 4: 로그 뷰어 ──────────────────────────────────────
+const LOG_FILTER_MAP = {ALL:'', TRADE:'진입,청산', WARN:'WARNING,ERROR,경고', SKIP:'스킵,쿨다운'};
+
+function setLogFilter(f, btn) {
+  logFilter = f;
+  document.querySelectorAll('[data-lf]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadLogs();
+}
+
+function _logClass(line) {
+  if (/\[MC? 진입\]|\[MA? 진입\]|\[MR? 진입\]|\[MD? 진입\]|\[진입\]/.test(line)) return 'enter';
+  if (/\[청산\]/.test(line)) return 'exit';
+  if (/ERROR|\[ERROR\]/.test(line)) return 'err';
+  if (/WARNING|\[WARNING\]|경고/.test(line)) return 'warn';
+  if (/스킵|쿨다운/.test(line)) return 'skip';
+  return '';
+}
+
+function _esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function loadLogs() {
+  const filter = encodeURIComponent(LOG_FILTER_MAP[logFilter] || '');
+  try {
+    const res = await fetch(`/api/logs?token=${TOKEN}&lines=200&filter=${filter}`);
+    if (res.status === 401) { logout(); return; }
+    const d = await res.json();
+    const fname = document.getElementById('log-file-name');
+    if (fname) fname.textContent = d.file || '';
+    const el = document.getElementById('log-viewer');
+    if (!d.lines || !d.lines.length) {
+      el.innerHTML = '<div class="le">로그 없음</div>'; return;
+    }
+    el.innerHTML = d.lines.map(l => {
+      const cls = _logClass(l);
+      return `<div class="le${cls?' '+cls:''}">${_esc(l)}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {
+    const el = document.getElementById('log-viewer');
+    if (el) el.textContent = `오류: ${e.message}`;
   }
 }
 
