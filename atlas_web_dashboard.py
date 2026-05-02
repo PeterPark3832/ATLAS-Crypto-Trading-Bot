@@ -60,7 +60,9 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
-# ── 실잔고 캐시 (Binance API, 5분 TTL) ───────────────────────────
+# ── 실잔고 캐시 (Binance Futures REST, ccxt 미사용, 5분 TTL) ────────
+import hashlib, hmac, urllib.parse
+
 _balance_cache: dict = {'val': None, 'ts': 0.0}
 _BALANCE_TTL = 300
 
@@ -71,19 +73,25 @@ def _actual_balance() -> float | None:
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return None
     try:
-        import ccxt as _ccxt
-        ex = _ccxt.binanceusdm({
-            'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET,
-            'enableRateLimit': True, 'options': {'defaultType': 'future'},
-        })
-        bal = ex.fetch_balance()
-        val = float(bal['USDT']['total'])
-        _balance_cache['val'] = val
-        _balance_cache['ts']  = now
-        return val
+        ts  = int(time.time() * 1000)
+        qs  = f'timestamp={ts}'
+        sig = hmac.new(BINANCE_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        r   = requests.get(
+            'https://fapi.binance.com/fapi/v2/balance',
+            params={'timestamp': ts, 'signature': sig},
+            headers={'X-MBX-APIKEY': BINANCE_API_KEY},
+            timeout=8)
+        if not r.ok:
+            raise ValueError(f'HTTP {r.status_code}: {r.text[:100]}')
+        for item in r.json():
+            if item.get('asset') == 'USDT':
+                val = float(item['balance'])
+                _balance_cache['val'] = val
+                _balance_cache['ts']  = now
+                return val
     except Exception as e:
         log.error(f'실잔고 조회 실패: {e}')
-        return _balance_cache['val']
+    return _balance_cache['val']
 
 # ── Telegram ──────────────────────────────────────────────────────
 def _tg(msg: str):
