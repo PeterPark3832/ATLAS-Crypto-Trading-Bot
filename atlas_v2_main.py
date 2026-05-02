@@ -827,8 +827,11 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     cancel_exchange_sl(ccxt_sym, pos.get('sl_order_id', ''))
 
     side = 'sell' if direction == 'LONG' else 'buy'
+    actual_fill = 0.0
     try:
-        _get_ex().create_market_order(ccxt_sym, side, qty, params={'reduceOnly': True})
+        order = _get_ex().create_market_order(ccxt_sym, side, qty, params={'reduceOnly': True})
+        # 실제 체결가 추출 (슬리피지 반영)
+        actual_fill = float(order.get('average') or order.get('price') or 0)
     except Exception as e:
         err = str(e).lower()
         # 거래소에 포지션이 이미 없는 경우 (수동 청산 등) → DB만 정리하고 정상 처리
@@ -840,6 +843,11 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
         else:
             log(f'[청산실패] {sym} {strategy}: {e}', 'error')
             return False
+
+    # 실제 체결가가 있으면 사용, 없으면 ticker 가격으로 폴백
+    if actual_fill > 0:
+        log(f'[청산체결] {sym} 실체결가={actual_fill:.4f} (ticker={exit_price:.4f}, 차이={actual_fill-exit_price:+.4f})')
+        exit_price = actual_fill
 
     # 잔여 포지션 재청산
     time.sleep(2)
