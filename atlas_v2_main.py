@@ -176,16 +176,26 @@ _shared: dict = {
 # ══════════════════════════════════════════════════════════════
 
 _tls = threading.local()
-
+_global_markets = None  # OOM 방지를 위한 전역 마켓 캐시
 
 def _get_ex() -> ccxt.binance:
-    """현재 스레드 전용 CCXT 인스턴스 반환."""
+    global _global_markets
+    """현재 스레드 전용 CCXT 인스턴스 반환 (메모리 최적화)."""
     if not hasattr(_tls, 'ex'):
-        _tls.ex = ccxt.binance({
+        ex = ccxt.binance({
             'apiKey':  BINANCE_API_KEY,
             'secret':  BINANCE_API_SECRET,
             'options': {'defaultType': 'future'},
         })
+        
+        # OOM 방지: 첫 인스턴스에서만 마켓을 로드하고 나머지는 캐시된 데이터를 안전하게 주입
+        if _global_markets is None:
+            ex.load_markets()
+            _global_markets = ex.markets
+        else:
+            ex.set_markets(_global_markets)
+            
+        _tls.ex = ex
     return _tls.ex
 
 
@@ -594,7 +604,9 @@ def _wait_fill(ccxt_sym: str, side: str, timeout: int = 20) -> float:
     for _ in range(timeout // 2):
         time.sleep(2)
         try:
-            pos = ex.fetch_position(ccxt_sym)
+            # 💡 패치: 옵션 마켓 버그 우회 (fetch_position -> fetch_positions)
+            positions = ex.fetch_positions([ccxt_sym])
+            pos = positions[0] if positions else {}
             sz  = abs(float(pos.get('contracts', 0) or 0))
             s   = (pos.get('side') or '').lower()
             if sz > 0 and s == expected:
@@ -815,7 +827,9 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     # 잔여 포지션 재청산
     time.sleep(2)
     try:
-        ex_pos    = _get_ex().fetch_position(ccxt_sym)
+        # 💡 패치: 옵션 마켓 버그 우회
+        positions = _get_ex().fetch_positions([ccxt_sym])
+        ex_pos = positions[0] if positions else {}
         remaining = abs(float(ex_pos.get('contracts', 0) or 0))
         ex_side   = (ex_pos.get('side') or '').lower()
         expected  = 'long' if direction == 'LONG' else 'short'
@@ -909,7 +923,6 @@ def _calc_adx_series(df: pd.DataFrame, period: int = 14) -> np.ndarray:
     dmp_w = _wsum(dm_p,   period)
     dmm_w = _wsum(dm_m,   period)
     
-    # 💡 Numpy의 0으로 나누기 경고 무시 블록 추가
     with np.errstate(divide='ignore', invalid='ignore'):
         di_p  = np.where(tr_w > 0, 100 * dmp_w / tr_w, 0.0)
         di_m  = np.where(tr_w > 0, 100 * dmm_w / tr_w, 0.0)
@@ -1051,8 +1064,6 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
     short_cross = (ema20_prev >= ema50_prev) and (ema20_curr < ema50_curr)
 
     # ── 신호 B: EMA20 눌림목 (추세 중 되돌림 후 반등/거부) ──────
-    # LONG: EMA20>EMA50 (상승추세) + 전봉 저점이 EMA20 터치 + 현봉 종가가 EMA20 위 (반등 확인)
-    # SHORT: EMA20<EMA50 (하락추세) + 전봉 고점이 EMA20 터치 + 현봉 종가가 EMA20 아래 (거부 확인)
     long_pb  = (ema20_curr > ema50_curr and
                 low_prev   <= ema20_prev and
                 close_curr  > ema20_curr)
@@ -1252,9 +1263,6 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
         return
 
     # BB 위치 필터 — 단일 RSI 신호 약점 보완
-    # LONG: 종가가 BB 하단 근처여야 함 (과매도 극단 확인)
-    # SHORT: 종가가 BB 상단 근처여야 함 (과매수 극단 확인)
-    # WEAK_TREND는 완화 적용 (BB 폭이 좁을 수 있음)
     bb_tolerance = 0.02 if regime == REGIME_RANGING else 0.03
     if direction == 'LONG' and bb_lower > 0 and close_curr > bb_lower * (1 + bb_tolerance):
         log(f'[MR 스킵] {sym} LONG BB 미충족 '
@@ -1285,11 +1293,11 @@ def check_mr_signal_and_enter(sym: str, df: pd.DataFrame):
         sl_price = entry_price + atr * V2_MR_ATR_SL
         tp_price = entry_price - atr * V2_MR_ATR_SL * 2.0
 
-    # 심볼별 리스크 — 백테스트 미검증 심볼은 최소 리스크로 시작
+    # 심볼별 리스크
     _MR_RISK = {
         'ETHUSDT': V2_MR_RISK_PCT,
-        'BNBUSDT': V2_MR_RISK_PCT_BNB,   # IS 7건 → 0.4%
-        'XRPUSDT': 0.004,                 # 신규: 0.4% (검증 후 상향)
+        'BNBUSDT': V2_MR_RISK_PCT_BNB,
+        'XRPUSDT': 0.004,
     }
     risk_pct = _MR_RISK.get(sym, 0.004)
 
@@ -1575,7 +1583,6 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
             direction = 'SHORT'; breakout_level = prev_low
 
     # ── 신호 B: 브레이크아웃 리테스트 (2~4봉 전 돌파 레벨 복귀) ─
-    # 현재 캔들 거래량 조건 없음 — 돌파 당시 거래량으로 유효성 판단
     if direction is None and len(df_15m) >= 6:
         for lb in range(2, 5):
             r_break = df_15m.iloc[-lb]
@@ -1583,19 +1590,17 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
             bo_vol    = float(r_break['volume'])
             base_vavg = float(r_base['vol_avg']) if not pd.isna(r_base['vol_avg']) else 0.0
             if base_vavg <= 0 or bo_vol <= base_vavg * V2_MC_VOL_MULT:
-                continue  # 해당 봉은 거래량 스파이크 없음 → 스킵
+                continue
 
             base_high = float(r_base['high'])
             base_low  = float(r_base['low'])
 
-            # LONG 리테스트: 돌파 봉이 전봉 고점 위로 닫힘 + 현재가가 그 레벨 근처
             if (float(r_break['close']) > base_high and htf_up and
                     regime != REGIME_TRENDING_DOWN and
                     base_high * 0.998 <= cur_close <= base_high * 1.004):
                 direction = 'LONG'; breakout_level = base_high; sig_type = 'RETEST'
                 break
 
-            # SHORT 리테스트: 돌파 봉이 전봉 저점 아래로 닫힘 + 현재가가 그 레벨 근처
             if (float(r_break['close']) < base_low and htf_down and
                     regime != REGIME_TRENDING_UP and
                     base_low * 0.996 <= cur_close <= base_low * 1.002):
@@ -1608,7 +1613,7 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
             f'(종={cur_close:.4f}) {htf_str} | 레짐={regime}')
         return
 
-    # 추격 거리 필터 — 리테스트는 레벨 근처 진입이므로 추격 필터 면제
+    # 추격 거리 필터
     if sig_type == 'BREAKOUT':
         if direction == 'LONG' and cur_close > breakout_level * (1 + V2_MC_CHASE_LIMIT):
             log(f'[MC] {sym} LONG 추격 초과 ({cur_close:.4f} > {breakout_level*(1+V2_MC_CHASE_LIMIT):.4f})')
@@ -1617,7 +1622,7 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
             log(f'[MC] {sym} SHORT 추격 초과 ({cur_close:.4f} < {breakout_level*(1-V2_MC_CHASE_LIMIT):.4f})')
             return
 
-    # SL/TP 계산 (리테스트는 SL 0.8× 적용 — 레벨 복귀 시점이라 더 타이트하게)
+    # SL/TP 계산
     sl_mult = V2_MC_ATR_SL if sig_type == 'BREAKOUT' else V2_MC_ATR_SL * 0.8
     if direction == 'LONG':
         entry_sig = breakout_level * (1 + LIMIT_OFFSET_PCT)
@@ -1930,7 +1935,9 @@ def position_reconcile_loop():
                     direction= pos['direction']
                     ccxt_sym = sym.replace('USDT', '/USDT')
                     try:
-                        ex_pos    = ex.fetch_position(ccxt_sym)
+                        # 💡 패치: 옵션 마켓 버그 우회
+                        positions = ex.fetch_positions([ccxt_sym])
+                        ex_pos    = positions[0] if positions else {}
                         contracts = abs(float(ex_pos.get('contracts', 0) or 0))
                         ex_side   = (ex_pos.get('side') or '').lower()
                         expected  = 'long' if direction == 'LONG' else 'short'
@@ -2137,8 +2144,19 @@ def _handle_tg_cmd(text: str) -> str:
 
 def tg_cmd_loop():
     offset = 0
+
+    # 💡 [필수 추가] 루프 시작 전, 쌓여있는 옛날 메시지들을 모두 읽음 처리(Flush)
+    try:
+        flush_resp = _tg_session.get(
+            f'https://api.telegram.org/bot{TG_TOKEN}/getUpdates',
+            params={'offset': offset, 'timeout': 5}, timeout=10)
+        for u in flush_resp.json().get('result', []):
+            offset = u['update_id'] + 1
+    except Exception:
+        pass
+
     start_time = time.time()  # 💡 봇 시작 시간 기록
-    
+
     while True:
         if V2_KILL_SWITCH.exists():
             break
@@ -2176,31 +2194,106 @@ def tg_cmd_loop():
 #  17. 포트폴리오 복구 루프 (비정상 포지션 DB 정리)
 # ══════════════════════════════════════════════════════════════
 
+def _reconcile_one(ex, pos: dict, tag: str) -> bool:
+    """
+    DB 포지션 1개를 거래소와 대조. 거래소에 없으면 PnL 기록 후 DB 삭제.
+    tag: 로그 접두사 ([시작복구] / [Recovery] / [정합성])
+    Returns True if cleaned up.
+    """
+    sym      = pos['symbol']
+    strategy = pos['strategy']
+    direction= pos['direction']
+    ccxt_sym = sym.replace('USDT', '/USDT')
+    try:
+        # 💡 패치: 옵션 마켓 버그 우회
+        positions = ex.fetch_positions([ccxt_sym])
+        ex_pos    = positions[0] if positions else {}
+        contracts = abs(float(ex_pos.get('contracts', 0) or 0))
+        ex_side   = (ex_pos.get('side') or '').lower()
+        expected  = 'long' if direction == 'LONG' else 'short'
+        if contracts > 0 and ex_side == expected:
+            return False  # 포지션 유효 — 아무것도 안 함
+    except Exception as e:
+        log(f'[{tag}] {sym} 거래소 조회 실패: {e}', 'warning')
+        return False
+
+    # 거래소에 포지션 없음 → 청산 기록 후 DB 삭제
+    log(f'[{tag}] {sym} {strategy} {direction} — 거래소 포지션 없음 → 정리', 'warning')
+    cancel_exchange_sl(ccxt_sym, pos.get('sl_order_id', ''))
+
+    cur_price    = get_price(ccxt_sym)
+    close_price  = cur_price
+    price_src    = '추정가'
+    try:
+        entry_ms  = int(datetime.fromisoformat(
+            str(pos['entry_ts']).replace('Z', '+00:00')).timestamp() * 1000)
+        close_side = 'sell' if direction == 'LONG' else 'buy'
+        my_trades  = ex.fetch_my_trades(ccxt_sym, limit=20)
+        ct = [t for t in my_trades if t['timestamp'] > entry_ms
+              and (t.get('side') or '').lower() == close_side]
+        if ct:
+            tq = sum(abs(float(t['amount'])) for t in ct)
+            tc = sum(abs(float(t['amount'])) * float(t['price']) for t in ct)
+            if tq > 0:
+                close_price = tc / tq
+                price_src   = '실제체결가'
+    except Exception as e:
+        log(f'[{tag}] {sym} 체결가 조회 실패 ({e}) — 현재가 사용')
+
+    entry   = float(pos['entry_price'])
+    qty     = float(pos['qty'])
+    sl_dist = abs(entry - float(pos['sl']))
+    pnl_pct = (close_price - entry)/entry if direction == 'LONG' else (entry - close_price)/entry
+    pnl_usd = pnl_pct * qty * entry
+    pnl_r   = pnl_usd / (qty * sl_dist) if sl_dist > 0 else 0
+    try:
+        hold_h = (datetime.now(timezone.utc) -
+                  datetime.fromisoformat(str(pos['entry_ts']).replace('Z', '+00:00'))
+                  ).total_seconds() / 3600
+    except Exception:
+        hold_h = 0
+
+    log_trade(strategy, sym, direction, pos.get('mode', ''), entry, close_price,
+              qty, int(pos['leverage']), pnl_usd, pnl_r,
+              float(pos.get('rr', 2.0)), hold_h, 'MANUAL',
+              str(pos['entry_ts']), get_cached_regime().regime)
+    delete_position(strategy, sym)
+    tg(f'⚠️ [{tag}] {sym} {strategy} {direction} 봇 중단 중 청산 감지\n'
+       f'  청산가: {close_price:,.4f} ({price_src})\n'
+       f'  PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
+       f'  DB 자동 정리 완료')
+    return True
+
+
+def startup_reconcile(ex) -> None:
+    """
+    봇 시작 직후 동기 실행 — 스레드 기동 전에 포지션 상태 즉시 확인.
+    봇이 내려가 있는 동안 청산된 포지션을 감지하고 DB를 정리한다.
+    """
+    db_pos = load_all_positions()
+    if not db_pos:
+        log('[시작] 보유 포지션 없음 — 정상 시작')
+        return
+
+    log(f'[시작] DB 포지션 {len(db_pos)}개 감지 — 거래소 대조 중...')
+    valid = cleaned = 0
+    for pos in db_pos:
+        if _reconcile_one(ex, pos, '시작복구'):
+            cleaned += 1
+        else:
+            valid   += 1
+            log(f'[시작] {pos["symbol"]} {pos["strategy"]} {pos["direction"]} — 유효, 감시 재개')
+    log(f'[시작] 포지션 정합성 완료: 유효 {valid}개 / 정리 {cleaned}개')
+
+
 def recovery_loop():
-    """
-    DB에는 있지만 거래소에는 없는 포지션 정리.
-    봇 재시작 후 비정상 상태 자동 복구.
-    """
-    time.sleep(60)  # 초기화 완료 대기
+    """10분마다 DB↔거래소 포지션 대조 — startup_reconcile의 지속 백업."""
+    time.sleep(120)  # 시작 후 2분 대기 (startup_reconcile 완료 여유)
     while True:
         try:
-            positions = load_all_positions()
             ex = _get_ex()
-            for pos in positions:
-                sym      = pos['symbol']
-                strategy = pos['strategy']
-                ccxt_sym = sym.replace('USDT', '/USDT')
-                try:
-                    ex_pos    = ex.fetch_position(ccxt_sym)
-                    contracts = abs(float(ex_pos.get('contracts', 0) or 0))
-                    ex_side   = (ex_pos.get('side') or '').lower()
-                    expected  = 'long' if pos['direction'] == 'LONG' else 'short'
-                    if contracts == 0 or ex_side != expected:
-                        log(f'[Recovery] {sym} {strategy} DB 포지션 != 거래소 실제 -> 제거', 'warning')
-                        tg(f'[Recovery] {sym} {strategy} 포지션 불일치 -> DB 정리')
-                        delete_position(strategy, sym)
-                except Exception as e:
-                    log(f'[Recovery] {sym} 확인 실패: {e}', 'warning')
+            for pos in load_all_positions():
+                _reconcile_one(ex, pos, 'Recovery')
         except Exception as e:
             log(f'[Recovery] 오류: {e}', 'error')
         time.sleep(600)  # 10분마다
