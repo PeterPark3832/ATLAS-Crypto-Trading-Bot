@@ -87,6 +87,7 @@ from atlas_config import (
     V2_MC_VOL_LB, V2_MC_VOL_MULT, V2_MC_HTF_EMA,
     V2_MC_CHASE_LIMIT, V2_MC_COOLDOWN, V2_MC_LIMIT_SEC,
     V2_MC_LEVERAGE, V2_MC_RISK_PCT,
+    V2_MC_TRENDING_UP_RISK_MULT, V2_MC_BLOCK_HOURS_UTC,
     CANDLE_LIMIT_15M,
     # Module D
     V2_MD_SYMBOLS, V2_MD_FUNDING_ENTER, V2_MD_FUNDING_EXIT,
@@ -902,6 +903,11 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     except Exception:
         hold_h = 0
 
+    # 중복 기록 방지: reconcile 루프 등 다른 스레드가 이미 처리했으면 스킵
+    if load_position(strategy, sym) is None:
+        log(f'[청산] {sym} {strategy}: 이미 처리됨 — 중복 방지 스킵')
+        return True
+
     regime_name = get_cached_regime().regime
     log_trade(strategy, sym, direction, pos.get('mode', ''), entry, exit_price,
               qty, leverage, pnl_usd, pnl_r, pos.get('rr', 2.0), hold_h, reason,
@@ -1605,6 +1611,12 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
         log(f'[MC 스킵] {sym} 레짐={regime} (진입불가)')
         return
 
+    # Stage 2-C: 손실 집중 시간대 차단 (UTC 12-13시, 실거래 WR 0%)
+    cur_hour = datetime.now(timezone.utc).hour
+    if cur_hour in V2_MC_BLOCK_HOURS_UTC:
+        log(f'[MC 스킵] {sym} UTC {cur_hour}시 차단 시간대')
+        return
+
     if len(df_15m) < V2_MC_VOL_LB + 3:
         return
 
@@ -1695,8 +1707,11 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
 
     leverage = V2_MC_LEVERAGE.get(sym, 3)
     risk_pct = V2_MC_RISK_PCT.get(sym, 0.008)
+    # Stage 2-B: TRENDING_UP 레짐에서 리스크 50% 축소 (실거래 WR 20%, -$33.70)
+    if regime == REGIME_TRENDING_UP:
+        risk_pct *= V2_MC_TRENDING_UP_RISK_MULT
     strategy = strategy_long if direction == 'LONG' else strategy_short
-    log(f'[MC 신호] {sym} {direction} {sig_type} 레벨={breakout_level:.4f} | 레짐={regime}')
+    log(f'[MC 신호] {sym} {direction} {sig_type} 레벨={breakout_level:.4f} | 레짐={regime} risk={risk_pct*100:.2f}%')
 
     mc_enter_position(ccxt_sym, strategy, sym, direction,
                       entry_sig, sl_price, tp_price, leverage, risk_pct)

@@ -208,8 +208,10 @@ V2_MC_SYMBOLS     = [
     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
 ]
 V2_MC_ATR_PERIOD  = 14      # A/B와 동일 (신규 하이퍼파라미터 없음)
-V2_MC_ATR_SL      = 1.0     # SL = ATR × 1.0
+V2_MC_ATR_SL      = 1.3     # SL = ATR × 1.3 (1.0→1.3: 30-60분 SL 집중 해소, 노이즈 여유)
 V2_MC_RR          = 2.0     # 고정 RR — 변경 금지 (수수료 드래그 임계값)
+V2_MC_TRENDING_UP_RISK_MULT = 0.5   # TRENDING_UP 레짐 진입 시 리스크 50% (실거래 WR 20%)
+V2_MC_BLOCK_HOURS_UTC       = (12, 13)  # 차단 시간대 UTC (실거래 WR 0%, -$36)
 V2_MC_VOL_LB      = 20      # 거래량 평균 룩백
 V2_MC_VOL_MULT    = 1.2     # 거래량 스파이크 배수 (1.5→1.2: 실거래 스킵 2941건/15일 → 신호 빈도 개선)
 V2_MC_HTF_EMA     = 21      # 1H EMA 방향 필터 (단일 파라미터)
