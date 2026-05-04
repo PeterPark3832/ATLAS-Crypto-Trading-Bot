@@ -284,8 +284,10 @@ V2_MA_RISK_PCT = {
     'XRPUSDT': 0.010, 'ADAUSDT': 0.010, 'AVAXUSDT': 0.010, 'LINKUSDT': 0.010, # 1차 확장
     'DOTUSDT': 0.008,                                                            # DOT: 더 보수적
 }
-V2_MA_COOLDOWN            = 2    # 청산 후 쿨다운 봉수 (4H 기준 → 8H)
-V2_MA_ADX_MIN             = 15   # EMA 크로스 진입 시 ADX 최소값 (20→15: 실거래 ADX 스킵 227건/15일 → 신호 빈도 개선)
+V2_MA_COOLDOWN             = 2    # 청산 후 쿨다운 봉수 (4H 기준 → 8H)
+V2_MA_ADX_MIN              = 15   # CROSS 신호 ADX 최소값 (크로스오버 = 추세 전환 확인)
+V2_MA_ADX_MIN_PULLBACK     = 20   # PULLBACK 신호 ADX 최소값 (눌림목은 추세가 확립돼야 유효)
+V2_MA_PULLBACK_EMA_GAP_MIN = 0.005  # PULLBACK 허용 최소 EMA20-50 간격 0.5% (간격 좁으면 추세 없음)
 V2_MA_WEAK_TREND_RISK_MULT = 0.7  # WEAK_TREND 레짐 진입 시 리스크 70% 적용 (노이즈 보정)
 
 # ─────────────────────────────────────────────────────────────

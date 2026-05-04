@@ -75,6 +75,7 @@ from atlas_config import (
     V2_MA_EMA_FAST, V2_MA_EMA_SLOW, V2_MA_ATR_PERIOD,
     V2_MA_ATR_SL, V2_MA_TRAIL_R, V2_MA_RISK_PCT,
     V2_MA_LEVERAGE, V2_MA_COOLDOWN, V2_MA_ADX_MIN,
+    V2_MA_ADX_MIN_PULLBACK, V2_MA_PULLBACK_EMA_GAP_MIN,
     V2_MA_WEAK_TREND_RISK_MULT,
     # Module B
     V2_MR_RSI_PERIOD, V2_MR_RSI_LONG, V2_MR_RSI_SHORT,
@@ -1151,6 +1152,16 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         direction, sig_type = 'SHORT', 'PULLBACK'
     else:
         return  # 신호 충돌
+
+    # PULLBACK 추가 필터: CROSS보다 높은 기준 필요
+    if sig_type == 'PULLBACK':
+        ema_gap = abs(ema20_curr - ema50_curr) / ema50_curr
+        if adx_curr < V2_MA_ADX_MIN_PULLBACK:
+            log(f'[MA 스킵] {sym} PULLBACK ADX={adx_curr:.1f} < 기준{V2_MA_ADX_MIN_PULLBACK} — 추세 미확립')
+            return
+        if ema_gap < V2_MA_PULLBACK_EMA_GAP_MIN:
+            log(f'[MA 스킵] {sym} PULLBACK EMA간격={ema_gap*100:.2f}% < {V2_MA_PULLBACK_EMA_GAP_MIN*100:.1f}% — 추세 없음')
+            return
 
     # 레짐-방향 필터
     if direction == 'LONG' and regime == REGIME_TRENDING_DOWN:
