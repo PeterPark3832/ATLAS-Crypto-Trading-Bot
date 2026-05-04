@@ -339,6 +339,16 @@ def delete_position(strategy: str, symbol: str):
              (strategy, symbol))
 
 
+def claim_and_delete_position(strategy: str, symbol: str) -> bool:
+    """포지션을 원자적으로 삭제 후 성공 여부 반환.
+    두 스레드가 동시에 호출해도 한 쪽만 True를 받아 이중 기록을 방지한다."""
+    with _db_conn() as con:
+        affected = con.execute(
+            'DELETE FROM positions WHERE strategy=? AND symbol=?',
+            (strategy, symbol)).rowcount
+    return affected > 0
+
+
 def update_position_sl(strategy, symbol, new_sl, sl_order_id=''):
     _db_exec(
         'UPDATE positions SET sl=?, sl_order_id=? WHERE strategy=? AND symbol=?',
@@ -903,16 +913,17 @@ def exit_position(ccxt_sym: str, pos: dict, exit_price: float, reason: str) -> b
     except Exception:
         hold_h = 0
 
-    # 중복 기록 방지: reconcile 루프 등 다른 스레드가 이미 처리했으면 스킵
-    if load_position(strategy, sym) is None:
-        log(f'[청산] {sym} {strategy}: 이미 처리됨 — 중복 방지 스킵')
+    # 원자적 claim: DB에서 포지션을 선점한 스레드만 log_trade 진행
+    # load_position→delete 사이 레이스컨디션 원천 차단
+    if not claim_and_delete_position(strategy, sym):
+        log(f'[청산] {sym} {strategy}: 이미 다른 스레드에서 처리됨 — 중복 방지')
         return True
 
     regime_name = get_cached_regime().regime
     log_trade(strategy, sym, direction, pos.get('mode', ''), entry, exit_price,
               qty, leverage, pnl_usd, pnl_r, pos.get('rr', 2.0), hold_h, reason,
               entry_ts, regime_name)
-    delete_position(strategy, sym)
+    # delete_position은 claim_and_delete_position에서 이미 처리됨
 
     # Module A / C 쿨다운 갱신
     if strategy.startswith('V2_MA'):
@@ -2058,11 +2069,12 @@ def position_reconcile_loop():
                             pnl_usd = pnl_pct * qty * entry
                             pnl_r   = pnl_usd / (qty * sl_dist) if sl_dist > 0 else 0
 
+                            if not claim_and_delete_position(strategy, sym):
+                                continue  # 이미 exit_position에서 처리됨
                             log_trade(strategy, sym, direction, pos.get('mode', ''), entry, close_price,
                                       qty, int(pos['leverage']), pnl_usd, pnl_r,
                                       float(pos.get('rr', 2.0)), hold_h, 'MANUAL',
                                       str(pos['entry_ts']), get_cached_regime().regime)
-                            delete_position(strategy, sym)
                             tg(f'⚠️ [{strategy}] {sym} {direction} 수동청산 감지\n'
                                f'  청산가: {close_price:,.4f} ({price_source})\n'
                                f'  PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
@@ -2328,11 +2340,13 @@ def _reconcile_one(ex, pos: dict, tag: str) -> bool:
     except Exception:
         hold_h = 0
 
+    if not claim_and_delete_position(strategy, sym):
+        log(f'[{tag}] {sym} {strategy}: 이미 처리됨 — 중복 방지')
+        return True
     log_trade(strategy, sym, direction, pos.get('mode', ''), entry, close_price,
               qty, int(pos['leverage']), pnl_usd, pnl_r,
               float(pos.get('rr', 2.0)), hold_h, 'MANUAL',
               str(pos['entry_ts']), get_cached_regime().regime)
-    delete_position(strategy, sym)
     tg(f'⚠️ [{tag}] {sym} {strategy} {direction} 봇 중단 중 청산 감지\n'
        f'  청산가: {close_price:,.4f} ({price_src})\n'
        f'  PnL: ${pnl_usd:+.2f} ({pnl_r:+.2f}R)\n'
