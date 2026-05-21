@@ -131,11 +131,12 @@ S4_MAX_HOLD    = 20      # 최대 보유 일수
 # S5: Bollinger Band Bounce (1D)
 # ─────────────────────────────────────────────────────────────
 S5_BB_PERIOD   = 20
-S5_BB_SIGMA    = 2.0
-S5_RSI_CONFIRM = 40      # RSI 확인 필터 (40 미만 시 과매도 확인)
+S5_BB_SIGMA    = 2.2
+S5_RSI_CONFIRM = 30      # RSI 확인 필터 (40 미만 시 과매도 확인)
 S5_ATR_PERIOD  = 14
-S5_ATR_SL      = 1.5
+S5_ATR_SL      = 1.2
 S5_EXIT_TYPE   = 'bb_upper'   # 상단밴드 터치 시 청산
+S5_MAX_HOLD    = 12      # 최대 보유 일수 (MDD 제한)
 
 # ─────────────────────────────────────────────────────────────
 # S6: Donchian Breakout (1D, 터틀 트레이딩)
@@ -205,11 +206,12 @@ STRATEGY_NAMES = {
 }
 
 # 레짐별 허용 전략
+# Live 운용: S3(EMA), S5(BB-강화), S6(Donchian) 만 활성
 REGIME_STRATEGY_MAP = {
-    'TRENDING_UP':   ['S2', 'S3', 'S6', 'S7'],
-    'RANGING':       ['S4', 'S5'],
-    'WEAK_TREND':    ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
-    'TRENDING_DOWN': ['S4', 'S5'],
+    'TRENDING_UP':   ['S3', 'S6'],
+    'RANGING':       ['S5'],
+    'WEAK_TREND':    ['S3', 'S5', 'S6'],
+    'TRENDING_DOWN': ['S5'],
     'CRISIS':        [],
 }
 

@@ -318,7 +318,7 @@ _state = {
     'universe':      [],
     'ratchet_scale': 1.0,
     'dry_run':       False,
-    'active_strategies': ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
+    'active_strategies': ['S3', 'S5', 'S6'],
 }
 _state_lock = threading.Lock()
 
@@ -858,7 +858,7 @@ def _handle_tg_cmd(cmd: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description='ATLAS Spot 트레이딩 봇')
     parser.add_argument('--dry-run', action='store_true', help='가상 실행 (주문 없음)')
-    parser.add_argument('--strategies', default='S2,S3,S4,S5,S6,S7',
+    parser.add_argument('--strategies', default='S3,S5,S6',
                         help='활성 전략 (쉼표 구분)')
     args = parser.parse_args()
 

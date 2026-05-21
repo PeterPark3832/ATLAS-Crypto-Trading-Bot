@@ -107,10 +107,13 @@ def load_ohlcv_csv(path: str) -> list:
     ts_col = next((c for c in ('timestamp', 'open_time', 'ts') if c in df.columns), None)
     if ts_col is None:
         raise ValueError(f'타임스탬프 컬럼 없음: {path}')
-    ts_ms = pd.to_datetime(df[ts_col])
+    if pd.api.types.is_integer_dtype(df[ts_col]) or pd.api.types.is_float_dtype(df[ts_col]):
+        ts_ms = pd.to_datetime(df[ts_col].astype(int), unit='ms', utc=True)
+    else:
+        ts_ms = pd.to_datetime(df[ts_col], utc=True)
     if ts_ms.dt.tz is None:
         ts_ms = ts_ms.dt.tz_localize('UTC')
-    df['_ts'] = ts_ms.astype(np.int64) // 1_000_000
+    df['_ts'] = ts_ms.astype(int) // 1_000_000
     return df[['_ts', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
 
 

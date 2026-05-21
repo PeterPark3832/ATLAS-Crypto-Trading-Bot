@@ -39,7 +39,7 @@ from atlas_spot_config import (
     S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_COOLDOWN,
     S4_RSI_PERIOD, S4_RSI_ENTRY, S4_BB_PERIOD, S4_BB_SIGMA,
     S4_ATR_PERIOD, S4_ATR_SL, S4_MAX_HOLD,
-    S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL,
+    S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL, S5_MAX_HOLD,
     S6_ENTRY_PERIOD, S6_EXIT_PERIOD, S6_VOL_MA, S6_VOL_MULT,
     S6_ATR_PERIOD, S6_ATR_SL, S6_RR,
     S7_MACD_FAST, S7_MACD_SLOW, S7_MACD_SIG, S7_EMA_TREND,
@@ -48,7 +48,7 @@ from atlas_spot_config import (
 
 # 데이터 부족 시 반환하는 신호 없음 dict
 _NO_SIGNAL = {'signal': 0, 'sl': 0.0, 'tp': 0.0, 'rr': 0.0,
-              'exit_type': 'sl_tp', 'max_hold': 0}
+              'exit_type': 'sl_tp', 'max_hold': S5_MAX_HOLD}
 
 
 def _no_sig() -> dict:
@@ -332,7 +332,7 @@ def get_signal_s5(df: pd.DataFrame, i: int) -> dict:
     rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': 0,
+        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': S5_MAX_HOLD,
     }
 
 
