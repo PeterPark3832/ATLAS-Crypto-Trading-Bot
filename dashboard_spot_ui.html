@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>ATLAS Spot</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0a0c12; --bg2:#111520; --card:#141824; --card2:#1a1f2e;
+  --border:rgba(255,255,255,0.07); --border2:rgba(255,255,255,0.12);
+  --text:#e2e8f0; --dim:#4a5568; --dim2:#64748b;
+  --blue:#4f8ef7; --green:#10b981; --red:#f43f5e;
+  --yellow:#f59e0b; --purple:#8b5cf6; --cyan:#06b6d4;
+  --radius:12px; --radius-sm:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Pretendard,sans-serif;
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+button{cursor:pointer;border:none;outline:none;font-family:inherit}
+
+/* ── 로그인 ── */
+#login-overlay{position:fixed;inset:0;background:var(--bg);display:flex;
+  align-items:center;justify-content:center;z-index:999;
+  background-image:radial-gradient(circle at 50% 0%,rgba(79,142,247,0.08) 0%,transparent 60%)}
+.login-box{background:var(--card);border:1px solid var(--border2);border-radius:20px;
+  padding:44px 40px;width:360px;text-align:center;
+  box-shadow:0 24px 64px rgba(0,0,0,0.6),0 0 0 1px rgba(255,255,255,0.04)}
+.login-logo{font-size:32px;margin-bottom:12px}
+.login-box h1{font-size:20px;font-weight:700;letter-spacing:-0.5px;margin-bottom:4px}
+.login-box p{color:var(--dim2);font-size:13px;margin-bottom:28px}
+.login-box input{width:100%;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:13px 16px;color:var(--text);
+  font-size:15px;margin-bottom:10px;transition:border-color .2s}
+.login-box input:focus{outline:none;border-color:var(--blue);
+  box-shadow:0 0 0 3px rgba(79,142,247,0.12)}
+.login-btn{width:100%;background:var(--blue);color:#fff;padding:13px;
+  border-radius:var(--radius-sm);font-size:15px;font-weight:600;
+  transition:all .2s;letter-spacing:.2px}
+.login-btn:hover{background:#3d7de8;transform:translateY(-1px);
+  box-shadow:0 4px 16px rgba(79,142,247,0.3)}
+.login-err{color:var(--red);font-size:12px;margin-top:10px;min-height:18px}
+
+/* ── 앱 ── */
+#app{display:none;min-height:100vh}
+
+/* ── 상단바 ── */
+.topbar{display:flex;align-items:center;justify-content:space-between;
+  padding:0 24px;height:56px;border-bottom:1px solid var(--border);
+  background:rgba(17,21,32,0.85);position:sticky;top:0;z-index:100;
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.topbar-left{display:flex;align-items:center;gap:14px}
+.logo{font-size:16px;font-weight:700;letter-spacing:-0.5px;
+  background:linear-gradient(135deg,#fff 0%,rgba(255,255,255,0.6) 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.topbar-right{display:flex;align-items:center;gap:8px}
+.btn-icon{background:var(--card);border:1px solid var(--border);color:var(--dim2);
+  padding:6px 12px;border-radius:var(--radius-sm);font-size:12px;
+  transition:all .15s;display:flex;align-items:center;gap:5px}
+.btn-icon:hover{color:var(--text);border-color:var(--border2);background:var(--card2)}
+
+/* 봇 상태 dot */
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.alive{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.dead{background:var(--red);box-shadow:0 0 6px var(--red)}
+.status-dot.unknown{background:var(--dim)}
+.status-label{font-size:11px;color:var(--dim2)}
+
+/* 갱신 카운트다운 */
+.countdown{font-size:11px;color:var(--dim);padding:4px 8px;
+  background:var(--bg2);border-radius:6px;border:1px solid var(--border);
+  min-width:50px;text-align:center;font-variant-numeric:tabular-nums}
+
+/* ── 메인 ── */
+.main{padding:20px 24px;max-width:1440px;margin:0 auto}
+
+/* ── 경고 배너 ── */
+.alert-wrap{margin-bottom:14px}
+.alert{display:flex;align-items:center;gap:10px;padding:11px 16px;
+  border-radius:var(--radius-sm);font-size:13px;margin-bottom:6px;border:1px solid}
+.alert.critical{background:rgba(244,63,94,0.1);border-color:rgba(244,63,94,0.25);color:#fca5a5}
+.alert.warn{background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.25);color:#fcd34d}
+.alert-icon{flex-shrink:0;font-size:14px}
+
+/* ── 필터 바 ── */
+.filter-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.period-group{display:flex;gap:4px}
+.period-btn{background:var(--card);border:1px solid var(--border);color:var(--dim2);
+  padding:5px 12px;border-radius:6px;font-size:12px;transition:all .15s;font-weight:500}
+.period-btn:hover{color:var(--text);border-color:var(--border2)}
+.period-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.updated-text{font-size:11px;color:var(--dim)}
+
+/* ── KPI 카드 ── */
+.kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 18px;position:relative;overflow:hidden;transition:border-color .2s}
+.kpi:hover{border-color:var(--border2)}
+.kpi-accent{position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:2px 0 0 2px}
+.kpi-label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--dim2);margin-bottom:8px;font-weight:500}
+.kpi-val{font-size:26px;font-weight:700;letter-spacing:-1px;line-height:1}
+.kpi-sub{font-size:11px;color:var(--dim2);margin-top:5px}
+.kpi-val.pos{color:var(--green)}
+.kpi-val.neg{color:var(--red)}
+
+/* MDD 미니바 */
+.mdd-bar-wrap{margin-top:8px;height:4px;background:rgba(255,255,255,0.06);
+  border-radius:2px;overflow:hidden}
+.mdd-bar-fill{height:100%;border-radius:2px;transition:width .4s ease}
+
+/* ── 배지 ── */
+.regime-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;
+  border-radius:20px;font-size:11px;font-weight:600;border:1px solid;white-space:nowrap}
+.streak-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;
+  border-radius:20px;font-size:11px;font-weight:600;border:1px solid}
+
+/* ── 탭 ── */
+.tabs{display:flex;gap:0;margin-bottom:16px;
+  border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:10px 18px;font-size:13px;color:var(--dim2);cursor:pointer;
+  border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;
+  white-space:nowrap;font-weight:500}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--text);border-bottom-color:var(--blue)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* ── 카드 ── */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.card-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.card-title{font-size:11px;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--dim2);font-weight:600}
+.card-badge{background:var(--bg2);border:1px solid var(--border);
+  padding:2px 8px;border-radius:5px;font-size:11px;color:var(--dim2)}
+
+/* ── 그리드 ── */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.grid-3-2{display:grid;grid-template-columns:3fr 2fr;gap:12px;margin-bottom:12px}
+.grid-2-1{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:12px}
+
+/* ── 차트 ── */
+.chart-wrap{position:relative}
+.chart-wrap.h240{height:240px}
+.chart-wrap.h200{height:200px}
+.chart-wrap.h180{height:180px}
+
+/* ── 테이블 ── */
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse}
+th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim2);
+  padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);
+  white-space:nowrap;font-weight:600}
+td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,0.03);
+  font-size:13px;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,0.02)}
+.td-dim{color:var(--dim2);font-size:11px}
+.td-bold{font-weight:600}
+.pos{color:var(--green)}
+.neg{color:var(--red)}
+.neutral{color:var(--dim2)}
+
+/* 태그 */
+.tag{display:inline-block;padding:2px 7px;border-radius:4px;
+  font-size:11px;font-weight:600;letter-spacing:.3px}
+.tag-long{background:rgba(16,185,129,.15);color:var(--green)}
+.tag-short{background:rgba(244,63,94,.15);color:var(--red)}
+.tag-tp{background:rgba(16,185,129,.12);color:var(--green)}
+.tag-sl{background:rgba(244,63,94,.12);color:var(--red)}
+.tag-time{background:rgba(79,142,247,.12);color:var(--blue)}
+.tag-fn{background:rgba(6,182,212,.12);color:var(--cyan)}
+.tag-manual{background:rgba(245,158,11,.12);color:var(--yellow)}
+.warn-txt{color:var(--yellow);font-size:11px}
+.ok-txt{color:var(--green);font-size:11px}
+
+/* 섹션 타이틀 */
+.section-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.section-row h3{font-size:13px;font-weight:600}
+
+/* ── 빈 상태 ── */
+.empty{text-align:center;padding:36px;color:var(--dim2);font-size:13px}
+
+/* ── 스피너 ── */
+.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,0.1);
+  border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── 구분선 ── */
+.divider{height:1px;background:var(--border);margin:16px 0}
+
+/* ── Stage 2: 리스크 카드 ── */
+.risk-card{background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;display:flex;flex-direction:column;gap:12px}
+.risk-row{display:flex;align-items:center;justify-content:space-between}
+.risk-label{font-size:11px;color:var(--dim2);text-transform:uppercase;letter-spacing:.6px}
+.risk-val{font-size:22px;font-weight:700;letter-spacing:-0.5px}
+.risk-sub{font-size:11px;color:var(--dim2);margin-top:2px}
+.scale-bar{height:6px;background:rgba(255,255,255,0.06);border-radius:3px;margin-top:6px;overflow:hidden}
+.scale-fill{height:100%;border-radius:3px;transition:width .4s ease}
+.kelly-row{display:flex;align-items:center;justify-content:space-between;
+  padding:7px 10px;background:rgba(255,255,255,0.03);border-radius:6px;
+  border:1px solid var(--border)}
+.kelly-strat{font-size:11px;color:var(--dim2);flex:1}
+.kelly-stats{display:flex;gap:12px;font-size:12px;font-weight:600}
+
+/* ── Stage 2: 거래 필터 ── */
+.filter-label{font-size:11px;color:var(--dim2);min-width:28px;flex-shrink:0}
+.filter-btn{background:var(--card2);border:1px solid var(--border);color:var(--dim2);
+  padding:4px 10px;border-radius:5px;font-size:11px;font-weight:500;transition:all .15s}
+.filter-btn:hover{color:var(--text);border-color:var(--border2)}
+.filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+/* 3줄 필터 그리드 */
+.trade-filter-grid{display:flex;flex-direction:column;gap:7px;margin-bottom:14px}
+.filter-row{display:flex;align-items:center;gap:8px}
+.filter-btns-wrap{display:flex;flex-wrap:wrap;gap:4px}
+
+/* ── Stage 3: 제어 패널 ── */
+.ctrl-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.ctrl-card{background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.ctrl-status-row{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.status-dot-lg{width:14px;height:14px;border-radius:50%;flex-shrink:0}
+.status-dot-lg.alive{background:var(--green);box-shadow:0 0 10px var(--green)}
+.status-dot-lg.dead{background:var(--red);box-shadow:0 0 10px var(--red)}
+.ctrl-status-info h3{font-size:14px;font-weight:600;margin-bottom:2px}
+.ctrl-status-info p{font-size:11px;color:var(--dim2)}
+.ctrl-btns{display:flex;gap:8px}
+.btn-start{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
+  color:var(--green);padding:10px 20px;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:600;transition:all .2s;width:100%}
+.btn-start:hover:not(:disabled){background:rgba(16,185,129,0.25);border-color:var(--green)}
+.btn-stop{background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.25);
+  color:var(--red);padding:10px 20px;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:600;transition:all .2s;width:100%}
+.btn-stop:hover:not(:disabled){background:rgba(244,63,94,0.2);border-color:var(--red)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.btn-panic{width:100%;background:rgba(244,63,94,0.08);
+  border:1px solid rgba(244,63,94,0.3);color:var(--red);
+  padding:14px;border-radius:var(--radius-sm);font-size:14px;font-weight:700;
+  letter-spacing:.5px;transition:all .2s;margin-top:12px}
+.btn-panic:hover{background:rgba(244,63,94,0.18);border-color:var(--red);
+  box-shadow:0 0 20px rgba(244,63,94,0.2)}
+.panic-warn{font-size:11px;color:var(--dim2);margin-top:8px;line-height:1.6;text-align:center}
+.ctrl-log{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;font-size:11px;color:var(--dim2);font-family:monospace;
+  min-height:60px;max-height:120px;overflow-y:auto;margin-top:12px}
+
+/* ── Stage 3: 패닉 모달 ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.75);
+  display:flex;align-items:center;justify-content:center;z-index:999;
+  backdrop-filter:blur(4px)}
+.modal-box{background:var(--card);border:1px solid rgba(244,63,94,0.4);
+  border-radius:16px;padding:32px;width:420px;text-align:center;
+  box-shadow:0 0 40px rgba(244,63,94,0.15)}
+.modal-box h2{font-size:18px;font-weight:700;margin-bottom:12px;color:var(--red)}
+.modal-box p{font-size:13px;color:var(--dim2);margin-bottom:20px;line-height:1.7}
+.modal-box input{width:100%;background:var(--bg2);border:2px solid rgba(244,63,94,0.3);
+  border-radius:var(--radius-sm);padding:12px;color:var(--text);font-size:16px;
+  text-align:center;font-weight:700;letter-spacing:4px;margin-bottom:16px;
+  transition:border-color .2s}
+.modal-box input:focus{outline:none;border-color:var(--red)}
+.modal-btns{display:flex;gap:8px}
+.btn-modal-cancel{flex:1;background:var(--bg2);border:1px solid var(--border);
+  color:var(--dim2);padding:11px;border-radius:var(--radius-sm);font-size:13px;font-weight:600}
+.btn-modal-confirm{flex:1;background:var(--red);color:#fff;
+  padding:11px;border-radius:var(--radius-sm);font-size:13px;font-weight:700;
+  transition:opacity .2s}
+.btn-modal-confirm:hover{opacity:.85}
+
+/* ── Stage 3: 월별 히트맵 ── */
+.heatmap{display:flex;flex-wrap:wrap;gap:8px}
+.hm-cell{flex:1;min-width:80px;max-width:140px;background:var(--card2);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:12px 10px;text-align:center;transition:border-color .2s}
+.hm-cell:hover{border-color:var(--border2)}
+.hm-month{font-size:10px;color:var(--dim2);text-transform:uppercase;margin-bottom:4px}
+.hm-pnl{font-size:16px;font-weight:700;letter-spacing:-0.5px}
+.hm-meta{font-size:10px;color:var(--dim2);margin-top:3px}
+@media(max-width:768px){
+  .ctrl-panel{grid-template-columns:1fr}
+  .hm-cell{min-width:60px}
+  .modal-box{width:90%;padding:24px}
+}
+
+/* ── Stage 4: 로그 뷰어 ── */
+.log-viewer{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:'Courier New',Courier,monospace;font-size:11px;
+  line-height:1.6;height:380px;overflow-y:auto;color:var(--dim2)}
+.log-viewer .le{white-space:pre-wrap;word-break:break-all;margin-bottom:1px;padding:1px 0}
+.log-viewer .le.enter{color:#10b981}
+.log-viewer .le.exit{color:#06b6d4}
+.log-viewer .le.warn{color:#f59e0b}
+.log-viewer .le.err{color:#f43f5e}
+.log-viewer .le.skip{color:#374151}
+.log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:6px}
+.log-filters{display:flex;gap:4px;align-items:center}
+.log-fname{font-size:10px;color:var(--dim);font-family:monospace}
+/* ── Stage 4: CSV 버튼 ── */
+.btn-csv{background:rgba(79,142,247,0.1);border:1px solid rgba(79,142,247,0.25);
+  color:var(--blue);padding:5px 12px;border-radius:var(--radius-sm);font-size:12px;
+  font-weight:600;transition:all .15s;cursor:pointer}
+.btn-csv:hover{background:rgba(79,142,247,0.2);border-color:var(--blue)}
+
+/* ═══ 모바일 ═══ */
+@media(max-width:900px){
+  .grid-3-2,.grid-2-1{grid-template-columns:1fr}
+}
+@media(max-width:768px){
+  .topbar{padding:0 14px;height:52px}
+  .main{padding:12px 14px}
+  .kpi-row{grid-template-columns:repeat(2,1fr)}
+  .kpi-row .kpi:nth-child(5){grid-column:span 2}
+  .kpi-val{font-size:22px}
+  .grid-2{grid-template-columns:1fr}
+  .tab{padding:8px 12px;font-size:12px}
+  .logo-text{display:none}
+  th,td{padding:7px 8px;font-size:12px}
+  .updated-text{display:none}
+  .status-label{display:none}
+  /* 모바일 상단바 버튼 텍스트 숨김 */
+  .btn-text{display:none}
+  .btn-icon-mobile{display:inline}
+  .btn-icon{padding:6px 9px;min-width:32px;justify-content:center}
+}
+@media(min-width:769px){
+  .btn-icon-mobile{display:none}
+}
+@media(max-width:480px){
+  .kpi-row{grid-template-columns:1fr 1fr}
+  .kpi-row .kpi:nth-child(5){grid-column:auto}
+  .kpi-val{font-size:20px}
+  .card{padding:14px}
+}
+</style>
+</head>
+<body>
+
+<!-- 로그인 -->
+<div id="login-overlay">
+  <div class="login-box">
+    <div class="login-logo">📈</div>
+    <h1>ATLAS Spot</h1>
+    <p>대시보드 접속 비밀번호를 입력하세요</p>
+    <input type="password" id="pw-input" placeholder="비밀번호"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="login-btn" onclick="doLogin()">로그인</button>
+    <div class="login-err" id="login-err"></div>
+  </div>
+</div>
+
+<!-- 메인 앱 -->
+<div id="app">
+
+  <!-- 상단바 -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="logo">📈 <span class="logo-text">ATLAS Spot</span></div>
+      <div id="regime-badge-wrap"></div>
+    </div>
+    <div class="topbar-right">
+      <div style="display:flex;align-items:center;gap:6px">
+        <div class="status-dot unknown" id="status-dot"></div>
+        <span class="status-label" id="status-label">확인 중</span>
+      </div>
+      <div class="countdown" id="countdown">—</div>
+      <button class="btn-icon" onclick="manualRefresh()">
+        <span id="refresh-icon">↻</span><span class="btn-text"> 갱신</span>
+      </button>
+      <button class="btn-icon" onclick="logout()"><span class="btn-text">나가기</span><span class="btn-icon-mobile">✕</span></button>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <!-- 필터 바 -->
+    <div class="filter-bar">
+      <div class="period-group">
+        <button class="period-btn active" data-days="0" onclick="setPeriod(this)">전체</button>
+        <button class="period-btn" data-days="30" onclick="setPeriod(this)">30일</button>
+        <button class="period-btn" data-days="7" onclick="setPeriod(this)">7일</button>
+        <button class="period-btn" data-days="1" onclick="setPeriod(this)">오늘</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div id="streak-badge-wrap"></div>
+        <span class="updated-text" id="updated-at"></span>
+      </div>
+    </div>
+
+    <!-- 경고 배너 -->
+    <div class="alert-wrap" id="alert-wrap"></div>
+
+    <!-- KPI 카드 -->
+    <div class="kpi-row">
+      <div class="kpi" id="kpi-pnl">
+        <div class="kpi-accent" id="kpi-pnl-acc"></div>
+        <div class="kpi-label">총 PnL</div>
+        <div class="kpi-val" id="k-pnl">—</div>
+        <div class="kpi-sub" id="k-equity">잔고 —</div>
+      </div>
+      <div class="kpi" id="kpi-wr">
+        <div class="kpi-accent" id="kpi-wr-acc"></div>
+        <div class="kpi-label">승률</div>
+        <div class="kpi-val" id="k-wr">—</div>
+        <div class="kpi-sub" id="k-wl">— W / — L</div>
+      </div>
+      <div class="kpi" id="kpi-pf">
+        <div class="kpi-accent" id="kpi-pf-acc"></div>
+        <div class="kpi-label">Profit Factor</div>
+        <div class="kpi-val" id="k-pf">—</div>
+        <div class="kpi-sub" id="k-avgr">avg R —</div>
+      </div>
+      <div class="kpi" id="kpi-mdd">
+        <div class="kpi-accent" id="kpi-mdd-acc"></div>
+        <div class="kpi-label">MDD</div>
+        <div class="kpi-val" id="k-mdd">—</div>
+        <div class="kpi-sub" id="k-sharpe">Sharpe —</div>
+        <div class="mdd-bar-wrap"><div class="mdd-bar-fill" id="mdd-bar"></div></div>
+      </div>
+      <div class="kpi" style="border-color:rgba(139,92,246,0.2)">
+        <div class="kpi-accent" style="background:var(--purple)"></div>
+        <div class="kpi-label">거래 / 레짐</div>
+        <div class="kpi-val" id="k-total" style="color:var(--purple)">—</div>
+        <div class="kpi-sub" id="k-regime-sub">—</div>
+      </div>
+    </div>
+
+    <!-- 탭 -->
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('overview',this)">Overview</div>
+      <div class="tab" onclick="switchTab('positions',this)">포지션 <span id="tab-pos-cnt" style="font-size:10px;opacity:.6"></span></div>
+      <div class="tab" onclick="switchTab('analysis',this)">분석</div>
+      <div class="tab" onclick="switchTab('trades',this)">거래 내역</div>
+      <div class="tab" onclick="switchTab('control',this)">⚙️ 제어</div>
+    </div>
+
+    <!-- ── Overview ── -->
+    <div id="tab-overview" class="tab-content active">
+      <!-- 수익 곡선 + 일별 PnL -->
+      <div class="grid-3-2">
+        <div class="card">
+          <div class="card-hdr">
+            <span class="card-title">수익 곡선</span>
+            <span class="card-badge" id="eq-badge">—</span>
+          </div>
+          <div class="chart-wrap h240"><canvas id="eq-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">일별 PnL (최근 30일)</span></div>
+          <div class="chart-wrap h240"><canvas id="daily-chart"></canvas></div>
+        </div>
+      </div>
+      <!-- Rolling WR + 리스크 카드 -->
+      <div class="grid-3-2">
+        <div class="card">
+          <div class="card-hdr">
+            <span class="card-title">Rolling 승률 (최근 10건)</span>
+            <span class="card-badge" style="color:var(--dim2)">이동 평균</span>
+          </div>
+          <div class="chart-wrap h200"><canvas id="wr-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">리스크 상태</span></div>
+          <div class="risk-card" id="risk-card">
+            <!-- Ratchet -->
+            <div>
+              <div class="risk-row">
+                <div>
+                  <div class="risk-label">Drawdown Ratchet</div>
+                  <div class="risk-val" id="ratchet-scale">1.0x</div>
+                  <div class="risk-sub" id="ratchet-label">—</div>
+                </div>
+                <div style="text-align:right">
+                  <div class="risk-label">현재 MDD</div>
+                  <div style="font-size:18px;font-weight:700" id="ratchet-mdd">—</div>
+                </div>
+              </div>
+              <div class="scale-bar">
+                <div class="scale-fill" id="ratchet-bar"></div>
+              </div>
+            </div>
+            <div class="divider" style="margin:4px 0"></div>
+            <!-- Kelly -->
+            <div>
+              <div class="risk-label" style="margin-bottom:8px">Half-Kelly 배율 (전략별)</div>
+              <div id="kelly-rows"><div style="color:var(--dim2);font-size:12px">데이터 없음</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 포지션 ── -->
+    <div id="tab-positions" class="tab-content">
+      <div class="card" style="margin-bottom:12px">
+        <div class="section-row">
+          <h3>열린 포지션</h3>
+          <span class="card-badge" id="pos-count">0개</span>
+        </div>
+        <div class="tbl-wrap" id="pos-table"><div class="empty">열린 포지션 없음</div></div>
+      </div>
+    </div>
+
+    <!-- ── 분석 ── -->
+    <div id="tab-analysis" class="tab-content">
+      <div class="grid-2" style="margin-bottom:12px">
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">모듈별 성과</span></div>
+          <div class="tbl-wrap" id="module-table"><div class="empty">데이터 없음</div></div>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">전략별 PnL</span></div>
+          <div class="chart-wrap h200"><canvas id="mod-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">심볼 × 방향별 성과</span>
+          <span class="card-badge">상세 분석</span>
+        </div>
+        <div class="tbl-wrap" id="sym-dir-table"><div class="empty">데이터 없음</div></div>
+      </div>
+      <!-- DD 차트 -->
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">Drawdown 시계열</span>
+          <span class="card-badge" style="color:var(--red)">낙폭 %</span>
+        </div>
+        <div class="chart-wrap h200"><canvas id="dd-chart"></canvas></div>
+      </div>
+      <!-- 월별 히트맵 -->
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">월별 PnL 히트맵</span>
+          <span class="card-badge">월간 성과</span>
+        </div>
+        <div class="heatmap" id="monthly-heatmap">
+          <div class="empty">데이터 없음</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 거래 내역 ── -->
+    <div id="tab-trades" class="tab-content">
+      <div class="card">
+        <div class="card-hdr">
+          <span class="card-title">최근 거래</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="card-badge" id="trade-count-badge">50건</span>
+            <button class="btn-csv" onclick="downloadCSV()">⬇ CSV</button>
+          </div>
+        </div>
+        <!-- 필터 -->
+        <div class="trade-filter-grid">
+          <div class="filter-row">
+            <span class="filter-label">방향</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="dir" data-val="ALL"   onclick="setTradeFilter('dir','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="dir" data-val="LONG"  onclick="setTradeFilter('dir','LONG',this)">🟢 LONG</button>
+              <button class="filter-btn"        data-filter="dir" data-val="SHORT" onclick="setTradeFilter('dir','SHORT',this)">🔴 SHORT</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">심볼</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="sym" data-val="ALL"  onclick="setTradeFilter('sym','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="sym" data-val="BTC"  onclick="setTradeFilter('sym','BTC',this)">BTC</button>
+              <button class="filter-btn"        data-filter="sym" data-val="ETH"  onclick="setTradeFilter('sym','ETH',this)">ETH</button>
+              <button class="filter-btn"        data-filter="sym" data-val="SOL"  onclick="setTradeFilter('sym','SOL',this)">SOL</button>
+              <button class="filter-btn"        data-filter="sym" data-val="BNB"  onclick="setTradeFilter('sym','BNB',this)">BNB</button>
+              <button class="filter-btn"        data-filter="sym" data-val="XRP"  onclick="setTradeFilter('sym','XRP',this)">XRP</button>
+              <button class="filter-btn"        data-filter="sym" data-val="ADA"  onclick="setTradeFilter('sym','ADA',this)">ADA</button>
+              <button class="filter-btn"        data-filter="sym" data-val="AVAX" onclick="setTradeFilter('sym','AVAX',this)">AVAX</button>
+              <button class="filter-btn"        data-filter="sym" data-val="LINK" onclick="setTradeFilter('sym','LINK',this)">LINK</button>
+              <button class="filter-btn"        data-filter="sym" data-val="DOT"  onclick="setTradeFilter('sym','DOT',this)">DOT</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">사유</span>
+            <div class="filter-btns-wrap">
+              <button class="filter-btn active" data-filter="reason" data-val="ALL" onclick="setTradeFilter('reason','ALL',this)">전체</button>
+              <button class="filter-btn"        data-filter="reason" data-val="TP"  onclick="setTradeFilter('reason','TP',this)">TP</button>
+              <button class="filter-btn"        data-filter="reason" data-val="SL"  onclick="setTradeFilter('reason','SL',this)">SL</button>
+            </div>
+          </div>
+        </div>
+        <div class="tbl-wrap" id="trades-table"><div class="empty">거래 내역 없음</div></div>
+      </div>
+    </div>
+
+    <!-- ── 제어 탭 ── -->
+    <div id="tab-control" class="tab-content">
+      <div class="ctrl-panel">
+        <!-- 봇 제어 -->
+        <div class="ctrl-card">
+          <div class="card-hdr"><span class="card-title">봇 프로세스 제어</span></div>
+          <div class="ctrl-status-row">
+            <div class="status-dot-lg unknown" id="ctrl-dot"></div>
+            <div class="ctrl-status-info">
+              <h3 id="ctrl-status-title">확인 중...</h3>
+              <p id="ctrl-status-sub">봇 프로세스 상태</p>
+            </div>
+          </div>
+          <div class="ctrl-btns">
+            <button class="btn-start" id="btn-start" onclick="botControl('start')">▶ 봇 시작</button>
+            <button class="btn-stop"  id="btn-stop"  onclick="botControl('stop')">■ 봇 중지</button>
+          </div>
+          <div class="ctrl-log" id="ctrl-log">대기 중...</div>
+        </div>
+        <!-- 패닉 버튼 -->
+        <div class="ctrl-card">
+          <div class="card-hdr"><span class="card-title" style="color:var(--red)">⚠️ 긴급 패닉 청산</span></div>
+          <p style="font-size:12px;color:var(--dim2);line-height:1.7;margin-bottom:8px">
+            시장 급변 시 모든 열린 포지션을 <strong style="color:var(--text)">즉시 시장가로 강제 청산</strong>하고
+            봇을 중지합니다.<br>이 작업은 <strong style="color:var(--red)">되돌릴 수 없습니다.</strong>
+          </p>
+          <div style="background:rgba(244,63,94,0.06);border:1px solid rgba(244,63,94,0.15);
+               border-radius:8px;padding:12px;margin-bottom:8px;font-size:11px;color:var(--dim2)">
+            실행 순서: 봇 중지 → 미체결 주문 전체 취소 → 포지션 시장가 청산 → TG 알림
+          </div>
+          <button class="btn-panic" onclick="showPanicModal()">🚨 전 포지션 강제 청산</button>
+          <div class="panic-warn">이중 확인이 필요합니다 — 클릭 후 "PANIC" 직접 입력</div>
+          <div class="ctrl-log" id="panic-log" style="margin-top:12px">대기 중...</div>
+        </div>
+      </div>
+      <!-- Stage 4: 로그 뷰어 -->
+      <div class="card" style="margin-top:12px">
+        <div class="log-hdr">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="card-title">실시간 로그</span>
+            <span class="log-fname" id="log-file-name"></span>
+          </div>
+          <div class="log-filters">
+            <button class="filter-btn active" data-lf="ALL"   onclick="setLogFilter('ALL',this)">전체</button>
+            <button class="filter-btn"        data-lf="TRADE" onclick="setLogFilter('TRADE',this)">진입·청산</button>
+            <button class="filter-btn"        data-lf="WARN"  onclick="setLogFilter('WARN',this)">경고·에러</button>
+            <button class="filter-btn"        data-lf="SKIP"  onclick="setLogFilter('SKIP',this)">스킵</button>
+            <button class="btn-icon" onclick="loadLogs()" style="margin-left:4px">↻</button>
+          </div>
+        </div>
+        <div class="log-viewer" id="log-viewer"><div class="le">제어 탭에 접속하면 로그가 표시됩니다.</div></div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- 패닉 확인 모달 -->
+<div id="panic-modal" style="display:none">
+  <div class="modal-overlay">
+    <div class="modal-box">
+      <h2>🚨 패닉 청산 확인</h2>
+      <p>
+        모든 포지션이 <strong style="color:var(--red)">시장가로 즉시 청산</strong>됩니다.<br>
+        봇도 함께 중지됩니다.<br><br>
+        계속하려면 아래 입력란에 <strong style="color:var(--red)">PANIC</strong> 을 입력하세요.
+      </p>
+      <input type="text" id="panic-input" placeholder="PANIC"
+             oninput="this.value=this.value.toUpperCase()"
+             onkeydown="if(event.key==='Enter')executePanic()">
+      <div class="modal-btns">
+        <button class="btn-modal-cancel" onclick="closePanicModal()">취소</button>
+        <button class="btn-modal-confirm" onclick="executePanic()">강제 청산 실행</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem('atlas_token') || '';
+let currentPeriod = 0;
+let eqChart = null, dailyChart = null, modChart = null, wrChart = null, ddChart = null;
+let refreshTimer = null, countdownTimer = null, countdownVal = 60;
+let allTrades = [];
+let tradeFilters = {dir:'ALL', sym:'ALL', reason:'ALL'};
+// Stage 4
+let logFilter = 'ALL', logInterval = null, posRefreshInterval = null;
+
+// ── 인증 ──────────────────────────────────────────────────────
+async function doLogin() {
+  const pw  = document.getElementById('pw-input').value;
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  try {
+    const res = await fetch('/api/auth', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password:pw})
+    });
+    if (!res.ok) { err.textContent = '비밀번호가 틀렸습니다.'; return; }
+    TOKEN = (await res.json()).token;
+    localStorage.setItem('atlas_token', TOKEN);
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    loadDashboard();
+  } catch(e) { err.textContent = '서버 연결 오류'; }
+}
+
+function logout() {
+  localStorage.removeItem('atlas_token');
+  location.reload();
+}
+
+window.onload = () => {
+  if (TOKEN) {
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    loadDashboard();
+  }
+};
+
+// ── 데이터 ────────────────────────────────────────────────────
+async function loadDashboard() {
+  setRefreshIcon(true);
+  try {
+    const res = await fetch(`/api/dashboard?token=${TOKEN}&period=${currentPeriod}`);
+    if (res.status === 401) { logout(); return; }
+    const d = await res.json();
+    render(d);
+    startCountdown(d.refresh_sec || 60);
+  } catch(e) { console.error(e); }
+  setRefreshIcon(false);
+}
+
+function manualRefresh() { clearTimeout(refreshTimer); clearInterval(countdownTimer); loadDashboard(); }
+
+function startCountdown(sec) {
+  clearTimeout(refreshTimer);
+  clearInterval(countdownTimer);
+  countdownVal = sec;
+  updateCountdown();
+  countdownTimer = setInterval(() => {
+    countdownVal--;
+    updateCountdown();
+    if (countdownVal <= 0) {
+      clearInterval(countdownTimer);
+      loadDashboard();
+    }
+  }, 1000);
+}
+
+function updateCountdown() {
+  const el = document.getElementById('countdown');
+  if (countdownVal > 0) el.textContent = countdownVal + 's';
+  else el.innerHTML = '<span class="spinner"></span>';
+}
+
+function setRefreshIcon(on) {
+  document.getElementById('refresh-icon').innerHTML = on ? '<span class="spinner"></span>' : '↻';
+}
+
+function setPeriod(btn) {
+  document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentPeriod = parseInt(btn.dataset.days);
+  loadDashboard();
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  clearInterval(logInterval); logInterval = null;
+  if (name === 'control') { loadLogs(); logInterval = setInterval(loadLogs, 15000); }
+}
+
+// ── 렌더 ─────────────────────────────────────────────────────
+function render(d) {
+  const m = d.metrics;
+  document.getElementById('updated-at').textContent = d.updated_at;
+
+  renderBotStatus(d.bot_alive, d.log_time);
+  renderAlerts(d.alerts || []);
+  renderRegimeBadge(d.regime);
+  renderStreakBadge(d.streak);
+  renderKPIs(m, d.regime, d.actual_balance);
+  renderEqChart(d.eq_curve);
+  renderDailyChart(d.daily);
+  renderModChart(d.module_stats);
+  renderModuleTable(d.module_stats);
+  renderSymDirTable(d.sym_dir || []);
+  renderPositions(d.open_pos || []);
+  // Stage 2
+  renderWRChart(d.rolling_wr || []);
+  renderDDChart(d.dd_curve || []);
+  renderRiskCard(d.ratchet, d.kelly || []);
+  renderMonthlyHeatmap(d.monthly_pnl || []);
+  updateControlPanel(d.bot_alive, d.log_time);
+  allTrades = d.recent || [];
+  applyTradeFilters();
+}
+
+// ── 봇 상태 ──────────────────────────────────────────────────
+function renderBotStatus(alive, logTime) {
+  const dot   = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  if (alive === true) {
+    dot.className = 'status-dot alive';
+    label.textContent = logTime ? `로그 ${logTime}` : '정상 가동';
+  } else if (alive === false) {
+    dot.className = 'status-dot dead';
+    label.textContent = '프로세스 중단';
+  } else {
+    dot.className = 'status-dot unknown';
+    label.textContent = '상태 미확인';
+  }
+}
+
+// ── 경고 배너 ─────────────────────────────────────────────────
+function renderAlerts(alerts) {
+  const wrap = document.getElementById('alert-wrap');
+  if (!alerts.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = alerts.map(a =>
+    `<div class="alert ${a.level}">
+      <span class="alert-icon">${a.level==='critical'?'🚨':'⚠️'}</span>
+      ${a.msg}
+    </div>`
+  ).join('');
+}
+
+// ── 레짐 배지 ─────────────────────────────────────────────────
+const RC = {
+  TRENDING_UP:   ['#10b981','🟢 TRENDING UP'],
+  TRENDING_DOWN: ['#f43f5e','🔴 TRENDING DOWN'],
+  RANGING:       ['#f59e0b','🟡 RANGING'],
+  WEAK_TREND:    ['#4f8ef7','🔵 WEAK TREND'],
+  CRISIS:        ['#8b5cf6','🟣 CRISIS'],
+};
+function renderRegimeBadge(r) {
+  const [c, l] = RC[r] || ['#64748b', `⚪ ${r}`];
+  document.getElementById('regime-badge-wrap').innerHTML =
+    `<span class="regime-badge" style="background:${c}15;color:${c};border-color:${c}33">${l}</span>`;
+}
+
+function renderStreakBadge(s) {
+  const el = document.getElementById('streak-badge-wrap');
+  if (!s || s.kind === 'none' || s.count === 0) { el.innerHTML = ''; return; }
+  const [icon, c] = s.kind === 'win' ? ['🔥','#10b981'] : ['❄️','#f43f5e'];
+  el.innerHTML = `<span class="streak-badge" style="background:${c}15;color:${c};border-color:${c}33">
+    ${icon} ${s.count}${s.kind==='win'?'연승':'연패'}
+  </span>`;
+}
+
+// ── KPI ──────────────────────────────────────────────────────
+function kpiColor(val, thr1, thr2, reverse=false) {
+  if (!reverse) return val >= thr1 ? 'var(--green)' : val >= thr2 ? 'var(--yellow)' : 'var(--red)';
+  return val <= thr1 ? 'var(--green)' : val <= thr2 ? 'var(--yellow)' : 'var(--red)';
+}
+function setKPI(id, val, cls) {
+  const el = document.getElementById(id);
+  el.textContent = val; el.className = 'kpi-val ' + (cls || '');
+}
+function renderKPIs(m, regime, actualBal) {
+  // PnL (순수익 = 수수료 차감)
+  const pnlC = m.total_pnl >= 0 ? 'pos' : 'neg';
+  setKPI('k-pnl', `${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)}`, pnlC);
+  document.getElementById('kpi-pnl-acc').style.background = m.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // 잔고 표시: 실잔고(API) 우선, 없으면 계산값
+  const dispBal  = actualBal != null ? actualBal : m.equity;
+  const feeStr   = m.total_fee > 0 ? ` · 수수료 -$${m.total_fee.toFixed(2)}` : '';
+  const balLabel = actualBal != null ? `거래소 $${dispBal.toFixed(2)}${feeStr}` : `잔고 $${dispBal.toFixed(2)}${feeStr}`;
+  document.getElementById('k-equity').textContent = balLabel;
+
+  // WR
+  const wrC = m.wr >= 40 ? 'pos' : m.wr >= 33 ? '' : 'neg';
+  setKPI('k-wr', `${m.wr.toFixed(0)}%`, wrC);
+  document.getElementById('k-wl').textContent = `${m.wins}W / ${m.total - m.wins}L`;
+  document.getElementById('kpi-wr-acc').style.background = m.wr >= 40 ? 'var(--green)' : m.wr >= 33 ? 'var(--yellow)' : 'var(--red)';
+
+  // PF
+  const pfC = m.pf >= 1.2 ? 'pos' : m.pf >= 1.0 ? '' : 'neg';
+  setKPI('k-pf', m.pf > 0 ? m.pf.toFixed(2) : '—', pfC);
+  document.getElementById('k-avgr').textContent = `avg R ${m.avg_r>=0?'+':''}${m.avg_r.toFixed(3)}`;
+  document.getElementById('kpi-pf-acc').style.background = m.pf >= 1.2 ? 'var(--green)' : m.pf >= 1.0 ? 'var(--yellow)' : 'var(--red)';
+
+  // MDD
+  const mddC = m.mdd_pct > 10 ? 'neg' : m.mdd_pct > 5 ? '' : 'pos';
+  const mddColor = m.mdd_pct > 10 ? 'var(--red)' : m.mdd_pct > 5 ? 'var(--yellow)' : 'var(--green)';
+  setKPI('k-mdd', `${m.mdd_pct.toFixed(1)}%`, mddC);
+  document.getElementById('k-sharpe').textContent = `Sharpe ${m.sharpe.toFixed(2)}`;
+  document.getElementById('kpi-mdd-acc').style.background = mddColor;
+  const barPct = Math.min(m.mdd_pct / 20 * 100, 100);
+  const bar = document.getElementById('mdd-bar');
+  bar.style.width = barPct + '%'; bar.style.background = mddColor;
+
+  // 거래수 + 레짐
+  document.getElementById('k-total').textContent = `${m.total}건`;
+  document.getElementById('k-regime-sub').textContent = regime || '—';
+  document.getElementById('tab-pos-cnt').textContent = '';
+
+  // eq badge: 실잔고 기준으로 수익률 표시
+  const refBal = actualBal != null ? actualBal : m.equity;
+  const retPct = (refBal - 1000) / 1000 * 100;
+  document.getElementById('eq-badge').textContent =
+    `$${refBal.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
+}
+
+// ── 차트 공통 ─────────────────────────────────────────────────
+const DARK = {
+  plugins:{legend:{display:false},
+    tooltip:{backgroundColor:'#1e2433',titleColor:'#94a3b8',bodyColor:'#e2e8f0',
+      borderColor:'rgba(255,255,255,0.08)',borderWidth:1,padding:10,cornerRadius:8,
+      displayColors:false}},
+  scales:{x:{grid:{color:'rgba(255,255,255,0.03)'},
+              ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:8}},
+          y:{grid:{color:'rgba(255,255,255,0.03)'},
+              ticks:{color:'#4a5568',font:{size:10}}}},
+  responsive:true,maintainAspectRatio:false,animation:{duration:300}
+};
+
+// ── 수익 곡선 ─────────────────────────────────────────────────
+function renderEqChart(data) {
+  const ctx = document.getElementById('eq-chart').getContext('2d');
+  if (eqChart) eqChart.destroy();
+  if (!data || !data.length) return;
+
+  const values = data.map(d => d.eq);
+  const lastVal = values[values.length-1];
+  const color   = lastVal >= 1000 ? '#10b981' : '#f43f5e';
+  const labels  = data.map(d => {
+    if (!d.ts) return '';
+    const dt = new Date(d.ts);
+    return `${String(dt.getMonth()+1).padStart(2,'0')}/${String(dt.getDate()).padStart(2,'0')}`;
+  });
+
+  const grad = ctx.createLinearGradient(0, 0, 0, 240);
+  grad.addColorStop(0, color + '30'); grad.addColorStop(1, color + '00');
+
+  eqChart = new Chart(ctx, {type:'line', data:{
+    labels,
+    datasets:[{data:values, borderColor:color, borderWidth:2,
+      fill:true, backgroundColor:grad,
+      pointRadius: data.map(d => d.reason==='TP'||d.reason==='SL' ? 4 : 0),
+      pointBackgroundColor: data.map(d => d.reason==='TP'?'#10b981':d.reason==='SL'?'#f43f5e':color),
+      pointHoverRadius:5, tension:0.35}]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{
+          title: items => labels[items[0].dataIndex],
+          label: ctx => {
+            const pt = data[ctx.dataIndex];
+            return [`잔고: $${ctx.parsed.y.toFixed(2)}`, pt.reason ? `${pt.reason}: ${pt.pnl>=0?'+':''}$${pt.pnl.toFixed(2)}` : ''].filter(Boolean);
+          }
+        }}},
+    scales:{...DARK.scales,
+      y:{...DARK.scales.y,
+        ticks:{...DARK.scales.y.ticks, callback:v=>`$${v.toFixed(0)}`}}}
+  }});
+}
+
+// ── 일별 PnL ─────────────────────────────────────────────────
+function renderDailyChart(data) {
+  const ctx = document.getElementById('daily-chart').getContext('2d');
+  if (dailyChart) dailyChart.destroy();
+  if (!data || !data.length) return;
+  dailyChart = new Chart(ctx, {type:'bar', data:{
+    labels: data.map(d=>d.date),
+    datasets:[{data:data.map(d=>d.pnl),
+      backgroundColor:data.map(d=>d.pnl>=0?'rgba(16,185,129,0.65)':'rgba(244,63,94,0.65)'),
+      borderRadius:3,borderSkipped:false}]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{label:c=>`${c.parsed.y>=0?'+':''}$${c.parsed.y.toFixed(2)}`}}}}});
+}
+
+// ── 모듈 차트 ─────────────────────────────────────────────────
+function renderModChart(stats) {
+  const ctx = document.getElementById('mod-chart').getContext('2d');
+  if (modChart) modChart.destroy();
+  if (!stats||!stats.length) return;
+  modChart = new Chart(ctx, {type:'bar', data:{
+    labels: stats.map(s=>s.module),
+    datasets:[{data:stats.map(s=>s.pnl),
+      backgroundColor:stats.map(s=>s.pnl>=0?'rgba(16,185,129,0.65)':'rgba(244,63,94,0.65)'),
+      borderRadius:3,borderSkipped:false}]
+  }, options:{...DARK, indexAxis:'y',
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{label:c=>`${c.parsed.x>=0?'+':''}$${c.parsed.x.toFixed(2)}`}}}}});
+}
+
+// ── 모듈 테이블 ───────────────────────────────────────────────
+function renderModuleTable(stats) {
+  const el = document.getElementById('module-table');
+  if (!stats||!stats.length) { el.innerHTML='<div class="empty">데이터 없음</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>모듈</th><th>거래</th><th>승률</th><th>PF</th><th>총PnL</th><th>avgR</th><th></th></tr></thead>
+    <tbody>${stats.map(s=>`<tr>
+      <td class="td-bold">${s.module}</td>
+      <td>${s.trades}</td>
+      <td class="${s.wr>=40?'pos':s.wr>=33?'':'neg'}">${s.wr}%</td>
+      <td class="${s.pf>=1.2?'pos':s.pf>=1.0?'neutral':'neg'}">${s.pf||'—'}</td>
+      <td class="${s.pnl>=0?'pos':'neg'} td-bold">${s.pnl>=0?'+':''}$${s.pnl.toFixed(2)}</td>
+      <td class="${s.avg_r>=0?'pos':'neg'}">${s.avg_r>=0?'+':''}${s.avg_r.toFixed(3)}</td>
+      <td>${s.reliable?'<span class="ok-txt">✓</span>':'<span class="warn-txt">⚠</span>'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ── 심볼×방향 테이블 ─────────────────────────────────────────
+function renderSymDirTable(data) {
+  const el = document.getElementById('sym-dir-table');
+  if (!data||!data.length) { el.innerHTML='<div class="empty">데이터 없음</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>심볼</th><th>방향</th><th>거래</th><th>승률</th><th>총PnL</th><th>avgR</th><th>최대수익</th><th>최대손실</th></tr></thead>
+    <tbody>${data.map(r=>`<tr>
+      <td class="td-bold">${r.symbol}</td>
+      <td><span class="tag ${r.direction==='LONG'?'tag-long':'tag-short'}">${r.direction==='LONG'?'L':'S'}</span></td>
+      <td>${r.trades}</td>
+      <td class="${r.wr>=40?'pos':r.wr>=33?'':'neg'}">${r.wr}%</td>
+      <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
+      <td class="${r.avg_r>=0?'pos':'neg'}">${r.avg_r>=0?'+':''}${r.avg_r.toFixed(3)}</td>
+      <td class="pos">+$${r.best.toFixed(2)}</td>
+      <td class="neg">$${r.worst.toFixed(2)}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ── 포지션 테이블 ─────────────────────────────────────────────
+async function renderPositions(pos) {
+  const el  = document.getElementById('pos-table');
+  const cnt = document.getElementById('pos-count');
+  const tab = document.getElementById('tab-pos-cnt');
+  cnt.textContent = `${pos.length}개`;
+  tab.textContent = pos.length > 0 ? `(${pos.length})` : '';
+
+  if (!pos.length) { el.innerHTML = '<div class="empty">열린 포지션 없음</div>'; return; }
+
+  // 실시간 가격
+  const syms = [...new Set(pos.map(p=>p.symbol))].join(',');
+  let prices = {};
+  try {
+    const r = await fetch(`/api/prices?token=${TOKEN}&symbols=${syms}`);
+    if (r.ok) prices = await r.json();
+  } catch(e){}
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>전략</th><th>심볼</th><th>방향</th>
+      <th>진입가</th><th>현재가</th><th>미실현PnL</th>
+      <th>SL거리</th><th>SL</th><th>TP</th>
+      <th>보유시간</th><th>매입금액(USDT)</th>
+    </tr></thead>
+    <tbody>${pos.map(p=>{
+      const cur = prices[p.symbol] || 0;
+      let upnl='—', upnlC='';
+      if (cur > 0) {
+        const v = p.direction==='LONG'?(cur-p.entry)*p.qty:(p.entry-cur)*p.qty;
+        upnl = `${v>=0?'+':''}$${v.toFixed(2)}`; upnlC = v>=0?'pos':'neg';
+      }
+      return `<tr data-sym="${p.symbol}" data-entry="${p.entry}" data-qty="${p.qty}" data-dir="${p.direction}">
+        <td class="td-dim">${p.strategy}</td>
+        <td class="td-bold">${p.symbol.replace('USDT','')}</td>
+        <td><span class="tag ${p.direction==='LONG'?'tag-long':'tag-short'}">${p.direction==='LONG'?'L':'S'}</span></td>
+        <td>${p.entry.toLocaleString()}</td>
+        <td class="pos-cur">${cur>0?cur.toLocaleString():'—'}</td>
+        <td class="pos-upnl ${upnlC} td-bold">${upnl}</td>
+        <td class="neg">${p.sl_dist}</td>
+        <td class="neg">${p.sl.toLocaleString()}</td>
+        <td class="pos">${p.tp.toLocaleString()}</td>
+        <td class="td-dim">${p.hold}</td>
+        <td class="td-dim">${p.leverage}x</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+
+  // 포지션 있을 때 5초마다 가격만 갱신
+  clearInterval(posRefreshInterval); posRefreshInterval = null;
+  if (pos.length > 0) posRefreshInterval = setInterval(refreshPosPrices, 5000);
+}
+
+// ── 거래 필터 ─────────────────────────────────────────────────
+function setTradeFilter(type, val, btn) {
+  tradeFilters[type] = val;
+  document.querySelectorAll(`[data-filter="${type}"]`).forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyTradeFilters();
+}
+
+function applyTradeFilters() {
+  let trades = allTrades;
+  if (tradeFilters.dir !== 'ALL')
+    trades = trades.filter(t => t.direction === tradeFilters.dir);
+  if (tradeFilters.sym !== 'ALL')
+    trades = trades.filter(t => t.symbol.includes(tradeFilters.sym));
+  if (tradeFilters.reason !== 'ALL')
+    trades = trades.filter(t => t.reason === tradeFilters.reason);
+  document.getElementById('trade-count-badge').textContent = `${trades.length}건`;
+  renderTrades(trades);
+}
+
+function renderTrades(trades) {
+  const el = document.getElementById('trades-table');
+  if (!trades.length) { el.innerHTML='<div class="empty">조건에 맞는 거래 없음</div>'; return; }
+  const reasonTag = r => {
+    if(r==='TP')     return 'tag-tp';
+    if(r==='SL')     return 'tag-sl';
+    if(r==='TIME')   return 'tag-time';
+    if(r==='MANUAL') return 'tag-manual';
+    return 'tag-fn';
+  };
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>시간</th><th>전략</th><th>심볼</th><th>방향</th>
+      <th>진입가</th><th>청산가</th><th>PnL</th><th>R</th>
+      <th>사유</th><th>레짐</th>
+    </tr></thead>
+    <tbody>${trades.map(t=>`<tr>
+      <td class="td-dim">${t.ts}</td>
+      <td class="td-dim" style="font-size:11px">${t.strategy}</td>
+      <td class="td-bold">${t.symbol.replace('USDT','')}</td>
+      <td><span class="tag ${t.direction==='LONG'?'tag-long':'tag-short'}">${t.direction==='LONG'?'L':'S'}</span></td>
+      <td>${t.entry.toLocaleString()}</td>
+      <td>${t.exit.toLocaleString()}</td>
+      <td class="${t.pnl>=0?'pos':'neg'} td-bold">${t.pnl>=0?'+':''}$${t.pnl.toFixed(2)}</td>
+      <td class="${t.r>=0?'pos':'neg'}">${t.r>=0?'+':''}${t.r.toFixed(2)}R</td>
+      <td><span class="tag ${reasonTag(t.reason)}">${t.reason}</span></td>
+      <td class="td-dim">${t.regime||'—'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ── Rolling WR 차트 ──────────────────────────────────────────
+function renderWRChart(data) {
+  const ctx = document.getElementById('wr-chart').getContext('2d');
+  if (wrChart) wrChart.destroy();
+  if (!data || data.length < 2) return;
+
+  const labels = data.map((d, i) => i + 1);
+  const values = data.map(d => d.wr);
+  const grad   = ctx.createLinearGradient(0, 0, 0, 200);
+  grad.addColorStop(0, 'rgba(79,142,247,0.25)');
+  grad.addColorStop(1, 'rgba(79,142,247,0.0)');
+
+  wrChart = new Chart(ctx, {type:'line', data:{
+    labels,
+    datasets:[
+      {data:values, borderColor:'#4f8ef7', borderWidth:2,
+       fill:true, backgroundColor:grad,
+       pointRadius:3, pointBackgroundColor:'#4f8ef7', tension:0.4},
+      {data:Array(values.length).fill(33.3),
+       borderColor:'rgba(244,63,94,0.4)', borderWidth:1,
+       borderDash:[4,4], pointRadius:0, fill:false},
+      {data:Array(values.length).fill(40),
+       borderColor:'rgba(16,185,129,0.4)', borderWidth:1,
+       borderDash:[4,4], pointRadius:0, fill:false},
+    ]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{
+          title: items => `거래 #${items[0].dataIndex+1}`,
+          label: ctx => ctx.datasetIndex===0 ? `승률 ${ctx.parsed.y.toFixed(1)}%` : null,
+          filter: item => item.datasetIndex === 0,
+        }}},
+    scales:{...DARK.scales,
+      x:{...DARK.scales.x, title:{display:true,text:'거래 순서',color:'#4a5568',font:{size:10}}},
+      y:{...DARK.scales.y,
+         min:0, max:100,
+         ticks:{...DARK.scales.y.ticks, callback:v=>`${v}%`}}}}});
+}
+
+// ── DD 차트 ──────────────────────────────────────────────────
+function renderDDChart(data) {
+  const ctx = document.getElementById('dd-chart').getContext('2d');
+  if (ddChart) ddChart.destroy();
+  if (!data || data.length < 2) return;
+
+  const labels = data.map(d => {
+    if (!d.ts) return '';
+    const dt = new Date(d.ts);
+    return `${String(dt.getMonth()+1).padStart(2,'0')}/${String(dt.getDate()).padStart(2,'0')}`;
+  });
+  const values = data.map(d => d.dd);
+  const grad   = ctx.createLinearGradient(0, 0, 0, 200);
+  grad.addColorStop(0, 'rgba(244,63,94,0.3)');
+  grad.addColorStop(1, 'rgba(244,63,94,0.0)');
+
+  ddChart = new Chart(ctx, {type:'line', data:{
+    labels,
+    datasets:[{data:values, borderColor:'#f43f5e', borderWidth:1.5,
+      fill:true, backgroundColor:grad, pointRadius:0, tension:0.35}]
+  }, options:{...DARK,
+    plugins:{...DARK.plugins,
+      tooltip:{...DARK.plugins.tooltip,
+        callbacks:{label:c=>`낙폭 ${c.parsed.y.toFixed(2)}%`}}},
+    scales:{...DARK.scales,
+      y:{...DARK.scales.y,
+         reverse:true, min:0,
+         ticks:{...DARK.scales.y.ticks, callback:v=>`${v.toFixed(0)}%`}}}}});
+}
+
+// ── 월별 히트맵 ──────────────────────────────────────────────
+function renderMonthlyHeatmap(data) {
+  const el = document.getElementById('monthly-heatmap');
+  if (!data || !data.length) { el.innerHTML='<div class="empty">데이터 없음</div>'; return; }
+  el.innerHTML = data.map(m => {
+    const color = m.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const bg    = m.pnl >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(244,63,94,0.08)';
+    const border= m.pnl >= 0 ? 'rgba(16,185,129,0.2)' : 'rgba(244,63,94,0.2)';
+    return `<div class="hm-cell" style="background:${bg};border-color:${border}">
+      <div class="hm-month">${m.month}</div>
+      <div class="hm-pnl" style="color:${color}">${m.pnl>=0?'+':''}$${m.pnl.toFixed(1)}</div>
+      <div class="hm-meta">${m.trades}건 · ${m.wr}%</div>
+    </div>`;
+  }).join('');
+}
+
+// ── 제어 패널 ─────────────────────────────────────────────────
+function updateControlPanel(alive, logTime) {
+  const dot   = document.getElementById('ctrl-dot');
+  const title = document.getElementById('ctrl-status-title');
+  const sub   = document.getElementById('ctrl-status-sub');
+  const btnS  = document.getElementById('btn-start');
+  const btnX  = document.getElementById('btn-stop');
+
+  if (alive === true) {
+    dot.className = 'status-dot-lg alive';
+    title.textContent = '정상 가동 중';
+    title.style.color = 'var(--green)';
+    sub.textContent   = logTime ? `마지막 로그: ${logTime}` : '봇 실행 중';
+    btnS.disabled = true; btnX.disabled = false;
+  } else {
+    dot.className = 'status-dot-lg dead';
+    title.textContent = '봇 중지됨';
+    title.style.color = 'var(--red)';
+    sub.textContent   = '프로세스 없음';
+    btnS.disabled = false; btnX.disabled = true;
+  }
+}
+
+async function botControl(action) {
+  const logEl = document.getElementById('ctrl-log');
+  const labels = {start:'▶ 봇 시작 중...', stop:'■ 봇 중지 중...'};
+  logEl.textContent = labels[action] || '처리 중...';
+  try {
+    const res  = await fetch('/api/control', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token:TOKEN, action})
+    });
+    if (res.status === 401) { logout(); return; }
+    const d = await res.json();
+    logEl.textContent = `${new Date().toLocaleTimeString()} — ${d.msg}`;
+    setTimeout(() => loadDashboard(), 3000);
+  } catch(e) {
+    logEl.textContent = `오류: ${e.message}`;
+  }
+}
+
+// ── 패닉 모달 ────────────────────────────────────────────────
+function showPanicModal() {
+  document.getElementById('panic-input').value = '';
+  document.getElementById('panic-modal').style.display = 'block';
+  setTimeout(() => document.getElementById('panic-input').focus(), 100);
+}
+
+function closePanicModal() {
+  document.getElementById('panic-modal').style.display = 'none';
+}
+
+async function executePanic() {
+  const confirm = document.getElementById('panic-input').value.trim();
+  const logEl   = document.getElementById('panic-log');
+  if (confirm !== 'PANIC') {
+    document.getElementById('panic-input').style.borderColor = 'var(--red)';
+    setTimeout(() => document.getElementById('panic-input').style.borderColor = '', 1000);
+    return;
+  }
+  closePanicModal();
+  logEl.textContent = '🚨 패닉 청산 실행 중... (최대 30초 소요)';
+  try {
+    const res = await fetch('/api/panic', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token:TOKEN, confirm:'PANIC'})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      logEl.innerHTML = d.results.map(r => `• ${r}`).join('<br>');
+      setTimeout(() => loadDashboard(), 3000);
+    } else {
+      logEl.textContent = `오류: ${d.detail || '알 수 없는 오류'}`;
+    }
+  } catch(e) {
+    logEl.textContent = `네트워크 오류: ${e.message}`;
+  }
+}
+
+// ── Stage 4: 포지션 빠른 가격 갱신 (5초) ────────────────────
+async function refreshPosPrices() {
+  const rows = document.querySelectorAll('#pos-table tbody tr[data-sym]');
+  if (!rows.length) { clearInterval(posRefreshInterval); return; }
+  const syms = [...new Set([...rows].map(r => r.dataset.sym))].join(',');
+  try {
+    const r = await fetch(`/api/prices?token=${TOKEN}&symbols=${syms}`);
+    if (!r.ok) return;
+    const prices = await r.json();
+    rows.forEach(row => {
+      const cur = prices[row.dataset.sym];
+      if (!cur) return;
+      const entry = parseFloat(row.dataset.entry);
+      const qty   = parseFloat(row.dataset.qty);
+      const dir   = row.dataset.dir;
+      row.querySelector('.pos-cur').textContent = cur.toLocaleString();
+      if (entry && qty) {
+        const v = dir === 'LONG' ? (cur - entry) * qty : (entry - cur) * qty;
+        const cell = row.querySelector('.pos-upnl');
+        cell.textContent = `${v>=0?'+':''}$${v.toFixed(2)}`;
+        cell.className   = `pos-upnl td-bold ${v>=0?'pos':'neg'}`;
+      }
+    });
+  } catch(e) {}
+}
+
+// ── Stage 4: CSV 다운로드 ────────────────────────────────────
+function downloadCSV() {
+  window.open(`/api/trades/csv?token=${TOKEN}&period=${currentPeriod}`, '_blank');
+}
+
+// ── Stage 4: 로그 뷰어 ──────────────────────────────────────
+const LOG_FILTER_MAP = {ALL:'', TRADE:'진입,청산', WARN:'WARNING,ERROR,경고', SKIP:'스킵,쿨다운'};
+
+function setLogFilter(f, btn) {
+  logFilter = f;
+  document.querySelectorAll('[data-lf]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadLogs();
+}
+
+function _logClass(line) {
+  if (/\[MC? 진입\]|\[MA? 진입\]|\[MR? 진입\]|\[MD? 진입\]|\[진입\]/.test(line)) return 'enter';
+  if (/\[청산\]/.test(line)) return 'exit';
+  if (/ERROR|\[ERROR\]/.test(line)) return 'err';
+  if (/WARNING|\[WARNING\]|경고/.test(line)) return 'warn';
+  if (/스킵|쿨다운/.test(line)) return 'skip';
+  return '';
+}
+
+function _esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function loadLogs() {
+  const filter = encodeURIComponent(LOG_FILTER_MAP[logFilter] || '');
+  try {
+    const res = await fetch(`/api/logs?token=${TOKEN}&lines=200&filter=${filter}`);
+    if (res.status === 401) { logout(); return; }
+    const d = await res.json();
+    const fname = document.getElementById('log-file-name');
+    if (fname) fname.textContent = d.file || '';
+    const el = document.getElementById('log-viewer');
+    if (!d.lines || !d.lines.length) {
+      el.innerHTML = '<div class="le">로그 없음</div>'; return;
+    }
+    el.innerHTML = d.lines.map(l => {
+      const cls = _logClass(l);
+      return `<div class="le${cls?' '+cls:''}">${_esc(l)}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {
+    const el = document.getElementById('log-viewer');
+    if (el) el.textContent = `오류: ${e.message}`;
+  }
+}
+
+// ── 리스크 카드 ──────────────────────────────────────────────
+function renderRiskCard(ratchet, kelly) {
+  if (!ratchet) return;
+
+  // Ratchet
+  const rColor = ratchet.scale >= 1.0 ? 'var(--green)' : ratchet.scale >= 0.7 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('ratchet-scale').textContent = `${ratchet.scale.toFixed(1)}x`;
+  document.getElementById('ratchet-scale').style.color = rColor;
+  document.getElementById('ratchet-label').textContent = ratchet.label;
+  document.getElementById('ratchet-mdd').textContent = `${ratchet.mdd}%`;
+  document.getElementById('ratchet-mdd').style.color = rColor;
+  const bar = document.getElementById('ratchet-bar');
+  bar.style.width  = `${ratchet.scale * 100}%`;
+  bar.style.background = rColor;
+
+  // Kelly
+  const kellyEl = document.getElementById('kelly-rows');
+  if (!kelly || !kelly.length) {
+    kellyEl.innerHTML = '<div style="color:var(--dim2);font-size:12px">거래 데이터 없음</div>';
+    return;
+  }
+  kellyEl.innerHTML = kelly.slice(0, 6).map(k => {
+    const hkColor = k.half_k > 3 ? 'var(--green)' : k.half_k > 0 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="kelly-row">
+      <span class="kelly-strat">${k.strategy.replace('V2_','')}</span>
+      <div class="kelly-stats">
+        <span style="color:var(--dim2)">${k.trades}건</span>
+        <span style="color:var(--dim2)">${k.wr}%</span>
+        <span style="color:${hkColor}">½K ${k.half_k}%</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
