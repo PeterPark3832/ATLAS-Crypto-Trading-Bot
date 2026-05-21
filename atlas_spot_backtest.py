@@ -778,7 +778,7 @@ def main():
     parser.add_argument('--rolling',  action='store_true', help='롤링 Walk-Forward')
     parser.add_argument('--data-dir', default='', help='로컬 CSV 디렉토리')
     parser.add_argument('--save',     action='store_true', default=True, help='결과 저장')
-    parser.add_argument('--risk',     type=float, default=SPOT_BASE_RISK_PCT, help='거래당 리스크 %')
+    parser.add_argument('--risk',     type=float, default=SPOT_BASE_RISK_PCT, help='거래당 리스크 %%')
     args = parser.parse_args()
 
     # 전략 선택
