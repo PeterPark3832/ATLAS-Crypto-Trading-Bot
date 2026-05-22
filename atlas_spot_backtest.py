@@ -45,7 +45,7 @@ from atlas_spot_config import (
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
-    REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE,
+    REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
     S3_COOLDOWN,
 )
@@ -387,7 +387,12 @@ def backtest_strategy(
             diag['regime_block'] += 1
             continue
 
-        regime_scale = WEAK_TREND_RISK_SCALE if regime == 'WEAK_TREND' else 1.0
+        if regime == 'WEAK_TREND':
+            regime_scale = WEAK_TREND_RISK_SCALE
+        elif regime == 'TRENDING_DOWN':
+            regime_scale = TRENDING_DOWN_RISK_SCALE
+        else:
+            regime_scale = 1.0
 
         # 신호 확인 (이전봉까지의 데이터로만 판단, 현재봉 종가는 알 수 없음)
         try:

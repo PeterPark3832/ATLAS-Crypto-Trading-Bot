@@ -60,7 +60,7 @@ from atlas_spot_config import (
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE,
+    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
 )
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
@@ -445,7 +445,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     equity   = _state['equity']
     kelly    = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
-    r_scale  = WEAK_TREND_RISK_SCALE if regime == REGIME_WEAK_TREND else 1.0
+    if regime == REGIME_WEAK_TREND:
+        r_scale = WEAK_TREND_RISK_SCALE
+    elif regime == REGIME_TRENDING_DOWN:
+        r_scale = TRENDING_DOWN_RISK_SCALE
+    else:
+        r_scale = 1.0
 
     entry_price = price
     sl          = sig['sl']
