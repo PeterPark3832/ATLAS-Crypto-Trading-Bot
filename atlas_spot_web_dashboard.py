@@ -462,6 +462,7 @@ async def dashboard(token: str, period: int = 0):
         'rolling_wr': _rolling_wr(df, n=10), 'dd_curve': _dd_curve(df),
         'monthly_pnl': _monthly_pnl(df),
         'refresh_sec': REFRESH_SEC,
+        'initial_capital': INITIAL_CAPITAL,
         'updated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
     }
 
