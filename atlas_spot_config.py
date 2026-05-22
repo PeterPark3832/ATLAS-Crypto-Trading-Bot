@@ -206,10 +206,15 @@ STRATEGY_NAMES = {
 }
 
 # 레짐별 허용 전략
-# Live 운용: S3(EMA), S5(BB-강화), S6(Donchian) 만 활성
+# Live 운용 (B안 최적화, 백테스트 검증):
+#   TRENDING_UP  : S6만  (S3 고점진입 제거 → PF 0.77→1.55)
+#   RANGING      : 없음  (S5 손실구간 차단 → PF 0.41 제거)
+#   WEAK_TREND   : S3+S5+S6 (추세 형성 초기 전 전략)
+#   TRENDING_DOWN: S5 30%scale (과매도 반등 소폭)
+# 결과: PF 1.50→1.76 / MDD 9.1%→7.2% / CAGR +7.4%→+8.5% / Sharpe 1.83→2.54
 REGIME_STRATEGY_MAP = {
-    'TRENDING_UP':   ['S3', 'S6'],
-    'RANGING':       ['S5'],
+    'TRENDING_UP':   ['S6'],
+    'RANGING':       [],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
     'TRENDING_DOWN': ['S5'],
     'CRISIS':        [],
