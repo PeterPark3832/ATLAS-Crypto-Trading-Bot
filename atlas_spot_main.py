@@ -411,6 +411,8 @@ def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
     usdt   = _state['usdt_balance']
     reserve = equity * SPOT_RESERVE_PCT
     available = usdt - reserve
+    if cost_usdt < SPOT_MIN_ORDER_USDT:                          # Binance NOTIONAL 필터
+        return False, f'주문금액 ${cost_usdt:.2f} < 최소 ${SPOT_MIN_ORDER_USDT:.0f} (NOTIONAL)'
     if available < SPOT_MIN_ORDER_USDT:
         return False, f'USDT 부족 (가용 ${available:.0f})'
     if cost_usdt > available:
