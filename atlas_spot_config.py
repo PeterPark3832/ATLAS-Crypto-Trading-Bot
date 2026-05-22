@@ -193,6 +193,7 @@ STRATEGY_TIMEFRAMES = {
     'S5': '1d',
     'S6': '1d',
     'S7': '4h',
+    'S7V4': '4h',
 }
 
 STRATEGY_NAMES = {
@@ -203,20 +204,22 @@ STRATEGY_NAMES = {
     'S5': 'Bollinger Band Bounce',
     'S6': 'Donchian Breakout',
     'S7': 'MACD Momentum',
+    'S7V4': 'MACD Momentum Enhanced',
 }
 
 # 레짐별 허용 전략
-# Live 운용 (B안 최적화, 백테스트 검증):
-#   TRENDING_UP  : S6만  (S3 고점진입 제거 → PF 0.77→1.55)
-#   RANGING      : 없음  (S5 손실구간 차단 → PF 0.41 제거)
+# Live 운용 (C안 최적화, 백테스트 검증):
+#   TRENDING_UP  : S6만  (S3 고점진입 제거)
+#   RANGING      : S7V4  (MACD 강화필터, PF=2.17, 승률57%)
 #   WEAK_TREND   : S3+S5+S6 (추세 형성 초기 전 전략)
-#   TRENDING_DOWN: S5 30%scale (과매도 반등 소폭)
-# 결과: PF 1.50→1.76 / MDD 9.1%→7.2% / CAGR +7.4%→+8.5% / Sharpe 1.83→2.54
+#   TRENDING_DOWN: S5+S7V4 30%scale (과매도 반등)
+# 결과: PF 1.76→1.80 / MDD 7.2% 유지 / CAGR +8.5%→+9.6% / Sharpe 2.54→2.59
+# WF: IS PF=1.12 / OOS PF=3.52 ✅
 REGIME_STRATEGY_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       [],
+    'RANGING':       ['S7V4'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S5'],
+    'TRENDING_DOWN': ['S5', 'S7V4'],
     'CRISIS':        [],
 }
 
