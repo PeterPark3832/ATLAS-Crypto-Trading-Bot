@@ -583,8 +583,22 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
     tp        = float(pos['tp'])
     exit_type = pos.get('exit_type', 'sl_tp')
     max_hold  = int(pos.get('max_hold_bars', 0))
-    bars_held = int(pos.get('bars_held', 0))
+    # bars_held: DB 값 대신 실제 보유시간 기반으로 계산 (DB 업데이트 없는 버그 우회)
+    _tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
+    _hours_per_bar = 4 if _tf == '4h' else 24
+    try:
+        _entry_dt = datetime.fromisoformat(pos['entry_ts'])
+        _hold_h   = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
+        bars_held = int(_hold_h / _hours_per_bar)
+    except Exception:
+        bars_held = int(pos.get('bars_held', 0))
     peak      = float(pos.get('peak_price', entry))
+
+    # S5: BB_upper를 실시간 TP로 업데이트
+    if strategy == 'S5' and df is not None and 'bb_upper' in df.columns:
+        live_bb_upper = float(df.iloc[i]['bb_upper']) if not pd.isna(df.iloc[i]['bb_upper']) else 0
+        if live_bb_upper > 0:
+            tp = live_bb_upper
 
     # SL 체크
     if price <= sl:
