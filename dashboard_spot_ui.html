@@ -970,10 +970,9 @@ function renderSymDirTable(data) {
   const el = document.getElementById('sym-dir-table');
   if (!data||!data.length) { el.innerHTML='<div class="empty">데이터 없음</div>'; return; }
   el.innerHTML = `<table>
-    <thead><tr><th>심볼</th><th>방향</th><th>거래</th><th>승률</th><th>총PnL</th><th>avgR</th><th>최대수익</th><th>최대손실</th></tr></thead>
+    <thead><tr><th>심볼</th><th>거래</th><th>승률</th><th>총PnL</th><th>avgR</th><th>최대수익</th><th>최대손실</th></tr></thead>
     <tbody>${data.map(r=>`<tr>
       <td class="td-bold">${r.symbol}</td>
-      <td><span class="tag ${r.direction==='LONG'?'tag-long':'tag-short'}">${r.direction==='LONG'?'L':'S'}</span></td>
       <td>${r.trades}</td>
       <td class="${r.wr>=40?'pos':r.wr>=33?'':'neg'}">${r.wr}%</td>
       <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
@@ -1004,11 +1003,7 @@ async function renderPositions(pos) {
 
   el.innerHTML = `<table>
     <thead><tr>
-      <th>전략</th><th>심볼</th><th>방향</th>
-      <th>진입가</th><th>현재가</th><th>미실현PnL</th>
-      <th>SL거리</th><th>SL</th><th>TP</th>
-      <th>보유시간</th><th>매입금액(USDT)</th>
-    </tr></thead>
+      <th>전략</th><th>심볼</th><th>진입가</th><th>현재가</th><th>미실현PnL</th><th>SL거리</th><th>SL</th><th>TP</th><th>보유시간</th><th>비용(USDT)</th></tr></thead>
     <tbody>${pos.map(p=>{
       const cur = prices[p.symbol] || 0;
       let upnl='—', upnlC='';
@@ -1019,7 +1014,6 @@ async function renderPositions(pos) {
       return `<tr data-sym="${p.symbol}" data-entry="${p.entry}" data-qty="${p.qty}" data-dir="${p.direction}">
         <td class="td-dim">${p.strategy}</td>
         <td class="td-bold">${p.symbol.replace('USDT','')}</td>
-        <td><span class="tag ${p.direction==='LONG'?'tag-long':'tag-short'}">${p.direction==='LONG'?'L':'S'}</span></td>
         <td>${p.entry.toLocaleString()}</td>
         <td class="pos-cur">${cur>0?cur.toLocaleString():'—'}</td>
         <td class="pos-upnl ${upnlC} td-bold">${upnl}</td>
@@ -1027,7 +1021,7 @@ async function renderPositions(pos) {
         <td class="neg">${p.sl.toLocaleString()}</td>
         <td class="pos">${p.tp.toLocaleString()}</td>
         <td class="td-dim">${p.hold}</td>
-        <td class="td-dim">${p.leverage}x</td>
+        <td class="td-dim">$${p.cost_usdt.toFixed(2)}</td>
       </tr>`;
     }).join('')}</tbody>
   </table>`;
@@ -1049,7 +1043,7 @@ function renderTrades(trades) {
   };
   el.innerHTML = `<table>
     <thead><tr>
-      <th>시간</th><th>전략</th><th>심볼</th><th>방향</th>
+      <th>시간</th><th>전략</th><th>심볼</th>
       <th>진입가</th><th>청산가</th><th>PnL</th><th>R</th>
       <th>사유</th><th>레짐</th>
     </tr></thead>
@@ -1332,7 +1326,7 @@ function renderRiskCard(ratchet, kelly) {
   kellyEl.innerHTML = kelly.slice(0, 6).map(k => {
     const hkColor = k.half_k > 3 ? 'var(--green)' : k.half_k > 0 ? 'var(--yellow)' : 'var(--red)';
     return `<div class="kelly-row">
-      <span class="kelly-strat">${k.strategy.replace('V2_','')}</span>
+      <span class="kelly-strat">${k.strategy}</span>
       <div class="kelly-stats">
         <span style="color:var(--dim2)">${k.trades}건</span>
         <span style="color:var(--dim2)">${k.wr}%</span>
