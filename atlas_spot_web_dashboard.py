@@ -60,12 +60,12 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
-# ── Spot 잔고 (Binance REST, 5분 TTL) ────────────────────────────
+# ── Spot 잔고 (Binance REST, 60초 TTL = 프론트 갱신주기) ────────────
 _bal_cache: dict = {'val': None, 'ts': 0.0}
 
 def _spot_balance() -> float | None:
     now = time.time()
-    if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 300:
+    if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:   # 60s TTL = 프론트 갱신주기와 동일
         return _bal_cache['val']
     if not API_KEY or not API_SECRET:
         return None
