@@ -56,7 +56,7 @@ from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
-    SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT,
+    SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
@@ -459,6 +459,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     tp          = sig['tp']
     sl_dist     = abs(entry_price - sl)
     if sl_dist <= 0:
+        return False
+
+    # SL 거리 상한 필터: 넓은 SL은 소형 계좌에서 최소 주문 미달 원인
+    _sl_pct = sl_dist / entry_price
+    if _sl_pct > SPOT_MAX_SL_PCT:
+        log.info(f'[{strategy}] {symbol} 매수 차단: SL거리 {_sl_pct*100:.1f}% > 상한 {SPOT_MAX_SL_PCT*100:.0f}%')
         return False
 
     adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale

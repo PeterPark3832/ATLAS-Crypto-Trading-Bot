@@ -84,7 +84,8 @@ SPOT_MAX_ALLOC_PCT     = 0.15    # 단일 종목 최대 배분 15%
 SPOT_MIN_ALLOC_PCT     = 0.02    # 단일 종목 최소 배분 2%
 SPOT_RESERVE_PCT       = 0.10    # USDT 최소 예비금 10%
 SPOT_DAILY_LOSS_LIMIT  = -0.04   # 일간 손실 한도 -4%
-SPOT_MIN_ORDER_USDT    = 10.0    # 최소 주문 금액 (Binance 기준)
+SPOT_MIN_ORDER_USDT    = 5.0     # 최소 주문 금액 (Binance NOTIONAL 실제 기준 $5)
+SPOT_MAX_SL_PCT        = 0.20    # SL 거리 상한 20% (초과 시 포지션이 너무 작아 차단)
 
 # Kelly / Ratchet (선물봇과 동일 로직)
 SPOT_KELLY_MIN_TRADES  = 20
