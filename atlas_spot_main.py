@@ -278,6 +278,14 @@ def _update_position_sl(strategy: str, symbol: str, new_sl: float, peak: float):
         )
 
 
+def _update_position_tp(strategy: str, symbol: str, new_tp: float):
+    with _db_lock, _db_conn() as conn:
+        conn.execute(
+            'UPDATE spot_positions SET tp=? WHERE strategy=? AND symbol=?',
+            (new_tp, strategy, symbol)
+        )
+
+
 def _delete_position(strategy: str, symbol: str):
     with _db_lock, _db_conn() as conn:
         conn.execute(
@@ -512,7 +520,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     # SL 재계산 (실제 체결가 기준)
     sl_dist_actual = abs(fill_price - sl)
     sl_final = fill_price - sl_dist_actual if sl_dist_actual > 0 else sl
-    tp_final = tp
+    # TP 재계산: RR 기반 전략은 fill_price 기준으로 보정 (S5 bb_upper는 절대가격이라 제외)
+    rr = sig.get('rr', 0)
+    if strategy != 'S5' and rr > 0 and sl_dist_actual > 0:
+        tp_final = fill_price + sl_dist_actual * rr
+    else:
+        tp_final = tp
 
     _save_position(
         strategy, symbol, fill_price, sl_final, tp_final,
@@ -654,10 +667,12 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
         bars_held = int(pos.get('bars_held', 0))
     peak      = float(pos.get('peak_price', entry))
 
-    # S5: BB_upper를 실시간 TP로 업데이트
+    # S5: BB_upper를 실시간 TP로 업데이트 (DB도 갱신하여 대시보드 정확도 향상)
     if strategy == 'S5' and df is not None and 'bb_upper' in df.columns:
         live_bb_upper = float(df.iloc[i]['bb_upper']) if not pd.isna(df.iloc[i]['bb_upper']) else 0
         if live_bb_upper > 0:
+            if abs(live_bb_upper - float(pos.get('tp', 0))) > 1e-8:
+                _update_position_tp(strategy, symbol, live_bb_upper)
             tp = live_bb_upper
 
     # SL 체크
