@@ -493,6 +493,11 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         try:
             order = _get_ex().create_market_buy_order(ccxt_sym, qty)
             fill_price = float(order.get('average') or order.get('price') or entry_price)
+            # 실제 체결량 사용 (수수료가 base asset에서 차감될 경우 요청량보다 적을 수 있음)
+            filled_qty = float(order.get('filled') or qty)
+            if 0 < filled_qty < qty * 0.999:
+                log.info(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {filled_qty:.6f} (실체결량 기준)')
+                qty = filled_qty
         except Exception as e:
             log.error(f'[{strategy}] {symbol} 매수 주문 실패: {e}')
             _tg(f'⚠️ [{strategy}] {symbol} 매수 실패: {e}')
@@ -532,6 +537,31 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     exit_price = price
 
     if not _state['dry_run']:
+        # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
+        try:
+            _base_asset = ccxt_sym.split('/')[0]
+            _pre_bal = _get_ex().fetch_balance()
+            _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
+            if _actual_free <= 0.0:
+                _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
+                _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
+                _pnl_u = (price - entry_price) * qty
+                _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
+                _sl_d = abs(entry_price - sl)
+                _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
+                _delete_position(strategy, symbol)
+                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                           'MANUAL_SOLD', regime, entry_ts)
+                with _state_lock:
+                    _state['day_pnl'] += _pnl_u
+                return
+            elif _actual_free < qty * 0.98:
+                log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (실잔고 기준)')
+                qty = _actual_free
+        except Exception as _be:
+            log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
         try:
             order = _get_ex().create_market_sell_order(ccxt_sym, qty)
             exit_price = float(order.get('average') or order.get('price') or price)
