@@ -536,8 +536,32 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             order = _get_ex().create_market_sell_order(ccxt_sym, qty)
             exit_price = float(order.get('average') or order.get('price') or price)
         except Exception as e:
+            err_str = str(e).lower()
             log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
             _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
+            # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
+            if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
+                try:
+                    _base = ccxt_sym.split('/')[0]
+                    _bal = _get_ex().fetch_balance()
+                    _actual_free = float(_bal['free'].get(_base, 0))
+                    if _actual_free < qty * 0.05:
+                        _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                        log.warning(f'[{strategy}] {symbol} 수동매도 감지(잔고={_actual_free:.4f}) → DB자동정리')
+                        _tg(f'ℹ️ [{strategy}] {symbol} 수동매도 감지 → DB 정리 완료')
+                        _delete_position(strategy, symbol)
+                        _pnl_u = (price - entry_price) * qty
+                        _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
+                        _sl_d = abs(entry_price - sl)
+                        _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
+                        _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                   _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                   'MANUAL_SOLD', regime, entry_ts)
+                        with _state_lock:
+                            _state['day_pnl'] += _pnl_u
+                        return
+                except Exception as _e2:
+                    log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
             return
 
     sl_dist   = abs(entry_price - sl)
