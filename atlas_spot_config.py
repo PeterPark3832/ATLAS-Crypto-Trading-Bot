@@ -111,7 +111,7 @@ S3_EMA_FAST    = 20
 S3_EMA_SLOW    = 50
 S3_EMA_TREND   = 200
 S3_ADX_PERIOD  = 14
-S3_ADX_MIN     = 20      # ADX 최소값 (추세 강도 필터)
+S3_ADX_MIN     = 25      # ADX 최소값 (Wilder 원본 기준; 20은 약추세 과진입)
 S3_ATR_PERIOD  = 14
 S3_ATR_SL      = 2.5
 S3_RR          = 2.0     # 고정 손익비
@@ -224,6 +224,6 @@ REGIME_STRATEGY_MAP = {
     'CRISIS':        [],
 }
 
-# WEAK_TREND 리스크 스케일 (70%)
-WEAK_TREND_RISK_SCALE    = 0.70
+# WEAK_TREND 리스크 스케일 (50% — 약추세에서 리스크 절반)
+WEAK_TREND_RISK_SCALE    = 0.50
 TRENDING_DOWN_RISK_SCALE = 0.30  # TRENDING_DOWN 구간 리스크 30% (백테스트 검증)

@@ -108,14 +108,31 @@ def _get_ex() -> ccxt.binance:
     return _thread_local.ex
 
 
+# 마지막 성공 가격 캐시 (네트워크 단절 시 SL 작동 보장)
+_last_known_price: dict = {}   # {ccxt_sym: (price, timestamp)}
+_PRICE_CACHE_TTL = 120         # 캐시 신뢰 최대 2분
+
+
 def _get_price(ccxt_sym: str) -> float:
-    """현재가 조회."""
-    try:
-        ticker = _get_ex().fetch_ticker(ccxt_sym)
-        return float(ticker['last'] or ticker['close'] or 0)
-    except Exception as e:
-        log.warning(f'[{ccxt_sym}] 현재가 조회 실패: {e}')
-        return 0.0
+    """현재가 조회. 실패 시 최대 2분간 캐시 사용, 이후 0.0 반환."""
+    for attempt in range(3):
+        try:
+            ticker = _get_ex().fetch_ticker(ccxt_sym)
+            price = float(ticker['last'] or ticker['close'] or 0)
+            if price > 0:
+                _last_known_price[ccxt_sym] = (price, time.time())
+                return price
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                log.warning(f'[{ccxt_sym}] 현재가 조회 3회 실패: {e}')
+    # 캐시 폴백
+    cached = _last_known_price.get(ccxt_sym)
+    if cached and (time.time() - cached[1]) < _PRICE_CACHE_TTL:
+        log.warning(f'[{ccxt_sym}] 캐시 가격 사용: {cached[0]:.4f} (age {time.time()-cached[1]:.0f}s)')
+        return cached[0]
+    return 0.0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -648,21 +665,32 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
         return
 
     price     = _get_price(ccxt_sym)
+    entry     = float(pos['entry_price'])
+
     if price <= 0:
+        # 가격 조회 불가 2분 초과 → 긴급 청산 (SL 미작동 방지)
+        cached = _last_known_price.get(ccxt_sym)
+        if cached and (time.time() - cached[1]) >= _PRICE_CACHE_TTL:
+            log.error(f'[{strategy}/{symbol}] 가격 조회 불가 {_PRICE_CACHE_TTL}s 초과 — 긴급 청산')
+            _tg(f'🚨 [{strategy}/{symbol}] 가격 조회 불가 — 긴급 청산')
+            _spot_sell(strategy, symbol, ccxt_sym, pos, entry * 0.99, 'EMERGENCY')
         return
 
-    entry     = float(pos['entry_price'])
     sl        = float(pos['sl'])
     tp        = float(pos['tp'])
     exit_type = pos.get('exit_type', 'sl_tp')
     max_hold  = int(pos.get('max_hold_bars', 0))
-    # bars_held: DB 값 대신 실제 보유시간 기반으로 계산 (DB 업데이트 없는 버그 우회)
+    # bars_held: 실제 보유시간 기반으로 계산 후 DB에 라이트백
     _tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
     _hours_per_bar = 4 if _tf == '4h' else 24
     try:
         _entry_dt = datetime.fromisoformat(pos['entry_ts'])
         _hold_h   = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
         bars_held = int(_hold_h / _hours_per_bar)
+        if bars_held != int(pos.get('bars_held', 0)):
+            with _db_lock, _db_conn() as conn:
+                conn.execute('UPDATE spot_positions SET bars_held=? WHERE strategy=? AND symbol=?',
+                             (bars_held, strategy, symbol))
     except Exception:
         bars_held = int(pos.get('bars_held', 0))
     peak      = float(pos.get('peak_price', entry))
@@ -865,7 +893,7 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
 
 
 def _position_reconcile_loop(stop_event: threading.Event) -> None:
-    """10분마다 DB ↔ 거래소 보유 코인 검증."""
+    """10분마다 DB ↔ 거래소 보유 코인 검증 및 자동 수정."""
     while not stop_event.is_set() and not SPOT_KILL_SWITCH.exists():
         stop_event.wait(600)
         if stop_event.is_set():
@@ -874,16 +902,28 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
             all_pos = _load_all_positions()
             if not all_pos:
                 continue
-            ex    = _get_ex()
-            bal   = ex.fetch_balance({'type': 'spot'})
+            ex  = _get_ex()
+            bal = ex.fetch_balance({'type': 'spot'})
             for pos in all_pos:
-                sym    = pos['symbol']
-                base   = sym.replace('USDT', '')
-                actual = float(bal.get(base, {}).get('total', 0) or 0)
-                db_qty = float(pos['qty_tokens'])
-                if actual < db_qty * 0.5:
-                    log.warning(f'[검증] {sym} DB수량 {db_qty:.6f} vs 실제 {actual:.6f} — 불일치')
-                    _tg(f'⚠️ [{sym}] 포지션 불일치 감지: DB {db_qty:.6f} vs 거래소 {actual:.6f}')
+                sym      = pos['symbol']
+                strategy = pos['strategy']
+                base     = sym.replace('USDT', '')
+                actual   = float(bal.get(base, {}).get('total', 0) or 0)
+                db_qty   = float(pos['qty_tokens'])
+
+                if actual < 1e-8:
+                    # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
+                    log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
+                    _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
+                    _delete_position(strategy, sym)
+                elif actual < db_qty * 0.90:
+                    # 10% 이상 괴리 — DB 수량 실제값으로 업데이트
+                    log.warning(f'[검증] {sym} DB {db_qty:.6f} vs 실제 {actual:.6f} '
+                                f'({(1-actual/db_qty)*100:.1f}% 괴리) — DB 수정')
+                    _tg(f'⚠️ [{strategy}/{sym}] 수량 불일치: DB {db_qty:.6f} → 실제 {actual:.6f}')
+                    with _db_lock, _db_conn() as conn:
+                        conn.execute('UPDATE spot_positions SET qty_tokens=? WHERE strategy=? AND symbol=?',
+                                     (actual, strategy, sym))
         except Exception as e:
             log.warning(f'[검증루프] 오류: {e}')
 
