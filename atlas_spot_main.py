@@ -58,10 +58,14 @@ from atlas_spot_config import (
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
+    SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
     STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE,
     BT_SPOT_FEE,
+    MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
+    FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
+    S3_COOLDOWN, S3_COOLDOWN_WEAK,
 )
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
@@ -326,15 +330,16 @@ def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float
 # ══════════════════════════════════════════════════════════════
 
 _state = {
-    'equity':        0.0,
-    'usdt_balance':  0.0,
-    'peak_equity':   0.0,
-    'day_pnl':       0.0,
-    'day_start_eq':  0.0,
-    'paused':        False,
-    'universe':      [],
-    'ratchet_scale': 1.0,
-    'dry_run':       False,
+    'equity':           0.0,
+    'usdt_balance':     0.0,
+    'peak_equity':      0.0,
+    'day_pnl':          0.0,
+    'day_start_eq':     0.0,
+    'paused':           False,
+    'universe':         [],
+    'universe_ranked':  [],   # 모멘텀 정렬 순서 (RS Gate용)
+    'ratchet_scale':    1.0,
+    'dry_run':          False,
     'active_strategies': ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
 }
 _state_lock = threading.Lock()
@@ -387,7 +392,7 @@ def _get_spot_equity() -> tuple[float, float]:
 
 
 def _get_kelly_scale(strategy: str) -> float:
-    """Kelly 스케일 계산 (최근 거래 기반)."""
+    """Kelly 스케일 계산 (최근 거래 기반, 조건부 상한 2.00)."""
     with _db_lock, _db_conn() as conn:
         rows = conn.execute(
             'SELECT pnl_r FROM spot_trades WHERE strategy=? ORDER BY id DESC LIMIT 200',
@@ -395,17 +400,23 @@ def _get_kelly_scale(strategy: str) -> float:
         ).fetchall()
     if len(rows) < SPOT_KELLY_MIN_TRADES:
         return 1.0
-    pnl_r = [r['pnl_r'] for r in rows]
+    pnl_r  = [r['pnl_r'] for r in rows]
     wins   = [r for r in pnl_r if r > 0]
     losses = [r for r in pnl_r if r <= 0]
     if not wins or not losses:
         return 1.0
-    wr  = len(wins) / len(pnl_r)
-    avg_w = np.mean(wins)
-    avg_l = abs(np.mean(losses))
-    b = avg_w / avg_l if avg_l > 0 else 1.0
+    wr    = len(wins) / len(pnl_r)
+    avg_w = float(np.mean(wins))
+    avg_l = abs(float(np.mean(losses)))
+    b     = avg_w / avg_l if avg_l > 0 else 1.0
     kelly = (wr - (1 - wr) / b) if b > 0 else 0.0
-    return float(max(SPOT_KELLY_SCALE_MIN, min(SPOT_KELLY_SCALE_MAX, kelly)))
+    # Profit Factor 계산 (조건부 Kelly 상한 활성화)
+    gross_w = sum(abs(r) for r in wins)
+    gross_l = sum(abs(r) for r in losses)
+    pf      = gross_w / gross_l if gross_l > 0 else 0.0
+    k_max   = SPOT_KELLY_SCALE_MAX if (wr >= SPOT_KELLY_WR_THRESH and
+                                        pf >= SPOT_KELLY_PF_THRESH) else 1.50
+    return float(max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly)))
 
 
 def _get_ratchet_scale() -> float:
@@ -420,6 +431,30 @@ def _get_ratchet_scale() -> float:
     if dd >= SPOT_RATCHET_DD_THRESH:
         return 0.70
     return 1.0
+
+
+def _get_spot_funding(sym: str) -> float:
+    """Binance 선물 펀딩비 조회 (현물 추세추종 진입 필터용). 실패 시 0.0 반환."""
+    try:
+        ccxt_sym = sym.replace('USDT', '/USDT:USDT')
+        ex_futures = ccxt.binance({
+            'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET,
+            'options': {'defaultType': 'future'},
+        })
+        info = ex_futures.fetch_funding_rate(ccxt_sym)
+        return float(info.get('fundingRate', 0))
+    except Exception:
+        return 0.0
+
+
+def _get_momentum_rank_pct(sym: str) -> float:
+    """심볼의 모멘텀 랭킹 상위 비율 (0.0=최상위, 1.0=최하위). 데이터 없으면 0.5."""
+    ranked = _state.get('universe_ranked', [])
+    universe = _state.get('universe', [])
+    ref = ranked if ranked else universe
+    if not ref or sym not in ref:
+        return 0.5
+    return ref.index(sym) / len(ref)
 
 
 def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
@@ -463,6 +498,9 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     kelly    = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
     r_scale  = WEAK_TREND_RISK_SCALE if regime == REGIME_WEAK_TREND else 1.0
+    # 펀딩비/모멘텀 스케일 (strategy_timeframe_loop에서 sig에 주입)
+    funding_scale = sig.pop('_funding_scale', 1.0)
+    rs_scale      = sig.pop('_rs_scale', 1.0)
 
     entry_price = price
     sl          = sig['sl']
@@ -471,7 +509,7 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     if sl_dist <= 0:
         return False
 
-    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale
+    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale
     risk_usd   = equity * adj_risk
     qty        = risk_usd / sl_dist
     cost_usdt  = qty * entry_price
@@ -735,11 +773,38 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     if sig['signal'] != 1:
                         continue
 
+                    # RS Gate: S6/S7은 모멘텀 하위 67% 심볼 진입 차단
+                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
+                        rank_pct = _get_momentum_rank_pct(symbol)
+                        if rank_pct > MOMENTUM_TOP_TIER_PCT * 3:
+                            log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
+                            continue
+
+                    # 펀딩비 필터: 추세추종 전략 롱 과밀 구간 차단
+                    funding_scale = 1.0
+                    if strategy_id in FUNDING_APPLY_STRATS:
+                        funding = _get_spot_funding(symbol)
+                        if funding >= FUNDING_LONG_BLOCK:
+                            log.info(f'[펀딩 차단] {symbol} funding={funding*100:.3f}%/8h — 롱 과밀')
+                            continue
+                        if funding <= FUNDING_SHORT_BOOST:
+                            funding_scale = 1.20   # 숏 스퀴즈 기대 구간 +20%
+
+                    # 모멘텀 주도주 티어 리스크 부스트
+                    rs_scale = 1.0
+                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
+                        if _get_momentum_rank_pct(symbol) <= MOMENTUM_TOP_TIER_PCT:
+                            rs_scale = MOMENTUM_TOP_RISK_MULT
+
+                    # sig에 스케일 반영 (risk는 _spot_buy에서 SPOT_BASE_RISK_PCT 기반이므로 플래그 전달)
+                    sig['_funding_scale'] = funding_scale
+                    sig['_rs_scale']      = rs_scale
+
                     # 매수 실행
                     ok = _spot_buy(strategy_id, symbol, ccxt_sym, sig, price, regime)
                     if ok and strategy_id == 'S3':
-                        from atlas_spot_config import S3_COOLDOWN
-                        cooldowns[key] = S3_COOLDOWN
+                        cd = S3_COOLDOWN_WEAK if regime == 'WEAK_TREND' else S3_COOLDOWN
+                        cooldowns[key] = cd
 
                 except Exception as e:
                     log.error(f'[{tf_label}루프] {strategy_id}/{symbol} 오류: {e}')
@@ -957,7 +1022,7 @@ def main():
     # 백그라운드 루프 시작
     _t(_balance_poller,          'BalancePoll',     stop_event)
     _t(regime_loop,              'RegimeLoop',       stop_event)
-    _t(universe_refresh_loop,    'UniverseRefresh', ex, _state, stop_event)
+    _t(universe_refresh_loop,    'UniverseRefresh', ex, _state, stop_event, _state_lock)
     _t(_daily_reset_loop,        'DailyReset',      stop_event)
     _t(_position_reconcile_loop, 'Reconcile',       stop_event)
     _t(_tg_cmd_loop,             'TgCmd',           stop_event)
