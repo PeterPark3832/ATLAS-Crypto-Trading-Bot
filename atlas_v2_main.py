@@ -60,6 +60,7 @@ from atlas_config import (
     CORR_SCALE_FLOOR, VOL_PARITY_FLOOR, VOL_PARITY_CAP,
     # Kelly + Ratchet
     KELLY_MIN_TRADES, KELLY_SCALE_MIN, KELLY_SCALE_MAX,
+    KELLY_WR_THRESHOLD, KELLY_PF_THRESHOLD,
     RATCHET_DD_THRESH, RATCHET_DD_HARD, RATCHET_RECOVER_PCT,
     # 실행 엔진
     LIMIT_OFFSET_PCT, LIMIT_TIMEOUT_SEC,
@@ -98,10 +99,11 @@ from atlas_config import (
 from atlas_regime import (
     get_cached_regime, update_regime, regime_loop,
     REGIME_CRISIS, REGIME_RANGING, REGIME_WEAK_TREND,
-    REGIME_TRENDING_UP, REGIME_TRENDING_DOWN,
+    REGIME_TRENDING_UP, REGIME_TRENDING_DOWN, REGIME_MICRO_RANGING,
     get_risk_scale,
 )
-from atlas_indicators import _ohlcv_to_df, _calc_atr, _calc_rsi
+from atlas_indicators import (_ohlcv_to_df, _calc_atr, _calc_rsi,
+                               calc_oi_change_pct, calc_dynamic_rr_ma)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -119,8 +121,8 @@ V2_MA_BEP_TRIGGER_R = V2_MA_TRAIL_R    # 1.0R 이익 시 BEP
 V2_MR_FUNDING_LONG_MAX  =  0.0008   # +0.08% 초과 → LONG 차단
 V2_MR_FUNDING_SHORT_MIN = -0.0005   # -0.05% 미만 → SHORT 차단
 
-# Module A 펀딩비 필터
-V2_MA_FUNDING_LONG_MAX  =  0.0010
+# Module A 펀딩비 필터 (0.10%→0.05%: 과도한 롱 쏠림 구간 청산 캐스케이드 방어)
+V2_MA_FUNDING_LONG_MAX  =  0.0005
 V2_MA_FUNDING_SHORT_MIN = -0.0006
 
 ALL_V2_SYMBOLS = list(dict.fromkeys(V2_MA_SYMBOLS + V2_MR_SYMBOLS + V2_MC_SYMBOLS + V2_MD_SYMBOLS))
@@ -377,12 +379,16 @@ def log_trade(strategy, symbol, direction, mode, entry, exit_px,
           pnl_usd, pnl_r, rr, hold_h, reason, entry_ts,
           datetime.now(timezone.utc).isoformat(), regime_name, fee_usd))
 
-    # Kelly 통계 갱신
+    # Kelly 통계 갱신 (WR + PF 계산용 gross_wins/losses 포함)
     with _shared_lock:
-        ks = _shared['kelly_stats'].setdefault(strategy, {'wins': 0, 'total': 0})
+        ks = _shared['kelly_stats'].setdefault(
+            strategy, {'wins': 0, 'total': 0, 'gross_wins': 0.0, 'gross_losses': 0.0})
         ks['total'] += 1
         if pnl_usd > 0:
             ks['wins'] += 1
+            ks['gross_wins'] = ks.get('gross_wins', 0.0) + abs(pnl_usd)
+        else:
+            ks['gross_losses'] = ks.get('gross_losses', 0.0) + abs(pnl_usd)
 
 
 def get_config(key: str) -> Optional[str]:
@@ -492,7 +498,13 @@ def balance_poller():
 #  8. 리스크 스케일링 헬퍼
 # ══════════════════════════════════════════════════════════════
 
-def get_kelly_scale(strategy: str, base_risk: float) -> tuple[float, str]:
+def get_kelly_scale(strategy: str, base_risk: float,
+                    rr_actual: float = 2.0) -> tuple[float, str]:
+    """
+    Kelly 스케일 계산.
+    rr_actual: 실제 손익비 (동적 RR 연동 시 주입)
+    KELLY_SCALE_MAX(2.0x)는 WR>55% AND PF>1.5 충족 시만 허용, 미충족 시 1.50x 상한
+    """
     with _shared_lock:
         ks = _shared['kelly_stats'].get(strategy, {})
     total = ks.get('total', 0)
@@ -500,10 +512,17 @@ def get_kelly_scale(strategy: str, base_risk: float) -> tuple[float, str]:
     if total < KELLY_MIN_TRADES:
         return base_risk, f'Kelly:기본(n={total})'
     wr   = wins / total
-    rr   = 2.0  # 고정 2R 전략
+    rr   = max(rr_actual, 1.0)  # 최소 1R 보장
     kelly = max(0, (wr * (rr + 1) - 1) / rr)
-    scale = max(KELLY_SCALE_MIN, min(KELLY_SCALE_MAX, kelly))
-    return base_risk * scale, f'Kelly:{scale:.2f}x(WR={wr:.0%})'
+
+    # 조건부 상한: WR > 55% AND PF > 1.5 충족 시 2.0x, 그 외 1.5x
+    gross_wins   = ks.get('gross_wins',   0.0)
+    gross_losses = ks.get('gross_losses', 0.0)
+    pf = gross_wins / gross_losses if gross_losses > 0 else 0.0
+    kelly_max = KELLY_SCALE_MAX if (wr >= KELLY_WR_THRESHOLD and pf >= KELLY_PF_THRESHOLD) else 1.50
+
+    scale = max(KELLY_SCALE_MIN, min(kelly_max, kelly))
+    return base_risk * scale, f'Kelly:{scale:.2f}x(WR={wr:.0%},PF={pf:.2f},RR={rr:.1f})'
 
 
 def get_ratchet_scale() -> float:
@@ -582,6 +601,18 @@ def get_funding_rate(ccxt_sym: str) -> float:
     try:
         info = _get_ex().fetch_funding_rate(ccxt_sym)
         return float(info.get('fundingRate', 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def get_oi_change_pct(ccxt_sym: str) -> float:
+    """
+    4H OI 변화율(%) 조회. 음수면 OI 감소 = 숏스퀴즈/청산 캐스케이드 의심.
+    실패 또는 데이터 부족 시 0.0 반환 (중립 — 차단하지 않음).
+    """
+    try:
+        oi_hist = _get_ex().fetch_open_interest_history(ccxt_sym, '4h', limit=2)
+        return calc_oi_change_pct(oi_hist)
     except Exception:
         return 0.0
 
@@ -767,9 +798,9 @@ def enter_position(ccxt_sym: str, strategy: str, sym: str,
         log(f'[진입차단] {sym}: {var_reason}')
         return False
 
-    # 리스크 스케일링
+    # 리스크 스케일링 (rr_actual 주입으로 Kelly 분모 정확도 개선)
     regime_scale  = get_risk_scale()
-    kelly_risk, kelly_note = get_kelly_scale(strategy, risk_pct)
+    kelly_risk, kelly_note = get_kelly_scale(strategy, risk_pct, rr_actual=rr)
     ratchet_scale = get_ratchet_scale()
     corr_scale    = get_corr_scale(sym, direction)
     vol_scale     = get_vol_parity_scale(sym)
@@ -1087,7 +1118,7 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         log(f'[MA] {sym} 쿨다운 {cd}봉 남음')
         return
 
-    # 레짐 체크
+    # 레짐 체크 (MICRO_RANGING: 진입 허용하되 리스크 get_risk_scale()로 0.5x 자동 적용)
     regime = get_cached_regime().regime
     if regime in (REGIME_CRISIS, REGIME_RANGING, 'UNKNOWN'):
         log(f'[MA 스킵] {sym} 레짐={regime} (진입불가)')
@@ -1188,25 +1219,36 @@ def check_ma_signal_and_enter(sym: str, df: pd.DataFrame, cache: CandleCache):
         log(f'[MA] {sym} SHORT 펀딩비 차단 ({fr:.4%})')
         return
 
+    # OI 필터: 4H OI 감소(음수) = 숏스퀴즈/청산 캐스케이드 의심 → LONG 차단
+    oi_chg = get_oi_change_pct(ccxt_sym)
+    if direction == 'LONG' and oi_chg < -2.0:
+        log(f'[MA 스킵] {sym} OI 감소({oi_chg:.2f}%) — 가짜 브레이크아웃 의심')
+        return
+
     # 진입가 = 현재 시장가 (다음 캔들 시가 대신 즉시 시장가)
     entry_price = get_price(ccxt_sym)
     if entry_price <= 0:
         return
 
+    # 동적 RR: ADX 강도 + EMA 갭 비례 (1.5~3.0R)
+    ema_gap_pct = abs(ema20_curr - ema50_curr) / ema50_curr * 100
+    rr_actual   = calc_dynamic_rr_ma(adx_curr, ema_gap_pct)
+
     if direction == 'LONG':
         sl_price = entry_price - atr_curr * V2_MA_ATR_SL
-        tp_price = entry_price + atr_curr * V2_MA_ATR_SL * 2.0
+        tp_price = entry_price + atr_curr * V2_MA_ATR_SL * rr_actual
     else:
         sl_price = entry_price + atr_curr * V2_MA_ATR_SL
-        tp_price = entry_price - atr_curr * V2_MA_ATR_SL * 2.0
+        tp_price = entry_price - atr_curr * V2_MA_ATR_SL * rr_actual
 
     strategy = strategy_long if direction == 'LONG' else strategy_short
     leverage = V2_MA_LEVERAGE.get(sym, 3)
     risk_pct = V2_MA_RISK_PCT.get(sym, 0.010)
     if regime == REGIME_WEAK_TREND:
         risk_pct *= V2_MA_WEAK_TREND_RISK_MULT
-    log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} 레짐={regime} {leverage}x/{risk_pct*100:.1f}%')
-    enter_position(ccxt_sym, strategy, sym, direction, 'MA', 2.0,
+    log(f'[MA 신호] {sym} {direction} {sig_type} | ADX={adx_curr:.1f} RR={rr_actual:.1f} '
+        f'OI={oi_chg:+.2f}%% 레짐={regime} {leverage}x/{risk_pct*100:.1f}%%')
+    enter_position(ccxt_sym, strategy, sym, direction, 'MA', rr_actual,
                    entry_price, sl_price, tp_price,
                    leverage, risk_pct)
 
@@ -1627,9 +1669,9 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
         log(f'[MC 스킵] {sym} 쿨다운 {cd}봉 남음')
         return
 
-    # 레짐 체크
+    # 레짐 체크 (MICRO_RANGING: 4H ADX<20 → 단기 횡보, Module C 전방향 차단)
     regime = get_cached_regime().regime
-    if regime in (REGIME_CRISIS, REGIME_RANGING, 'UNKNOWN'):
+    if regime in (REGIME_CRISIS, REGIME_RANGING, REGIME_MICRO_RANGING, 'UNKNOWN'):
         log(f'[MC 스킵] {sym} 레짐={regime} (진입불가)')
         return
 
@@ -1732,6 +1774,9 @@ def check_mc_signal_and_enter(sym: str, df_15m: pd.DataFrame, htf_ema: float):
     # Stage 2-B: TRENDING_UP 레짐에서 리스크 50% 축소 (실거래 WR 20%, -$33.70)
     if regime == REGIME_TRENDING_UP:
         risk_pct *= V2_MC_TRENDING_UP_RISK_MULT
+    # RETEST 강화: 폭발적 볼륨(2x+) 스파이크 후 리테스트는 성공 확률↑ → 리스크 30% 상향
+    if sig_type == 'RETEST' and vol_ratio >= 2.0:
+        risk_pct *= 1.3
     strategy = strategy_long if direction == 'LONG' else strategy_short
     log(f'[MC 신호] {sym} {direction} {sig_type} 레벨={breakout_level:.4f} | 레짐={regime} risk={risk_pct*100:.2f}%')
 

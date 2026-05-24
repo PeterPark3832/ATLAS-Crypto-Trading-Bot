@@ -29,7 +29,7 @@ from atlas_config import (
     REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR, REGIME_BTC_LOOKBACK,
     BINANCE_API_KEY, BINANCE_API_SECRET,
 )
-from atlas_indicators import calc_adx, _ohlcv_to_df
+from atlas_indicators import calc_adx, _ohlcv_to_df, _calc_atr
 
 
 def _make_regime_ex() -> ccxt.binance:
@@ -45,18 +45,21 @@ def _make_regime_ex() -> ccxt.binance:
     })
 
 # ──────────────────────────────────────────────────────────────
-REGIME_UNKNOWN      = 'UNKNOWN'
-REGIME_TRENDING_UP  = 'TRENDING_UP'
-REGIME_TRENDING_DOWN= 'TRENDING_DOWN'
-REGIME_RANGING      = 'RANGING'
-REGIME_WEAK_TREND   = 'WEAK_TREND'
-REGIME_CRISIS       = 'CRISIS'
+REGIME_UNKNOWN       = 'UNKNOWN'
+REGIME_TRENDING_UP   = 'TRENDING_UP'
+REGIME_TRENDING_DOWN = 'TRENDING_DOWN'
+REGIME_RANGING       = 'RANGING'
+REGIME_WEAK_TREND    = 'WEAK_TREND'
+REGIME_CRISIS        = 'CRISIS'
+REGIME_MICRO_RANGING = 'MICRO_RANGING'  # TRENDING_UP + 4H ADX<20: 단기 횡보 삽입
 
 
 @dataclass
 class RegimeState:
     regime:     str   = REGIME_UNKNOWN
     adx:        float = 0.0
+    adx_4h:     float = 0.0   # BTC 4H ADX (마이크로 레짐 판별용)
+    adx_slope:  float = 0.0   # ADX 3일 기울기 (추세 소멸 감지)
     btc_price:  float = 0.0
     ema200:     float = 0.0
     atr_pct:    float = 0.0
@@ -72,12 +75,14 @@ class RegimeState:
             REGIME_TRENDING_DOWN: '🔴',
             REGIME_RANGING:       '🟡',
             REGIME_WEAK_TREND:    '🟠',
+            REGIME_MICRO_RANGING: '🔵',
             REGIME_CRISIS:        '🚨',
             REGIME_UNKNOWN:       '❓',
         }.get(self.regime, '❓')
+        slope_arrow = '↗' if self.adx_slope > 0 else ('↘' if self.adx_slope < 0 else '→')
         return (
             f"{emoji} 장세: {self.regime}\n"
-            f"  ADX={self.adx:.1f}  ATR%={self.atr_pct*100:.2f}%\n"
+            f"  ADX(1D)={self.adx:.1f}{slope_arrow}  ADX(4H)={self.adx_4h:.1f}  ATR%={self.atr_pct*100:.2f}%\n"
             f"  BTC={self.btc_price:,.0f}  EMA200={self.ema200:,.0f}\n"
             f"  갱신: {self.age_min:.0f}분 전"
         )
@@ -97,12 +102,25 @@ def get_cached_regime() -> RegimeState:
 
 
 def classify_regime(adx: float, btc_price: float,
-                    ema200: float, atr_pct: float) -> str:
-    """순수 분류 함수 (테스트 가능)."""
+                    ema200: float, atr_pct: float,
+                    adx_4h: float = 0.0,
+                    adx_slope: float = 0.0) -> str:
+    """
+    순수 분류 함수 (테스트 가능).
+    adx_4h: BTC 4H ADX — MICRO_RANGING 판별
+    adx_slope: 1D ADX 최근 3봉 기울기 — 추세 소멸 조기 감지
+    """
     if atr_pct >= REGIME_CRISIS_ATR:
         return REGIME_CRISIS
     if adx >= REGIME_ADX_TREND:
-        return REGIME_TRENDING_UP if btc_price >= ema200 else REGIME_TRENDING_DOWN
+        base = REGIME_TRENDING_UP if btc_price >= ema200 else REGIME_TRENDING_DOWN
+        # ADX 기울기 하락 중 (3봉 연속 감소) + ADX < 30 → WEAK_TREND 강제 다운그레이드
+        if adx_slope < 0 and adx < 30:
+            return REGIME_WEAK_TREND
+        # 1D TRENDING_UP이지만 4H ADX < 20 → 단기 횡보 삽입, Module C 차단
+        if base == REGIME_TRENDING_UP and adx_4h > 0 and adx_4h < 20:
+            return REGIME_MICRO_RANGING
+        return base
     if adx < REGIME_ADX_WEAK:
         return REGIME_RANGING
     return REGIME_WEAK_TREND
@@ -137,12 +155,32 @@ def update_regime(ex, candle_cache=None) -> RegimeState:
         atr     = float(tr.rolling(14).mean().iloc[-1])
         atr_pct = atr / btc_price if btc_price else 0
 
-        adx    = calc_adx(ohlcv[-REGIME_BTC_LOOKBACK:], period=14)
-        regime = classify_regime(adx, btc_price, ema200, atr_pct)
+        adx = calc_adx(ohlcv[-REGIME_BTC_LOOKBACK:], period=14)
+
+        # ADX 기울기: 직전 3봉 ADX 시계열로 추세 소멸 조기 감지
+        adx_series_raw = []
+        for k in range(3, 0, -1):
+            adx_series_raw.append(
+                calc_adx(ohlcv[-(REGIME_BTC_LOOKBACK + k):-(k if k else None)], period=14)
+            )
+        adx_slope = (adx_series_raw[-1] - adx_series_raw[0]) if len(adx_series_raw) == 3 else 0.0
+
+        # 4H BTC ADX (마이크로 레짐 판별)
+        adx_4h = 0.0
+        try:
+            ohlcv_4h = ex.fetch_ohlcv('BTC/USDT', '4h', limit=60)
+            if ohlcv_4h and len(ohlcv_4h) >= 42:
+                adx_4h = calc_adx(ohlcv_4h[-50:], period=14)
+        except Exception:
+            pass  # 4H 조회 실패 시 MICRO_RANGING 분류 건너뜀 (adx_4h=0 → 조건 불충족)
+
+        regime = classify_regime(adx, btc_price, ema200, atr_pct, adx_4h, adx_slope)
 
         state = RegimeState(
             regime     = regime,
             adx        = adx,
+            adx_4h     = adx_4h,
+            adx_slope  = adx_slope,
             btc_price  = btc_price,
             ema200     = ema200,
             atr_pct    = atr_pct,
@@ -224,10 +262,13 @@ def is_crisis() -> bool:
 def get_risk_scale() -> float:
     """
     장세별 리스크 배율.
-    WEAK_TREND → 0.7배 (불확실 구간)
-    그 외       → 1.0배
+    MICRO_RANGING → 0.50배 (1D 상승추세 + 4H 횡보 삽입)
+    WEAK_TREND    → 0.70배 (불확실 구간)
+    그 외          → 1.00배
     """
     regime = get_cached_regime().regime
+    if regime == REGIME_MICRO_RANGING:
+        return 0.50
     if regime == REGIME_WEAK_TREND:
         return 0.70
     return 1.00

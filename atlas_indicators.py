@@ -378,3 +378,38 @@ def calc_adx(ohlcv: list, period: int = 14) -> float:
     for dx_val in dx_list[period:]:
         adx = adx - adx / period + dx_val / period
     return round(adx, 2)
+
+
+# ══════════════════════════════════════════════════════════════
+#  신규 Alpha 지표 (Action 2 + 3)
+# ══════════════════════════════════════════════════════════════
+
+def calc_oi_change_pct(oi_series: list) -> float:
+    """
+    4H OI 연속 2개 스냅샷의 변화율(%).
+    oi_series: [{'openInterestValue': float, ...}, ...] (ccxt fetch_open_interest_history 형식)
+    +값: 신규 자금 유입 (진짜 추세), -값: 청산/숏스퀴즈 의심
+    """
+    if len(oi_series) < 2:
+        return 0.0
+    try:
+        prev_oi = float(oi_series[-2].get('openInterestValue', 0))
+        curr_oi = float(oi_series[-1].get('openInterestValue', 0))
+        if prev_oi <= 0:
+            return 0.0
+        return (curr_oi - prev_oi) / prev_oi * 100
+    except Exception:
+        return 0.0
+
+
+def calc_dynamic_rr_ma(adx: float, ema_gap_pct: float) -> float:
+    """
+    Module A용 ADX 강도 + EMA 갭 기반 동적 RR (1.5~3.0).
+    추세 강도가 높을수록 TP를 멀리, 약할수록 조기 이탈.
+    """
+    # ADX 기여 (15~45 정규화)
+    adx_norm = max(0.0, min(1.0, (adx - 15.0) / (45.0 - 15.0)))
+    # EMA 갭 기여 (0.5%~3.0% 정규화)
+    gap_norm = max(0.0, min(1.0, (ema_gap_pct - 0.5) / (3.0 - 0.5)))
+    rr = 1.5 + adx_norm * 1.0 + gap_norm * 0.5  # 1.5 ~ 3.0
+    return round(max(1.5, min(3.0, rr)), 2)
