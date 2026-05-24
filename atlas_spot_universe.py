@@ -239,8 +239,13 @@ def universe_refresh_loop(ex, shared_state: dict, stop_event=None,
             added   = new_set - old_set
             removed = old_set - new_set
 
+            # 모멘텀 랭킹: ohlcv_cache가 없으면 거래량순 그대로 유지
+            ohlcv_cache = shared_state.get('ohlcv_1d_cache', {})
+            ranked_universe = rank_by_momentum(new_universe, ohlcv_cache) if ohlcv_cache else new_universe
+
             with state_lock:
                 shared_state['universe'] = new_universe
+                shared_state['universe_ranked'] = ranked_universe   # RS Gate용 모멘텀 정렬 순서
                 shared_state['universe_updated'] = datetime.now(timezone.utc).isoformat()
 
             if added or removed:
