@@ -275,14 +275,12 @@ def get_signal_s4(df: pd.DataFrame, i: int) -> dict:
     sl    = entry - atr * S4_ATR_SL
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = float(cur['bb_mid'])   # BB 중선이 목표가
-    if tp <= entry:
-        return _no_sig()
-
-    rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
+    # ATR 기반 TP (1:1 RR) — BB_mid는 저항 없는 임의 목표
+    tp = entry + atr * S4_ATR_SL
+    rr = 1.0
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': S4_MAX_HOLD,
+        'rr': rr, 'exit_type': 'sl_tp', 'max_hold': S4_MAX_HOLD,
     }
 
 
