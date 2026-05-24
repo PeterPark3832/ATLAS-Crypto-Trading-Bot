@@ -41,7 +41,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (
     BT_SPOT_FEE, BT_SPOT_SLIPPAGE, BT_INITIAL_EQ,
+    BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
     SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
+    SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
+    SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
@@ -61,6 +64,15 @@ from atlas_backtest import (
     _bucket_pnl_r,
 )
 from atlas_indicators import _ohlcv_to_df
+
+
+def _get_slippage(symbol: str) -> float:
+    """심볼별 슬리피지 티어 반환 (백테스트 비용 현실화)."""
+    if symbol in BT_TIER1_SYMBOLS:
+        return BT_SLIPPAGE_BY_TIER['tier1']
+    if symbol in BT_TIER2_SYMBOLS:
+        return BT_SLIPPAGE_BY_TIER['tier2']
+    return BT_SLIPPAGE_BY_TIER['tier3']
 
 
 # ══════════════════════════════════════════════════════════════
@@ -303,15 +315,17 @@ def backtest_strategy(
 
             reason    = None
 
+            slip = _get_slippage(symbol)
+
             # SL 체크 (bar 저가로 SL 이탈)
             if cur_low <= position['sl']:
                 reason    = 'SL'
-                exit_price = min(position['sl'], cur_close) * (1 - BT_SPOT_SLIPPAGE)
+                exit_price = min(position['sl'], cur_close) * (1 - slip)
 
             # TP 체크 (bar 고가로 TP 도달)
             elif position['tp'] > 0 and cur_high >= position['tp']:
                 reason    = 'TP'
-                exit_price = position['tp'] * (1 - BT_SPOT_SLIPPAGE)
+                exit_price = position['tp'] * (1 - slip)
 
             # 추가 청산 조건 체크 (크로스 등)
             elif exit_fn is not None:
@@ -322,14 +336,14 @@ def backtest_strategy(
                         should_exit = exit_fn(df, i)
                     if should_exit:
                         reason = 'CROSS'
-                        exit_price = cur_close * (1 - BT_SPOT_SLIPPAGE)
+                        exit_price = cur_close * (1 - slip)
                 except Exception:
                     pass
 
             # 시간 기반 청산
             if reason is None and max_hold > 0 and bars_held >= max_hold:
                 reason    = 'TIME'
-                exit_price = cur_close * (1 - BT_SPOT_SLIPPAGE)
+                exit_price = cur_close * (1 - slip)
 
             if reason is not None:
                 entry_price = position['entry_price']
@@ -395,7 +409,8 @@ def backtest_strategy(
         if sig['signal'] != 1:
             continue
 
-        entry_price = float(row['open']) * (1 + BT_SPOT_SLIPPAGE)  # 현재봉 시가 = 신호봉 다음봉 오픈
+        slip        = _get_slippage(symbol)
+        entry_price = float(row['open']) * (1 + slip)  # 현재봉 시가 = 신호봉 다음봉 오픈
         sl          = sig['sl']
         tp          = sig['tp']
         sl_dist     = abs(entry_price - sl)
@@ -405,9 +420,9 @@ def backtest_strategy(
             continue
 
         # 포지션 크기 계산 (스팟: 레버리지 없음)
-        # Kelly 스케일링 (20건 이후부터 적용)
+        # Kelly 스케일링 (SPOT_KELLY_MIN_TRADES 건 이후부터 적용)
         kelly_scale = 1.0
-        if len(trades) >= 20:
+        if len(trades) >= SPOT_KELLY_MIN_TRADES:
             recent = trades[-200:]
             wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
             losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
@@ -415,7 +430,13 @@ def backtest_strategy(
                 wr = len(wins_r) / len(recent)
                 b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
                 kelly_raw = wr - (1 - wr) / b if b > 0 else 0.0
-                kelly_scale = max(0.30, min(1.50, kelly_raw))
+                # 조건부 상한: WR>55% AND PF>1.5 시 KELLY_SCALE_MAX(2.0), 아니면 1.50
+                gross_w = sum(abs(r) for r in wins_r)
+                gross_l = sum(abs(r) for r in losses_r)
+                pf = gross_w / gross_l if gross_l > 0 else 0.0
+                k_max = SPOT_KELLY_SCALE_MAX if (wr >= SPOT_KELLY_WR_THRESH and
+                                                  pf >= SPOT_KELLY_PF_THRESH) else 1.50
+                kelly_scale = max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
         adj_risk_pct = risk_pct * regime_scale * kelly_scale
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
