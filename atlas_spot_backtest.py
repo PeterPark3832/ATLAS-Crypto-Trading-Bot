@@ -313,13 +313,6 @@ def backtest_strategy(
                 reason    = 'TP'
                 exit_price = position['tp'] * (1 - BT_SPOT_SLIPPAGE)
 
-            # BB_MID 청산 (S4)
-            elif exit_type == 'sl_tp' and 'bb_mid_exit' in position:
-                bb_mid = float(row.get('bb_mid', 0) if hasattr(row, 'get') else row['bb_mid']) if 'bb_mid' in df.columns else 0
-                if bb_mid > 0 and cur_high >= bb_mid:
-                    reason    = 'BB_MID'
-                    exit_price = bb_mid * (1 - BT_SPOT_SLIPPAGE)
-
             # 추가 청산 조건 체크 (크로스 등)
             elif exit_fn is not None:
                 try:
@@ -397,7 +390,7 @@ def backtest_strategy(
         if sig['signal'] != 1:
             continue
 
-        entry_price = cur_close * (1 + BT_SPOT_SLIPPAGE)  # 다음봉 시가 가정
+        entry_price = float(row['open']) * (1 + BT_SPOT_SLIPPAGE)  # 현재봉 시가 = 신호봉 다음봉 오픈
         sl          = sig['sl']
         tp          = sig['tp']
         sl_dist     = abs(entry_price - sl)
@@ -407,7 +400,18 @@ def backtest_strategy(
             continue
 
         # 포지션 크기 계산 (스팟: 레버리지 없음)
-        adj_risk_pct = risk_pct * regime_scale
+        # Kelly 스케일링 (20건 이후부터 적용)
+        kelly_scale = 1.0
+        if len(trades) >= 20:
+            recent = trades[-200:]
+            wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
+            losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
+            if wins_r and losses_r:
+                wr = len(wins_r) / len(recent)
+                b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
+                kelly_raw = wr - (1 - wr) / b if b > 0 else 0.0
+                kelly_scale = max(0.30, min(1.50, kelly_raw))
+        adj_risk_pct = risk_pct * regime_scale * kelly_scale
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
         cost_usdt    = qty * entry_price
@@ -433,8 +437,7 @@ def backtest_strategy(
             'max_hold':    sig['max_hold'],
             'regime':      regime,
         }
-        if strategy_id == 'S4':
-            position['bb_mid_exit'] = True
+
 
         diag['entries'] += 1
 

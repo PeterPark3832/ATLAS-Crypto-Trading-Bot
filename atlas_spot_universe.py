@@ -211,18 +211,27 @@ def get_backtest_universe(extended: bool = False) -> list[str]:
 #  라이브 갱신 루프
 # ══════════════════════════════════════════════════════════════
 
-def universe_refresh_loop(ex, shared_state: dict, stop_event=None) -> None:
+def universe_refresh_loop(ex, shared_state: dict, stop_event=None,
+                          state_lock=None) -> None:
     """
     24시간마다 유니버스를 갱신하는 백그라운드 루프.
     shared_state['universe'] 를 갱신합니다.
+    갱신 실패 시 기존 유니버스를 유지합니다 (HF-3).
     """
     import threading
     if stop_event is None:
         stop_event = threading.Event()
+    if state_lock is None:
+        state_lock = threading.Lock()
 
     while not stop_event.is_set():
         try:
             new_universe = discover_universe(ex)
+            if not new_universe:
+                print('  [Universe] 갱신 결과 없음 — 기존 유니버스 유지')
+                stop_event.wait(UNIVERSE_REFRESH_HOURS * 3600)
+                continue
+
             old_universe = shared_state.get('universe', [])
             new_set = set(new_universe)
             old_set = set(old_universe)
@@ -230,14 +239,15 @@ def universe_refresh_loop(ex, shared_state: dict, stop_event=None) -> None:
             added   = new_set - old_set
             removed = old_set - new_set
 
-            shared_state['universe'] = new_universe
-            shared_state['universe_updated'] = datetime.now(timezone.utc).isoformat()
+            with state_lock:
+                shared_state['universe'] = new_universe
+                shared_state['universe_updated'] = datetime.now(timezone.utc).isoformat()
 
             if added or removed:
                 print(f'  [Universe] 갱신: +{list(added)} -{list(removed)}')
 
         except Exception as e:
-            print(f'  [Universe] 갱신 오류: {e}')
+            print(f'  [Universe] 갱신 오류 — 기존 유니버스 유지: {e}')
 
         stop_event.wait(UNIVERSE_REFRESH_HOURS * 3600)
 
