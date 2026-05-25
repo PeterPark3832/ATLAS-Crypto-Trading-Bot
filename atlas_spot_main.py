@@ -593,8 +593,8 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 with _state_lock:
                     _state['day_pnl'] += _pnl_u
                 return
-            elif _actual_free < qty * 0.98:
-                log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (실잔고 기준)')
+            elif _actual_free < qty:
+                log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
                 qty = _actual_free
         except Exception as _be:
             log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
@@ -626,6 +626,17 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                         with _state_lock:
                             _state['day_pnl'] += _pnl_u
                         return
+                    elif _actual_free > 0:
+                        # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
+                        log.warning(f'[{strategy}] {symbol} 잔고재시도: {_actual_free:.6f} (DB={qty:.6f})')
+                        try:
+                            _retry_order = _get_ex().create_market_sell_order(ccxt_sym, _actual_free)
+                            exit_price = float(_retry_order.get('average') or _retry_order.get('price') or price)
+                            qty = _actual_free
+                            log.info(f'[{strategy}] {symbol} 잔고재시도 성공: {_actual_free:.6f}개 @ {exit_price:.4f}')
+                        except Exception as _e3:
+                            log.error(f'[{strategy}] {symbol} 잔고재시도도 실패: {_e3}')
+                            return
                 except Exception as _e2:
                     log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
             return
