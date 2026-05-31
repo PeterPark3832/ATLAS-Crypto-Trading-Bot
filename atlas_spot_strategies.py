@@ -32,18 +32,18 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-from atlas_indicators import _ohlcv_to_df, _calc_atr, _calc_rsi
+from atlas_indicators import _ohlcv_to_df, _calc_atr, _calc_rsi, calc_dynamic_rr_ma
 from atlas_spot_config import (
     S2_SMA_FAST, S2_SMA_SLOW, S2_ATR_PERIOD, S2_ATR_SL,
     S3_EMA_FAST, S3_EMA_SLOW, S3_EMA_TREND, S3_ADX_PERIOD, S3_ADX_MIN,
-    S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_COOLDOWN,
+    S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_RR_MIN, S3_RR_MAX, S3_COOLDOWN,
     S4_RSI_PERIOD, S4_RSI_ENTRY, S4_BB_PERIOD, S4_BB_SIGMA,
-    S4_ATR_PERIOD, S4_ATR_SL, S4_MAX_HOLD,
+    S4_ATR_PERIOD, S4_ATR_SL, S4_RR, S4_MAX_HOLD,
     S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL, S5_MAX_HOLD,
-    S6_ENTRY_PERIOD, S6_EXIT_PERIOD, S6_VOL_MA, S6_VOL_MULT,
-    S6_ATR_PERIOD, S6_ATR_SL, S6_RR,
+    S6_ENTRY_PERIOD, S6_EXIT_PERIOD, S6_VOL_MA, S6_VOL_MULT, S6_VOL_VWAP_CONFIRM,
+    S6_ATR_PERIOD, S6_ATR_SL, S6_RR, S6_RR_MIN, S6_RR_MAX,
     S7_MACD_FAST, S7_MACD_SLOW, S7_MACD_SIG, S7_EMA_TREND,
-    S7_ATR_PERIOD, S7_ATR_SL, S7_RR,
+    S7_ATR_PERIOD, S7_ATR_SL, S7_RR, S7_RR_MIN, S7_RR_MAX, S7_HIST_EXIT_BARS,
 )
 
 # 데이터 부족 시 반환하는 신호 없음 dict
@@ -216,11 +216,16 @@ def get_signal_s3(df: pd.DataFrame, i: int) -> dict:
     sl    = entry - atr * S3_ATR_SL
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = entry + (entry - sl) * S3_RR
+
+    # 동적 RR: ADX 강도 + EMA 갭 비례 (S3_RR_MIN~S3_RR_MAX)
+    ema_gap_pct = abs(float(cur['ema_fast']) - float(cur['ema_slow'])) / float(cur['ema_slow']) * 100
+    rr_actual   = calc_dynamic_rr_ma(float(cur['adx']), ema_gap_pct)
+    rr_actual   = max(S3_RR_MIN, min(S3_RR_MAX, rr_actual))
+    tp = entry + (entry - sl) * rr_actual
 
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': S3_RR, 'exit_type': 'sl_tp', 'max_hold': 0,
+        'rr': round(rr_actual, 2), 'exit_type': 'sl_tp', 'max_hold': 0,
     }
 
 
@@ -275,14 +280,11 @@ def get_signal_s4(df: pd.DataFrame, i: int) -> dict:
     sl    = entry - atr * S4_ATR_SL
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = float(cur['bb_mid'])   # BB 중선이 목표가
-    if tp <= entry:
-        return _no_sig()
-
-    rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
+    # ATR 기반 TP (S4_RR=1.5): SL 조정(1.5→2.0)으로 조기 탈출 감소, RR 개선
+    tp = entry + atr * S4_ATR_SL * S4_RR
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': S4_MAX_HOLD,
+        'rr': S4_RR, 'exit_type': 'sl_tp', 'max_hold': S4_MAX_HOLD,
     }
 
 
@@ -347,6 +349,9 @@ def calc_s6(ohlcv: list) -> pd.DataFrame:
     df['don_low']  = df['low'].rolling(S6_EXIT_PERIOD).min()
     df['vol_ma']   = df['volume'].rolling(S6_VOL_MA).mean()
     df['atr']      = _calc_atr(df, S6_ATR_PERIOD)
+    # VWAP 20봉 롤링 (가짜 브레이크아웃 필터용)
+    pv = df['close'] * df['volume']
+    df['vwap'] = pv.rolling(S6_VOL_MA).sum() / df['volume'].rolling(S6_VOL_MA).sum()
     return df
 
 
@@ -361,14 +366,16 @@ def get_signal_s6(df: pd.DataFrame, i: int) -> dict:
         return _no_sig()
     prev = df.iloc[i - 1]   # 이전봉의 don_high (선행편향 방지)
     cur  = df.iloc[i]
-    cols = ['don_high', 'don_low', 'vol_ma', 'atr']
-    if any(pd.isna(prev[c]) for c in cols) or any(pd.isna(cur[c]) for c in ['atr']):
+    cols = ['don_high', 'don_low', 'vol_ma', 'atr', 'vwap']
+    if any(pd.isna(prev[c]) for c in cols) or any(pd.isna(cur[c]) for c in ['atr', 'vwap']):
         return _no_sig()
 
-    breakout   = float(cur['close']) > float(prev['don_high'])
-    vol_spike  = float(cur['volume']) > float(prev['vol_ma']) * S6_VOL_MULT
+    breakout  = float(cur['close']) > float(prev['don_high'])
+    vol_spike = float(cur['volume']) > float(prev['vol_ma']) * S6_VOL_MULT
+    # VWAP 상단 확증: 종가 > 20봉 VWAP (가짜 브레이크아웃 필터)
+    vwap_confirm = (not S6_VOL_VWAP_CONFIRM) or (float(cur['close']) > float(cur['vwap']))
 
-    if not (breakout and vol_spike):
+    if not (breakout and vol_spike and vwap_confirm):
         return _no_sig()
 
     entry = float(cur['close'])
@@ -450,13 +457,14 @@ def get_signal_s7(df: pd.DataFrame, i: int) -> dict:
 
 
 def check_exit_s7(df: pd.DataFrame, i: int) -> bool:
-    """MACD 히스토그램이 음수 전환 시 청산."""
-    if i < 1 or i >= len(df):
+    """MACD 히스토그램 S7_HIST_EXIT_BARS봉 연속 음수 시 청산 (단일봉 노이즈 청산 방지)."""
+    if i < S7_HIST_EXIT_BARS or i >= len(df):
         return False
-    cur = df.iloc[i]
-    if pd.isna(cur['macd_hist']):
-        return False
-    return float(cur['macd_hist']) < 0
+    for k in range(S7_HIST_EXIT_BARS):
+        val = df.iloc[i - k]['macd_hist']
+        if pd.isna(val) or float(val) >= 0:
+            return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════

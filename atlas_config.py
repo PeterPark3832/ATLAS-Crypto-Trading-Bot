@@ -165,9 +165,11 @@ REGIME_BTC_LOOKBACK = 50    # ADX 계산 캔들 수
 # ─────────────────────────────────────────────────────────────
 # Kelly + Drawdown Ratchet
 # ─────────────────────────────────────────────────────────────
-KELLY_MIN_TRADES    = 20    # 최소 거래수 미만 → 기본 리스크 사용
+KELLY_MIN_TRADES    = 10    # 최소 거래수 미만 → 기본 리스크 사용 (20→10: 초기 저평가 방지)
 KELLY_SCALE_MIN     = 0.30
-KELLY_SCALE_MAX     = 1.50
+KELLY_SCALE_MAX     = 2.00  # 상한 1.50→2.00 (조건부: WR>55% AND PF>1.5 충족 시만 허용)
+KELLY_WR_THRESHOLD  = 0.55  # Kelly 2.0x 상한 허용 최소 WR
+KELLY_PF_THRESHOLD  = 1.50  # Kelly 2.0x 상한 허용 최소 PF
 RATCHET_DD_THRESH   = 0.05  # 낙폭 5% → 리스크 70%
 RATCHET_DD_HARD     = 0.07  # 낙폭 7% → 리스크 40%
 RATCHET_RECOVER_PCT = 0.20  # 저점 대비 20% 회복마다 +10% 복원
@@ -242,11 +244,11 @@ V2_MD_SYMBOLS        = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',               # 기존
     'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',  # 1차 확장
 ]
-V2_MD_FUNDING_ENTER  = 0.0003   # 진입 임계값: +0.03%/8h 이상 (0.05%→0.03%: 바이낸스 평균 펀딩비 0.01% 대비 너무 높아 MD 미발동)
+V2_MD_FUNDING_ENTER  = 0.00015  # 진입 임계값: +0.015%/8h (0.03%→0.015%: 발동 빈도 3~4배↑, Binance 평균 0.01% 대비 현실화)
 V2_MD_FUNDING_EXIT   = 0.0001   # 청산 임계값: +0.01%/8h 이하로 정상화
 V2_MD_LEVERAGE       = 2        # 레버리지 (방향성 리스크 최소화)
 V2_MD_RISK_PCT       = 0.010    # 거래당 리스크 1.0%
-V2_MD_ATR_SL         = 3.0      # SL = ATR × 3.0 (넓게 — 펀딩 수집이 목적)
+V2_MD_ATR_SL         = 2.0      # SL = ATR × 2.0 (3.0→2.0: 발동 빈도↑에 따른 방향 리스크 축소)
 V2_MD_ATR_PERIOD     = 14
 V2_MD_MAX_HOURS      = 48       # 최대 보유 48h (6회 수집 후 강제 청산)
 V2_MD_LIMIT_SEC      = 30       # 지정가 타임아웃

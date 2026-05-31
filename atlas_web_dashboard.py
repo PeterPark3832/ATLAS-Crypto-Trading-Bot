@@ -60,13 +60,17 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
-# ── 실잔고 캐시 (Binance Futures REST, ccxt 미사용, 5분 TTL) ────────
+# ── 실잔고 캐시 (Binance Spot REST, ccxt 미사용, 60초 TTL) ───────
 import hashlib, hmac, urllib.parse
 
 _balance_cache: dict = {'val': None, 'ts': 0.0}
-_BALANCE_TTL = 300
+_BALANCE_TTL = 60   # 5분(300) → 60초: 입금 후 1분 내 반영
 
 def _actual_balance() -> float | None:
+    """
+    Binance 현물(Spot) 계좌의 총자산을 반환합니다.
+    USDT free+locked 합산. Spot API 사용 (Futures API 아님).
+    """
     now = time.time()
     if _balance_cache['val'] is not None and now - _balance_cache['ts'] < _BALANCE_TTL:
         return _balance_cache['val']
@@ -76,19 +80,27 @@ def _actual_balance() -> float | None:
         ts  = int(time.time() * 1000)
         qs  = f'timestamp={ts}'
         sig = hmac.new(BINANCE_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        # Futures API(fapi.binance.com)가 아닌 현물 Spot API 사용
         r   = requests.get(
-            'https://fapi.binance.com/fapi/v2/balance',
+            'https://api.binance.com/api/v3/account',
             params={'timestamp': ts, 'signature': sig},
             headers={'X-MBX-APIKEY': BINANCE_API_KEY},
             timeout=8)
         if not r.ok:
             raise ValueError(f'HTTP {r.status_code}: {r.text[:100]}')
-        for item in r.json():
+        # Spot 응답: {"balances": [{"asset":"USDT","free":"...","locked":"..."},...]}
+        balances = r.json().get('balances', [])
+        usdt_free   = 0.0
+        usdt_locked = 0.0
+        for item in balances:
             if item.get('asset') == 'USDT':
-                val = float(item['balance'])
-                _balance_cache['val'] = val
-                _balance_cache['ts']  = now
-                return val
+                usdt_free   = float(item.get('free',   0) or 0)
+                usdt_locked = float(item.get('locked', 0) or 0)
+                break
+        val = usdt_free + usdt_locked
+        _balance_cache['val'] = val
+        _balance_cache['ts']  = now
+        return val
     except Exception as e:
         log.error(f'실잔고 조회 실패: {e}')
     return _balance_cache['val']
@@ -135,9 +147,10 @@ def _positions() -> pd.DataFrame:
                         qty,leverage,risk_usd,rr,bep_done,entry_ts
                  FROM positions ORDER BY entry_ts DESC""")
 
-def _metrics(df: pd.DataFrame) -> dict:
+def _metrics(df: pd.DataFrame, base_capital: float = None) -> dict:
+    cap = base_capital if base_capital is not None else INITIAL_CAPITAL
     empty = dict(total=0,wins=0,wr=0,total_pnl=0,gross_pnl=0,total_fee=0,
-                 pf=0,avg_r=0,mdd_pct=0,mdd_usd=0,sharpe=0,equity=INITIAL_CAPITAL)
+                 pf=0,avg_r=0,mdd_pct=0,mdd_usd=0,sharpe=0,equity=cap)
     if df.empty:
         return empty
     net   = df['net_pnl'] if 'net_pnl' in df.columns else df['pnl_usd']
@@ -150,7 +163,7 @@ def _metrics(df: pd.DataFrame) -> dict:
     pf    = round(gw/gl, 2) if gl>0 else 0
     cum   = net.cumsum().values
     dd    = np.maximum.accumulate(cum) - cum
-    mdd_u = float(dd.max()); mdd_p = mdd_u/INITIAL_CAPITAL*100
+    mdd_u = float(dd.max()); mdd_p = mdd_u/cap*100 if cap > 0 else 0
     sharpe = 0.0
     if not df['exit_ts'].isna().all():
         d = df.set_index('exit_ts')['net_pnl'].resample('1D').sum().fillna(0) if 'net_pnl' in df.columns else df.set_index('exit_ts')['pnl_usd'].resample('1D').sum().fillna(0)
@@ -160,7 +173,7 @@ def _metrics(df: pd.DataFrame) -> dict:
                 total_pnl=round(pnl,2),gross_pnl=round(gross,2),total_fee=round(fee,2),
                 pf=pf,avg_r=round(float(df['pnl_r'].mean()),3),
                 mdd_pct=round(mdd_p,1),mdd_usd=round(mdd_u,2),
-                sharpe=sharpe,equity=round(INITIAL_CAPITAL+pnl,2))
+                sharpe=sharpe,equity=round(cap+pnl,2))
 
 # ── 리스크 지표 (Stage 2) ─────────────────────────────────────────
 def _ratchet_scale(mdd_pct: float) -> dict:
@@ -192,11 +205,12 @@ def _rolling_wr(df: pd.DataFrame, n: int = 10) -> list:
                        'wr':round(float(window.mean())*100,1),'n':len(window)})
     return result
 
-def _dd_curve(df: pd.DataFrame) -> list:
+def _dd_curve(df: pd.DataFrame, base_capital: float = None) -> list:
     if df.empty: return []
+    cap = base_capital if base_capital is not None else INITIAL_CAPITAL
     df = df.sort_values('exit_ts').reset_index(drop=True)
     cum = df['pnl_usd'].cumsum().values
-    dd  = (np.maximum.accumulate(cum) - cum) / INITIAL_CAPITAL * 100
+    dd  = (np.maximum.accumulate(cum) - cum) / cap * 100 if cap > 0 else np.zeros(len(cum))
     result = []
     for i, row in df.iterrows():
         ts_val = row['exit_ts']
@@ -399,7 +413,18 @@ async def dashboard(token: str, period: int = 0):
     _auth(token)
     df  = _trades(period if period > 0 else 9999)
     pos = _positions()
-    m   = _metrics(df)
+
+    # 실잔고 조회 먼저 — _metrics / _dd_curve 기준자본에 전달
+    actual_bal = _actual_balance()
+
+    if actual_bal is not None and not df.empty:
+        net_col_tmp = 'net_pnl' if 'net_pnl' in df.columns else 'pnl_usd'
+        cumulative_pnl = float(df[net_col_tmp].sum())
+        base_capital = max(actual_bal - cumulative_pnl, actual_bal * 0.01)
+    else:
+        base_capital = INITIAL_CAPITAL
+
+    m   = _metrics(df, base_capital=base_capital)
 
     bot_alive = _bot_alive()
     log_time  = _last_log_time()
@@ -412,15 +437,12 @@ async def dashboard(token: str, period: int = 0):
 
     alerts = _alerts(m, bot_alive)
 
-    # 실잔고 조회 (Binance API)
-    actual_bal = _actual_balance()
-
     # 수익 곡선 (net_pnl 기반)
     eq_curve = []
     if not df.empty:
         d = df.sort_values('exit_ts').copy()
         net_col = 'net_pnl' if 'net_pnl' in d.columns else 'pnl_usd'
-        d['eq'] = INITIAL_CAPITAL + d[net_col].cumsum()
+        d['eq'] = base_capital + d[net_col].cumsum()
         for _, r in d.iterrows():
             eq_curve.append({'ts':r['exit_ts'].isoformat() if pd.notna(r['exit_ts']) else None,
                              'eq':round(float(r['eq']),2),'reason':r['reason'],
@@ -502,7 +524,7 @@ async def dashboard(token: str, period: int = 0):
             'eq_curve':eq_curve,'daily':daily,'module_stats':module_stats,
             'sym_dir':_sym_dir_stats(df),'recent':recent,'open_pos':open_pos,
             'ratchet':_ratchet_scale(m['mdd_pct']),'kelly':_kelly_stats(df),
-            'rolling_wr':_rolling_wr(df,n=10),'dd_curve':_dd_curve(df),
+            'rolling_wr':_rolling_wr(df,n=10),'dd_curve':_dd_curve(df,base_capital=base_capital),
             'monthly_pnl':_monthly_pnl(df),
             'refresh_sec':REFRESH_SEC,
             'updated_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
