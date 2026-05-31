@@ -60,12 +60,13 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
-# ── Spot 잔고 (Binance REST, 60초 TTL = 프론트 갱신주기) ────────────
+# ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
 _bal_cache: dict = {'val': None, 'ts': 0.0}
 
 def _spot_balance() -> float | None:
+    """USDT 잔고 + 오픈 포지션 현재가 합산 = 총 자산 (60s TTL)"""
     now = time.time()
-    if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:   # 60s TTL = 프론트 갱신주기와 동일
+    if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:
         return _bal_cache['val']
     if not API_KEY or not API_SECRET:
         return None
@@ -79,13 +80,36 @@ def _spot_balance() -> float | None:
             headers={'X-MBX-APIKEY': API_KEY}, timeout=8)
         if not r.ok:
             raise ValueError(f'HTTP {r.status_code}')
+        usdt = 0.0
         for b in r.json().get('balances', []):
             if b['asset'] == 'USDT':
-                val = float(b['free']) + float(b['locked'])
-                _bal_cache.update({'val': val, 'ts': now})
-                return val
+                usdt = float(b['free']) + float(b['locked'])
+                break
+
+        # 오픈 포지션 시가 합산
+        total = usdt
+        pos_df = _positions()
+        if not pos_df.empty:
+            for _, p in pos_df.iterrows():
+                qty = float(p['qty'])
+                if qty <= 0:
+                    continue
+                try:
+                    pr = requests.get(
+                        'https://api.binance.com/api/v3/ticker/price',
+                        params={'symbol': str(p['symbol'])}, timeout=4)
+                    if pr.ok:
+                        total += qty * float(pr.json()['price'])
+                    else:
+                        total += float(p['risk_usd'])
+                except Exception:
+                    total += float(p['risk_usd'])
+
+        val = round(total, 2)
+        _bal_cache.update({'val': val, 'ts': now})
+        return val
     except Exception as e:
-        log.error(f'spot balance 조회 실패: {e}')
+        log.error(f'total equity 조회 실패: {e}')
     return _bal_cache['val']
 
 # ── Telegram ──────────────────────────────────────────────────────

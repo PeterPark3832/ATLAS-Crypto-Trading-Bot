@@ -968,8 +968,10 @@ function renderKPIs(m, regime, actualBal, initialCap) {
   setKPI('k-pnl', `${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)}`, pnlC);
   document.getElementById('kpi-pnl-acc').style.background = m.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
   const feeStr = m.total_fee > 0 ? ` · 수수료 -$${m.total_fee.toFixed(2)}` : '';
+  // 실잔고(USDT+포지션 시가)를 주 표시, 없으면 거래 기반 계산값
+  const dispEquity = (actualBal != null && actualBal > 0) ? actualBal : m.equity;
   document.getElementById('k-equity').textContent =
-    `자산 $${m.equity.toFixed(2)}${feeStr}` + (actualBal!=null ? ` (USDT $${actualBal.toFixed(2)})` : '');
+    `총자산 $${dispEquity.toFixed(2)}${feeStr}`;
 
   const wrC = m.total===0?'':(m.wr>=40?'pos':m.wr>=33?'':'neg');
   setKPI('k-wr', m.total===0?'N/A':`${m.wr.toFixed(0)}%`, wrC);
@@ -993,9 +995,9 @@ function renderKPIs(m, regime, actualBal, initialCap) {
   document.getElementById('k-regime-sub').textContent = regime||'—';
   document.getElementById('tab-pos-cnt').textContent = '';
 
-  const retPct = initialCap>0?(m.equity-initialCap)/initialCap*100:0;
+  const retPct = initialCap>0?(dispEquity-initialCap)/initialCap*100:0;
   document.getElementById('eq-badge').textContent =
-    `$${m.equity.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
+    `$${dispEquity.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
 }
 
 const DARK = {
