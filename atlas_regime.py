@@ -1,8 +1,7 @@
 """
-ATLAS — 장세 분류기 + 전략 라우터
-===================================
-BTC 1D 기준 ADX + EMA200 + ATR/Price 로 4가지 장세 분류 후
-각 심볼·전략의 활성화 여부를 반환.
+ATLAS — 장세 분류기
+====================
+BTC 1D 기준 ADX + EMA200 + ATR/Price 로 5가지 장세 분류.
 
 장세 정의:
   TRENDING_UP   ADX ≥ 25 & BTC > EMA200    상승 추세
@@ -10,13 +9,6 @@ BTC 1D 기준 ADX + EMA200 + ATR/Price 로 4가지 장세 분류 후
   RANGING       ADX < 20                   횡보
   WEAK_TREND    20 ≤ ADX < 25              약추세 (혼합 허용)
   CRISIS        ATR/Price ≥ 7%             위기 (전면 차단)
-
-전략 활성화 매핑:
-  TRENDING_UP   → Equinox LONG(ETH) ✓  Phoenix M1 LONG(BTC/SOL/BNB) ✓  SHORT ✗
-  TRENDING_DOWN → Phoenix M1/M2 SHORT(BTC/SOL/BNB) ✓  Equinox LONG ✗
-  RANGING       → Phoenix M2 양방향 ✓  Bounce ETH ✓  Equinox ✗
-  WEAK_TREND    → 모두 허용 (리스크 70% 축소)
-  CRISIS        → 전면 차단
 """
 
 import logging
@@ -25,23 +17,22 @@ import time
 import pandas as pd
 import ccxt
 from dataclasses import dataclass
-from atlas_config import (
-    REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR, REGIME_BTC_LOOKBACK,
-    BINANCE_API_KEY, BINANCE_API_SECRET,
-)
+from atlas_spot_config import BINANCE_API_KEY, BINANCE_API_SECRET
 from atlas_indicators import calc_adx, _ohlcv_to_df, _calc_atr
+
+# ── 레짐 분류 임계값 ─────────────────────────────────────────
+REGIME_ADX_TREND    = 25      # ADX >= 25 → 추세 구간
+REGIME_ADX_WEAK     = 20      # 20 <= ADX < 25 → 약추세
+REGIME_CRISIS_ATR   = 0.07    # ATR/Price >= 7% → 위기
+REGIME_BTC_LOOKBACK = 50      # ADX 계산에 사용할 1D 캔들 수
 
 
 def _make_regime_ex() -> ccxt.binance:
-    """
-    regime_loop 스레드 전용 CCXT 인스턴스.
-    atlas_main.py의 _get_ex()와 독립적으로 동작 → Nonce 충돌 없음.
-    markets는 lazy-load (첫 API 호출 시 자동 로드).
-    """
+    """regime_loop 스레드 전용 CCXT 인스턴스 (Nonce 충돌 방지)."""
     return ccxt.binance({
         'apiKey':  BINANCE_API_KEY,
         'secret':  BINANCE_API_SECRET,
-        'options': {'defaultType': 'future'},
+        'options': {'defaultType': 'spot'},
     })
 
 # ──────────────────────────────────────────────────────────────
@@ -211,48 +202,6 @@ def regime_loop(ex=None, candle_cache=None):
         except Exception as e:
             log.warning(f'[Regime] loop 오류: {e}')
         time.sleep(_REGIME_TTL)
-
-
-# ══════════════════════════════════════════════════════════════
-#  전략 라우터 — 장세별 전략 활성화 판단
-# ══════════════════════════════════════════════════════════════
-
-def is_phoenix_long_allowed(sym: str) -> bool:
-    """Phoenix 4H LONG 진입 허용 여부."""
-    regime = get_cached_regime().regime
-    if regime == REGIME_CRISIS:
-        return False
-    if regime == REGIME_TRENDING_DOWN:
-        return False   # 하락추세에서 4H 롱 차단
-    return True        # 상승추세, 횡보, 약추세 모두 허용
-
-
-def is_phoenix_short_allowed(sym: str) -> bool:
-    """Phoenix 4H SHORT 진입 허용 여부."""
-    regime = get_cached_regime().regime
-    if regime == REGIME_CRISIS:
-        return False
-    if regime == REGIME_TRENDING_UP:
-        return False   # 상승추세에서 4H 숏 차단
-    return True        # 하락추세, 횡보, 약추세 모두 허용
-
-
-def is_equinox_long_allowed(sym: str) -> bool:
-    """Equinox 1D LONG 진입 허용 여부."""
-    regime = get_cached_regime().regime
-    if regime in (REGIME_CRISIS, REGIME_TRENDING_DOWN, REGIME_RANGING):
-        return False
-    return True   # 상승추세, 약추세 허용
-
-
-def is_bounce_allowed(sym: str) -> bool:
-    """Bounce 1D LONG 진입 허용 여부 (횡보·하락 초입 반등)."""
-    regime = get_cached_regime().regime
-    if regime == REGIME_CRISIS:
-        return False
-    if regime == REGIME_TRENDING_DOWN:
-        return False   # 하락추세 지속 중 반등 노리기 금지
-    return True
 
 
 def is_crisis() -> bool:

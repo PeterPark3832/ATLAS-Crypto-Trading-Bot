@@ -1,5 +1,5 @@
 """
-ATLAS v2 주간 성과 요약 — 매주 월요일 00:00 UTC crontab 실행
+ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC crontab 실행
   0 0 * * 1 python3 /root/atlas_bot/weekly_report.py
 """
 
@@ -18,7 +18,7 @@ load_dotenv(Path(__file__).parent / '.env')
 TG_TOKEN        = os.getenv('TG_TOKEN', '')
 TG_CHAT_ID      = os.getenv('TG_CHAT_ID', '')
 DB_FILE         = Path(os.getenv('DB_FILE',
-                    str(Path(__file__).parent / 'state' / 'atlas_v2.db')))
+                    str(Path(__file__).parent / 'state' / 'atlas_spot.db')))
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 
 
@@ -78,22 +78,15 @@ def calc(df: pd.DataFrame) -> dict:
                 tp=tp_cnt, sl=sl_cnt, mdd=mdd)
 
 
-def module_summary(df: pd.DataFrame) -> str:
+def strategy_summary(df: pd.DataFrame) -> str:
     if df.empty:
         return '  거래 없음'
-    mod_map = {
-        'V2_MA_LONG': 'A', 'V2_MA_SHORT': 'A',
-        'V2_MR_LONG': 'B', 'V2_MR_SHORT': 'B',
-        'V2_MC_LONG': 'C', 'V2_MC_SHORT': 'C',
-    }
-    df = df.copy()
-    df['mod'] = df['strategy'].map(mod_map).fillna('?')
     lines = []
-    for mod in sorted(df['mod'].unique()):
-        g     = df[df['mod'] == mod]
+    for strat in sorted(df['strategy'].unique()):
+        g     = df[df['strategy'] == strat]
         wins  = int((g['pnl_usd'] > 0).sum())
         lines.append(
-            f"  Mod {mod}: {len(g)}건 WR{wins/len(g)*100:.0f}% "
+            f"  {strat}: {len(g)}건 WR{wins/len(g)*100:.0f}% "
             f"${g['pnl_usd'].sum():+.1f}"
         )
     return '\n'.join(lines)
@@ -110,7 +103,7 @@ def main():
     t = calc(total)
 
     if not t:
-        tg('📊 ATLAS v2 주간 리포트\n데이터 없음')
+        tg('📊 ATLAS Spot 주간 리포트\n데이터 없음')
         return
 
     week_str = (
@@ -121,10 +114,10 @@ def main():
     ) if w else "이번주: 거래 없음"
 
     msg = (
-        f"📊 ATLAS v2 주간 리포트 ({now.strftime('%Y-%m-%d')})\n"
+        f"📊 ATLAS Spot 주간 리포트 ({now.strftime('%Y-%m-%d')})\n"
         f"{'─'*30}\n"
         f"{week_str}\n\n"
-        f"모듈별 (7일):\n{module_summary(week)}\n\n"
+        f"전략별 (7일):\n{strategy_summary(week)}\n\n"
         f"누적 전체 ({t['total']}건):\n"
         f"  PnL: ${t['pnl']:+.2f}  WR: {t['wr']:.0f}%  PF: {t['pf']:.2f}\n"
         f"  MDD: {t['mdd']:.1f}%  avgR: {t['avg_r']:+.3f}\n"
