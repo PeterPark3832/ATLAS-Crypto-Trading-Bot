@@ -1,12 +1,12 @@
 """
-ATLAS v2 MCP 서버
-=================
-Claude Code에서 ATLAS 봇 상태를 직접 조회/분석할 수 있는 도구 모음.
+ATLAS MCP 서버
+==============
+Claude Code에서 ATLAS Spot 봇 상태를 직접 조회/분석할 수 있는 도구 모음.
 Vultr 서버에 SSH로 접속해 DB와 로그를 읽어옵니다.
 
 [제공 도구]
   get_trade_history(days)   — 최근 N일 거래 내역
-  get_pnl_by_module()       — 모듈별 성과 비교 (Module A vs B)
+  get_pnl_by_strategy()     — 전략별 성과 비교 (S3–S7)
   check_alert_thresholds()  — 경고/즉시중단 임계값 체크
   get_error_logs(n)         — 최근 ERROR/WARNING 로그
 
@@ -36,14 +36,14 @@ load_dotenv(_env_path if _env_path.exists() else None)
 SSH_HOST     = os.getenv('VULTR_HOST', '')
 SSH_PORT     = int(os.getenv('VULTR_PORT', '22'))
 SSH_USER     = os.getenv('VULTR_USER', 'root')
-SSH_KEY_PATH = os.getenv('VULTR_KEY_PATH', '')   # 예: /home/user/.ssh/id_rsa
-SSH_PASSWORD = os.getenv('VULTR_PASSWORD', '')    # 키 없을 때 폴백
+SSH_KEY_PATH = os.getenv('VULTR_KEY_PATH', '')
+SSH_PASSWORD = os.getenv('VULTR_PASSWORD', '')
 
-REMOTE_DB_PATH  = os.getenv('REMOTE_DB_PATH',  '/root/ATLAS/state/atlas_v2.db')
+REMOTE_DB_PATH  = os.getenv('REMOTE_DB_PATH',  '/root/ATLAS/state/atlas_spot.db')
 REMOTE_LOG_DIR  = os.getenv('REMOTE_LOG_DIR',  '/root/ATLAS/logs')
-INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))  # MDD% 계산 기준
+INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 
-mcp = FastMCP("ATLAS v2")
+mcp = FastMCP("ATLAS Spot")
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -94,7 +94,7 @@ def _read_log_lines(n_tail: int = 3000) -> list[str]:
     client = _ssh_connect()
     try:
         stdin, stdout, stderr = client.exec_command(
-            f'ls -t {REMOTE_LOG_DIR}/atlas_v2_*.log 2>/dev/null | head -1'
+            f'ls -t {REMOTE_LOG_DIR}/atlas_spot_*.log 2>/dev/null | head -1'
         )
         latest = stdout.read().decode().strip()
         if not latest:
@@ -153,11 +153,11 @@ def get_trade_history(days: int = 30) -> str:
 
 
 @mcp.tool()
-def get_pnl_by_module() -> str:
+def get_pnl_by_strategy() -> str:
     """
-    전략 모듈별 누적 성과를 비교합니다.
-    Module A (MA, 추세추종)와 Module B (MR, 평균회귀)의 거래수, 승률, PF, 평균R을 반환합니다.
-    BNB Module B처럼 통계 신뢰도가 낮은 경우도 함께 표시합니다.
+    전략별 누적 성과를 비교합니다.
+    S3(EMA추세), S4(RSI평균회귀), S5(BB반등), S6(Donchian돌파), S7(MACD)의
+    거래수, 승률, PF, 평균R을 심볼별로 반환합니다.
     """
     rows = _query_db("""
         SELECT
@@ -181,13 +181,12 @@ def get_pnl_by_module() -> str:
     if not rows:
         return "거래 데이터 없음 — 아직 청산 거래가 없습니다."
 
-    # 전략별로 묶기
     from collections import defaultdict
     by_strategy: dict = defaultdict(list)
     for r in rows:
         by_strategy[r['strategy']].append(r)
 
-    lines = ["=== 모듈별 누적 성과 ==="]
+    lines = ["=== 전략별 누적 성과 ==="]
     for strategy, items in sorted(by_strategy.items()):
         lines.append(f"\n[{strategy}]")
         for r in items:
@@ -200,7 +199,6 @@ def get_pnl_by_module() -> str:
                 f"최악:${r['worst']:>7.2f}  최선:${r['best']:>7.2f}"
             )
 
-    # 전체 합계
     all_pnl  = sum(r['total_pnl'] for r in rows)
     all_tot  = sum(r['total']     for r in rows)
     all_wins = sum(r['wins']      for r in rows)
@@ -211,9 +209,9 @@ def get_pnl_by_module() -> str:
 @mcp.tool()
 def check_alert_thresholds() -> str:
     """
-    봇 개입이 필요한지 판단합니다. HANDOVER 문서의 경고/즉시중단 기준과 현재 지표를 비교합니다.
+    봇 개입이 필요한지 판단합니다. 경고/즉시중단 기준과 현재 지표를 비교합니다.
 
-    경고 기준: 실전 승률 < 30%, PF < 1.0, MDD > 15%
+    경고 기준: 실전 승률 < 35%, PF < 1.0, MDD > 15%
     즉시중단:  MDD > 20%
 
     거래 수가 10건 미만이면 통계 신뢰도 경고를 함께 표시합니다.
@@ -230,7 +228,6 @@ def check_alert_thresholds() -> str:
     gross_loss = abs(sum(t['pnl_usd'] for t in trades if t['pnl_usd'] < 0))
     pf         = gross_win / gross_loss if gross_loss > 0 else float('inf')
 
-    # MDD 계산 (누적 PnL 기준 절대값 → 초기 자본 대비 %)
     cum = 0.0
     peak = 0.0
     max_dd_usd = 0.0
@@ -245,13 +242,12 @@ def check_alert_thresholds() -> str:
     mdd_pct   = max_dd_usd / INITIAL_CAPITAL * 100
     total_pnl = sum(t['pnl_usd'] for t in trades)
 
-    # 판정
     alerts = []
     stops  = []
 
     if total >= 10:
-        if wr < 0.30:
-            alerts.append(f"⚠️  승률 {wr*100:.1f}% < 30% 경고선 (백테스트 기준 37%)")
+        if wr < 0.35:
+            alerts.append(f"⚠️  승률 {wr*100:.1f}% < 35% 경고선")
         if pf < 1.0:
             alerts.append(f"⚠️  PF {pf:.2f} < 1.0 — 손실 구간 진입")
     if mdd_pct > 20:
@@ -264,7 +260,7 @@ def check_alert_thresholds() -> str:
         "",
         f"[현재 지표]",
         f"  거래수   : {total}건",
-        f"  실전승률 : {wr*100:.1f}%  (백테스트 37%)",
+        f"  실전승률 : {wr*100:.1f}%",
         f"  PF       : {pf:.2f}  (기준 > 1.0)",
         f"  MDD(추정): {mdd_pct:.1f}%  = ${max_dd_usd:.2f}  (경고 15% / 중단 20%)",
         f"  누적PnL  : ${total_pnl:+.2f}",

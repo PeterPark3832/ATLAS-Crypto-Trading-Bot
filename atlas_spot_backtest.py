@@ -56,14 +56,111 @@ from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
 )
 from atlas_spot_universe import get_backtest_universe
-from atlas_backtest import (
-    fetch_ohlcv_public as _fetch_futures,
-    load_ohlcv_csv,
-    build_regime_map,
-    TradeResult,
-    _bucket_pnl_r,
-)
 from atlas_indicators import _ohlcv_to_df
+from atlas_regime import classify_regime, REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR
+
+
+# ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
+
+def _fetch_futures(symbol: str, timeframe: str,
+                   since_ms: Optional[int] = None,
+                   max_bars: int = 20000) -> list:
+    """Binance 스팟 퍼블릭 API로 OHLCV 전체 페이지네이션."""
+    try:
+        import ccxt
+        ex = ccxt.binance({'options': {'defaultType': 'spot'}})
+        ccxt_sym = symbol.replace('USDT', '/USDT')
+        all_data: list = []
+        since = since_ms
+        while len(all_data) < max_bars:
+            batch = ex.fetch_ohlcv(ccxt_sym, timeframe, since=since, limit=1000)
+            if not batch:
+                break
+            if all_data:
+                batch = [b for b in batch if b[0] > all_data[-1][0]]
+            if not batch:
+                break
+            all_data.extend(batch)
+            if len(batch) < 1000:
+                break
+            since = batch[-1][0] + 1
+        return all_data
+    except Exception as e:
+        print(f'  [오류] {symbol} {timeframe} 데이터 로드 실패: {e}')
+        return []
+
+
+def load_ohlcv_csv(path: str) -> list:
+    """CSV에서 OHLCV 로드. 컬럼: timestamp(ms/datetime), open, high, low, close, volume"""
+    df = pd.read_csv(path)
+    ts_col = next((c for c in ('timestamp', 'open_time', 'ts') if c in df.columns), None)
+    if ts_col is None:
+        raise ValueError(f'타임스탬프 컬럼 없음: {path}')
+    if pd.api.types.is_integer_dtype(df[ts_col]) or pd.api.types.is_float_dtype(df[ts_col]):
+        ts_ms = pd.to_datetime(df[ts_col].astype(int), unit='ms', utc=True)
+    else:
+        ts_ms = pd.to_datetime(df[ts_col], utc=True)
+    if ts_ms.dt.tz is None:
+        ts_ms = ts_ms.dt.tz_localize('UTC')
+    df['_ts'] = ts_ms.astype(int) // 1_000_000
+    return df[['_ts', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
+
+
+def build_regime_map(btc_1d_ohlcv: list) -> dict:
+    """날짜 → 레짐 문자열 딕셔너리 반환. key: 'YYYY-MM-DD'"""
+    from atlas_indicators import calc_adx
+    if len(btc_1d_ohlcv) < 60:
+        return {}
+    df    = _ohlcv_to_df(btc_1d_ohlcv)
+    close = df['close']
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    pc  = close.shift(1)
+    tr  = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - pc).abs(),
+        (df['low']  - pc).abs(),
+    ], axis=1).max(axis=1)
+    atr14 = tr.rolling(14).mean()
+    regime_map: dict = {}
+    for i in range(50, len(df)):
+        date_key = str(df['ts'].iloc[i].date())
+        window   = btc_1d_ohlcv[max(0, i - 50): i + 1]
+        adx      = calc_adx(window, 14)
+        btc_px   = float(close.iloc[i])
+        ema_val  = float(ema200.iloc[i])
+        atr_val  = float(atr14.iloc[i]) if not pd.isna(atr14.iloc[i]) else 0.0
+        atr_pct  = atr_val / btc_px if btc_px else 0.0
+        regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct)
+    return regime_map
+
+
+@dataclass
+class TradeResult:
+    symbol:    str
+    strategy:  str
+    direction: str
+    mode:      str
+    entry:     float
+    exit_px:   float
+    pnl_r:     float
+    risk_pct:  float
+    reason:    str
+    entry_bar: int
+    exit_bar:  int
+    regime:    str = ''
+
+
+def _bucket_pnl_r(buckets: dict, pnl_r: float) -> None:
+    """R-배수를 버킷에 분류."""
+    if   pnl_r < -1.5:  buckets['< -1.5R']  += 1
+    elif pnl_r < -1.0:  buckets['-1.5~-1R'] += 1
+    elif pnl_r < -0.5:  buckets['-1~-0.5R'] += 1
+    elif pnl_r <  0.0:  buckets['-0.5~0R']  += 1
+    elif pnl_r <  0.5:  buckets['0~0.5R']   += 1
+    elif pnl_r <  1.0:  buckets['0.5~1R']   += 1
+    elif pnl_r <  1.5:  buckets['1~1.5R']   += 1
+    elif pnl_r <  2.0:  buckets['1.5~2R']   += 1
+    else:               buckets['> 2R']      += 1
 
 
 def _get_slippage(symbol: str) -> float:
