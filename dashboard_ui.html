@@ -1080,7 +1080,8 @@ function renderSymDirTable(data) {
       <td class="${r.wr>=40?'pos':r.wr>=33?'':'neg'}">${r.wr}%</td>
       <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
       <td class="${r.avg_r>=0?'pos':'neg'}">${r.avg_r>=0?'+':''}${r.avg_r.toFixed(3)}</td>
-      <td class="pos">+$${r.best.toFixed(2)}</td><td class="neg">$${r.worst.toFixed(2)}</td>
+      <td class="${r.best>=0?'pos':'neg'}">${r.best>=0?'+':'-'}$${Math.abs(r.best).toFixed(2)}</td>
+      <td class="${r.worst>=0?'pos':'neg'}">${r.worst>=0?'+':'-'}$${Math.abs(r.worst).toFixed(2)}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 
