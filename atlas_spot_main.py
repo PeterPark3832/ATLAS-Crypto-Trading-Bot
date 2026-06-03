@@ -112,6 +112,24 @@ def _get_ex() -> ccxt.binance:
     return _thread_local.ex
 
 
+# 펀딩비 조회용 선물 CCXT 싱글턴 (매 호출마다 인스턴스 생성 방지)
+_ex_futures: ccxt.binance | None = None
+_ex_futures_lock = threading.Lock()
+
+def _get_ex_futures() -> ccxt.binance:
+    global _ex_futures
+    if _ex_futures is None:
+        with _ex_futures_lock:
+            if _ex_futures is None:
+                _ex_futures = ccxt.binance({
+                    'apiKey':  BINANCE_API_KEY,
+                    'secret':  BINANCE_API_SECRET,
+                    'options': {'defaultType': 'future'},
+                    'enableRateLimit': True,
+                })
+    return _ex_futures
+
+
 # 마지막 성공 가격 캐시 (네트워크 단절 시 SL 작동 보장)
 _last_known_price: dict = {}   # {ccxt_sym: (price, timestamp)}
 _PRICE_CACHE_TTL = 120         # 캐시 신뢰 최대 2분
@@ -407,7 +425,7 @@ def _get_kelly_scale(strategy: str) -> float:
             (strategy,)
         ).fetchall()
     if len(rows) < SPOT_KELLY_MIN_TRADES:
-        return 1.0
+        return SPOT_KELLY_SCALE_MIN
     pnl_r  = [r['pnl_r'] for r in rows]
     wins   = [r for r in pnl_r if r > 0]
     losses = [r for r in pnl_r if r <= 0]
@@ -428,16 +446,30 @@ def _get_kelly_scale(strategy: str) -> float:
 
 
 def _get_ratchet_scale() -> float:
-    """Drawdown Ratchet 스케일."""
+    """Drawdown Ratchet 스케일.
+    회복 조건: DD 바닥 대비 +SPOT_RATCHET_RECOVER(15%) 상승 시 스케일 복원.
+    """
     equity = _state['equity']
     peak   = _state['peak_equity']
     if peak <= 0 or equity <= 0:
         return 1.0
     dd = (peak - equity) / peak
     if dd >= SPOT_RATCHET_DD_HARD:
+        # 바닥(floor) 추적: ratchet_floor에 최저점 기록
+        floor = _state.get('ratchet_floor', equity)
+        if equity < floor:
+            _state['ratchet_floor'] = equity
+            floor = equity
+        # 바닥 대비 회복률 확인
+        recover_pct = (equity - floor) / floor if floor > 0 else 0.0
+        if recover_pct >= SPOT_RATCHET_RECOVER:
+            _state['ratchet_floor'] = equity  # 회복 기준점 리셋
+            return 0.70   # Hard DD 회복 → 중간 단계로 복원
         return 0.40
     if dd >= SPOT_RATCHET_DD_THRESH:
+        _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
         return 0.70
+    _state.pop('ratchet_floor', None)
     return 1.0
 
 
@@ -445,11 +477,7 @@ def _get_spot_funding(sym: str) -> float:
     """Binance 선물 펀딩비 조회 (현물 추세추종 진입 필터용). 실패 시 0.0 반환."""
     try:
         ccxt_sym = sym.replace('USDT', '/USDT:USDT')
-        ex_futures = ccxt.binance({
-            'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET,
-            'options': {'defaultType': 'future'},
-        })
-        info = ex_futures.fetch_funding_rate(ccxt_sym)
+        info = _get_ex_futures().fetch_funding_rate(ccxt_sym)
         return float(info.get('fundingRate', 0))
     except Exception:
         return 0.0

@@ -243,18 +243,18 @@ STRATEGY_NAMES = {
 }
 
 # 레짐별 허용 전략
-# Live 운용 (C안 최적화, 백테스트 검증):
-#   TRENDING_UP  : S6만  (S3 고점진입 제거)
-#   RANGING      : S7V4  (MACD 강화필터, PF=2.17, 승률57%)
-#   WEAK_TREND   : S3+S5+S6 (추세 형성 초기 전 전략)
-#   TRENDING_DOWN: S5+S7V4 30%scale (과매도 반등)
-# 결과: PF 1.76→1.80 / MDD 7.2% 유지 / CAGR +8.5%→+9.6% / Sharpe 2.54→2.59
-# WF: IS PF=1.12 / OOS PF=3.52 ✅
+# 레짐별 전략 배치 원칙:
+#   TRENDING_UP  : S6 (돌파 전용 — S3 고점 진입 제거)
+#   RANGING      : S4, S5 (평균회귀 — ADX<20 구간, 추세추종 불가)
+#   WEAK_TREND   : S3, S5, S6 (추세 형성 초기 혼합)
+#   TRENDING_DOWN: S4, S5 (과매도 반등 한정, 30% 리스크 스케일)
+#   CRISIS       : 전면 차단
+# NOTE: S7V4는 ADX≥25 필터를 내부적으로 요구하므로 RANGING(ADX<20) 배치 불가
 REGIME_STRATEGY_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S7V4'],
+    'RANGING':       ['S4', 'S5'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S5', 'S7V4'],
+    'TRENDING_DOWN': ['S4', 'S5'],
     'CRISIS':        [],
 }
 
