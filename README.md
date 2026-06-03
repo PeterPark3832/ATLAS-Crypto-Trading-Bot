@@ -1,131 +1,239 @@
-# ATLAS — Binance Futures Automated Trading Bot
+# ATLAS — 암호화폐 현물 자동매매 봇
 
-Binance 선물 자동매매 봇. 다중 전략 + 레짐 라우팅 + 통합 리스크 관리.
+Binance 현물 시장에서 7가지 전략을 동시에 운용하는 Python 트레이딩 봇.  
+레짐 기반 전략 라우팅, Kelly 포지션 사이징, 동적 리스크 관리를 통해 장세에 맞는 전략만 자동으로 활성화합니다.
 
 ---
 
-## 전략 구조
+## 전략 구성 (S1~S7)
 
-| 모듈 | 유형 | 심볼 | 타임프레임 | 방향 |
-|------|------|------|-----------|------|
-| Module A | 추세추종 (EMA 크로스오버) | BTC/ETH/SOL/BNB | 4H | 롱+숏 |
-| Module B | 평균회귀 (RSI 크로스오버) | ETH/BNB | 1D | 롱+숏 |
-| Module C | 브레이크아웃 모멘텀 | BTC/ETH/SOL | 15m | 롱+숏 |
+| ID | 이름 | 타임프레임 | 특징 |
+|----|------|-----------|------|
+| S1 | Buy & Hold | — | 벤치마크 (성과 비교용) |
+| S2 | SMA Golden Cross | 1D | 50/200 데드크로스·골든크로스 |
+| S3 | EMA Trend Follow | 4H | EMA20/50 크로스 + ADX 필터 + 동적 RR |
+| S4 | RSI Mean Reversion | 1D | RSI<30 과매도 + BB 하단 반등 |
+| S5 | Bollinger Band Bounce | 1D | BB 하단 이탈 + RSI 확증 |
+| S6 | Donchian Breakout | 1D | 20일 신고가 돌파 + 거래량 스파이크 + VWAP 확증 |
+| S7 | MACD Momentum | 4H | MACD 히스토그램 방향 전환 + EMA200 필터 |
 
-### 레짐 라우팅
+---
 
-| 레짐 | Module A | Module B | Module C |
-|------|----------|----------|----------|
-| TRENDING_UP | LONG | ✗ | LONG |
-| TRENDING_DOWN | SHORT | ✗ | SHORT |
-| RANGING | ✗ | LONG+SHORT | ✗ |
-| WEAK_TREND | 양방향 | ✗ | 양방향 |
-| CRISIS | ✗ | ✗ | ✗ |
+## 레짐 라우팅
+
+BTC 1D ADX + EMA200 기반으로 5가지 시장 상태를 자동 분류, 각 레짐에 맞는 전략만 활성화합니다.
+
+| 레짐 | 조건 | 활성 전략 | 리스크 |
+|------|------|----------|--------|
+| TRENDING_UP | ADX ≥ 25 & BTC > EMA200 | S3, S6, S7 (추세추종) | 100% |
+| RANGING | ADX < 20 | S4, S5 (평균회귀) | 100% |
+| WEAK_TREND | 20 ≤ ADX < 25 | 전체 허용 | 50% |
+| TRENDING_DOWN | ADX ≥ 25 & BTC < EMA200 | S4, S5 (과매도 반등) | 30% |
+| CRISIS | ATR/가격 ≥ 7% | 전면 차단 | 0% |
 
 ---
 
 ## 리스크 관리
 
-- **Kelly 스케일링** — 거래 누적 후 승률 기반 자동 포지션 조절
-- **Drawdown Ratchet** — 낙폭 5% → 리스크 70%, 7% → 40%
-- **VaR 한도** — 포트폴리오 총 리스크 10% 초과 시 진입 차단
-- **상관계수 보정** — 동일 방향 포지션 집중 시 리스크 축소
-- **변동성 패리티** — 고변동 심볼 자동 리스크 감소
-- **일일 손실 한도** — -3% 도달 시 당일 자동 정지
+### 포지션 사이징
+- **기본 리스크**: 자본의 2%/거래 (`SPOT_BASE_RISK_PCT`)
+- **Kelly 스케일**: 전략별 실전 승률·PF 기반 자동 조정 (최소 0.3배, 최대 2.0배)
+- **Kelly 최소 거래수**: 10건 이후 활성화 (초기 30% 고정)
+- **단일 종목 상한**: 자본의 15% (`SPOT_MAX_ALLOC_PCT`)
+- **최대 동시 포지션**: 15개 (`SPOT_MAX_POSITIONS`)
+
+### Drawdown Ratchet
+| MDD | 리스크 배율 |
+|-----|------------|
+| < 5% | 100% (정상) |
+| 5~8% | 70% |
+| > 8% | 40% |
+| 회복 +15% | 원상 복구 |
+
+### 모멘텀 집중 베팅 (RS Gate)
+- 유니버스 상위 33% 심볼에만 S6/S7 진입 허용
+- 주도주 티어 리스크 30% 상향 부스트
+
+### 선물 펀딩비 필터
+- 펀딩비 > +0.05%/8h → S3/S6/S7 진입 차단 (롱 과밀)
+- 펀딩비 < -0.01%/8h → 리스크 스케일 +20% (숏 스퀴즈 기대)
+
+---
+
+## 심볼 유니버스
+
+- Binance 현물 24h 거래량 기준 상위 50개 USDT 페어 자동 선별
+- 스테이블코인·레버리지 토큰 자동 제외
+- 45일 모멘텀 랭킹으로 주도주 순서 정렬
+- **4시간 주기** 자동 갱신
+
+---
+
+## 설치
+
+```bash
+git clone https://github.com/PeterPark3832/ATLAS-Crypto-Trading-Bot.git
+cd ATLAS-Crypto-Trading-Bot
+pip install -r requirements.txt
+cp .env.example .env
+# .env 파일에 API 키 입력
+```
+
+### 환경변수 (.env)
+
+```env
+BINANCE_API_KEY=...          # Binance Spot API 키
+BINANCE_API_SECRET=...       # Binance Spot API 시크릿
+TG_TOKEN=...                 # Telegram 봇 토큰
+TG_CHAT_ID=...               # Telegram 채팅 ID
+INITIAL_CAPITAL=1000         # 초기 자본 ($)
+DASH_PASSWORD=atlas2026      # 대시보드 접속 비밀번호
+DB_FILE=/path/to/atlas_spot.db
+```
+
+---
+
+## 실행
+
+```bash
+# 봇 실행
+python atlas_spot_main.py
+
+# 대시보드 실행 (별도 터미널)
+uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
+
+# 헬스체크 crontab 등록
+# */5 * * * * /path/to/healthcheck.sh
+```
+
+---
+
+## 백테스트
+
+```bash
+# 전체 전략 Walk-Forward
+python atlas_spot_backtest.py --wf
+
+# 단일 전략
+python atlas_spot_backtest.py --strategy S3
+
+# 특정 심볼
+python atlas_spot_backtest.py --symbol BTCUSDT --strategy S6
+
+# 기간 지정
+python atlas_spot_backtest.py --start 2022-01-01 --end 2024-01-01
+
+# IS/OOS 분리 결과 저장
+python atlas_spot_backtest.py --wf --save
+```
+
+### 백테스트 비용 모델
+| 티어 | 심볼 | 수수료 | 슬리피지 |
+|------|------|--------|---------|
+| Tier 1 | BTC, ETH | 0.1% | 0.03% |
+| Tier 2 | BNB, SOL, XRP... | 0.1% | 0.08% |
+| Tier 3 | 그 외 | 0.1% | 0.15% |
+
+---
+
+## 대시보드
+
+`http://서버IP:8080` 접속 후 `DASH_PASSWORD`로 인증.
+
+| 섹션 | 내용 |
+|------|------|
+| 자산 현황 | 실잔고(Binance API), 누적 PnL, 현재 레짐 |
+| 수익 곡선 | 누적 Equity Curve |
+| 전략별 성과 | WR, PF, avgR, 거래수 |
+| Kelly 통계 | 전략별 Full/Half Kelly 계산 |
+| 열린 포지션 | 현재 보유 중인 포지션 목록 |
+| 최근 거래 | 최근 50건 거래 내역 |
+| 드로다운 곡선 | MDD 추이 |
+| 월별 PnL | 히트맵 |
+
+> **추가 입금 자동 반영**: 실잔고 API(Binance Spot)를 60초마다 조회하여 입금 즉시 자산에 반영됩니다.
+
+---
+
+## Telegram 명령어
+
+봇 실행 중 Telegram에서 직접 제어:
+
+| 명령 | 기능 |
+|------|------|
+| `/status` | 현재 레짐, 포지션 수, 일일 PnL |
+| `/pause` | 신규 진입 일시 중단 |
+| `/resume` | 진입 재개 |
+| `/positions` | 열린 포지션 목록 |
+| `/stop` | 봇 안전 종료 (열린 포지션 유지) |
+
+---
+
+## MCP 서버 (Claude Code 연동)
+
+```bash
+# 등록
+claude mcp add --transport stdio atlas -- python atlas_mcp_server.py
+```
+
+| 도구 | 기능 |
+|------|------|
+| `get_trade_history(days)` | 최근 N일 거래 내역 |
+| `get_pnl_by_strategy()` | 전략별 성과 비교 |
+| `check_alert_thresholds()` | MDD/WR/PF 경고 판단 |
+| `get_error_logs(n)` | 최근 ERROR 로그 |
 
 ---
 
 ## 파일 구조
 
 ```
-ATLAS/
-├── atlas_config.py        # 모든 파라미터
-├── atlas_indicators.py    # 지표 계산 (4H/1D/15m)
-├── atlas_regime.py        # 레짐 분류기 (ADX 기반)
-├── atlas_v2_main.py       # 라이브 트레이딩 엔진 (v2 현재 가동)
-├── atlas_v2_backtest.py   # Walk-Forward 백테스트
-├── atlas_mcp_server.py    # MCP 서버 (원격 모니터링)
-├── atlas_main.py          # v1 레거시 엔진
-├── atlas_backtest.py      # v1 백테스트
-├── tests/                 # 단위 테스트
-├── .env.example           # 환경변수 템플릿
-└── requirements.txt       # 의존성
+ATLAS-Crypto-Trading-Bot/
+├── atlas_spot_main.py          ← 메인 봇 엔진 (라이브)
+├── atlas_spot_backtest.py      ← Walk-Forward 백테스트
+├── atlas_spot_strategies.py    ← 7개 전략 구현 (S1~S7)
+├── atlas_spot_universe.py      ← 동적 심볼 유니버스
+├── atlas_spot_config.py        ← 전략/리스크 파라미터
+├── atlas_indicators.py         ← 기술 지표 라이브러리 (공유)
+├── atlas_regime.py             ← 레짐 분류기 (공유)
+├── atlas_web_dashboard.py      ← FastAPI 대시보드 백엔드
+├── dashboard_ui.html           ← 대시보드 HTML UI
+├── atlas_mcp_server.py         ← Claude Code MCP 연동
+├── weekly_report.py            ← 주간 성과 Telegram 리포트
+├── healthcheck.sh              ← 프로세스 감시 + 자동 재시작
+├── requirements.txt
+├── .env.example
+└── tests/
+    ├── test_indicators.py
+    └── test_regime.py
 ```
 
 ---
 
-## 설치 및 실행
-
-### 1. 의존성 설치
+## 테스트
 
 ```bash
-pip install -r requirements.txt
+pytest tests/ -v
 ```
 
-### 2. 환경변수 설정
+---
 
+## 운영 가이드
+
+### 처음 시작
+1. `.env` 파일 작성 (API 키, TG 토큰, 초기 자본)
+2. `python atlas_spot_main.py` 실행
+3. `uvicorn atlas_web_dashboard:app --port 8080` 대시보드 실행
+4. crontab에 `healthcheck.sh` 등록 (`*/5 * * * *`)
+
+### 모니터링 기준
+| 지표 | 경고 | 중단 |
+|------|------|------|
+| MDD | > 15% | > 20% |
+| 승률 | < 35% | — |
+| PF | < 1.0 | — |
+
+### 수동 종료
 ```bash
-cp .env.example .env
-# .env 파일을 열어 실제 API 키 입력
+touch /tmp/ATLAS_SPOT_STOP   # Kill Switch 파일 생성 → 안전 종료
 ```
-
-`.env` 파일에 입력할 항목:
-
-```
-BINANCE_API_KEY=your_binance_api_key
-BINANCE_API_SECRET=your_binance_api_secret
-TG_TOKEN=your_telegram_bot_token
-TG_CHAT_ID=your_telegram_chat_id
-```
-
-> ⚠️ `.env` 파일은 절대 공개 저장소에 올리지 마세요.
-
-### 3. 봇 실행
-
-```bash
-python atlas_v2_main.py
-```
-
----
-
-## Telegram 명령어
-
-| 명령어 | 기능 |
-|--------|------|
-| `/status` | 현재 열린 포지션 |
-| `/stats` | 전략별 누적 통계 |
-| `/regime` | 현재 BTC 레짐 |
-| `/equity` | 현재 잔고 |
-| `/ratchet` | Ratchet 리스크 배율 |
-| `/pause` | 신규 진입 일시정지 |
-| `/resume` | 신규 진입 재개 |
-| `/stop` | Kill Switch (봇 종료) |
-
----
-
-## 백테스트 결과 (Walk-Forward OOS)
-
-| 항목 | Module A | Module B (ETH) | 합산 |
-|------|----------|----------------|------|
-| OOS 수익률 | +6.06% | 안정적 | +6.06% |
-| OOS Sharpe | 0.59 | — | 0.59 |
-| OOS MDD | 6.82% | — | 6.82% |
-| PF | 1.16 | 1.64 | — |
-
-> OOS 기간: 2024-07-01 ~ 현재  
-> Module C는 라이브 트랙레코드 수집 중
-
----
-
-## 주의사항
-
-- Binance Futures 전용 (현물 미지원)
-- API 키에 **IP 제한** 설정 권장
-- 소액($500~$2,000)으로 시작 후 트랙레코드 확인 권장
-- 과거 수익이 미래 수익을 보장하지 않습니다
-
----
-
-## License
-
-MIT License

@@ -22,10 +22,8 @@ from atlas_regime import (
     classify_regime,
     REGIME_TRENDING_UP, REGIME_TRENDING_DOWN,
     REGIME_RANGING, REGIME_WEAK_TREND, REGIME_CRISIS,
-    get_risk_scale, RegimeState,
-)
-from atlas_config import (
     REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR,
+    get_risk_scale, RegimeState,
 )
 
 

@@ -56,12 +56,12 @@ from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
-    SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT,
+    SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE,
+    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
@@ -112,13 +112,13 @@ def _get_ex() -> ccxt.binance:
     return _thread_local.ex
 
 
-# HF-1: 마지막 성공 가격 캐시 (네트워크 단절 시 SL 작동 보장)
+# 마지막 성공 가격 캐시 (네트워크 단절 시 SL 작동 보장)
 _last_known_price: dict = {}   # {ccxt_sym: (price, timestamp)}
 _PRICE_CACHE_TTL = 120         # 캐시 신뢰 최대 2분
 
 
 def _get_price(ccxt_sym: str) -> float:
-    """현재가 조회. 실패 시 최대 2분간 캐시 사용, 그 이후 0.0 반환."""
+    """현재가 조회. 실패 시 최대 2분간 캐시 사용, 이후 0.0 반환."""
     for attempt in range(3):
         try:
             ticker = _get_ex().fetch_ticker(ccxt_sym)
@@ -134,7 +134,7 @@ def _get_price(ccxt_sym: str) -> float:
     # 캐시 폴백
     cached = _last_known_price.get(ccxt_sym)
     if cached and (time.time() - cached[1]) < _PRICE_CACHE_TTL:
-        log.warning(f'[{ccxt_sym}] 캐시 가격 사용: {cached[0]} (age {time.time()-cached[1]:.0f}s)')
+        log.warning(f'[{ccxt_sym}] 캐시 가격 사용: {cached[0]:.4f} (age {time.time()-cached[1]:.0f}s)')
         return cached[0]
     return 0.0
 
@@ -296,6 +296,14 @@ def _update_position_sl(strategy: str, symbol: str, new_sl: float, peak: float):
         conn.execute(
             'UPDATE spot_positions SET sl=?, peak_price=? WHERE strategy=? AND symbol=?',
             (new_sl, peak, strategy, symbol)
+        )
+
+
+def _update_position_tp(strategy: str, symbol: str, new_tp: float):
+    with _db_lock, _db_conn() as conn:
+        conn.execute(
+            'UPDATE spot_positions SET tp=? WHERE strategy=? AND symbol=?',
+            (new_tp, strategy, symbol)
         )
 
 
@@ -463,6 +471,8 @@ def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
     usdt   = _state['usdt_balance']
     reserve = equity * SPOT_RESERVE_PCT
     available = usdt - reserve
+    if cost_usdt < SPOT_MIN_ORDER_USDT:                          # Binance NOTIONAL 필터
+        return False, f'주문금액 ${cost_usdt:.2f} < 최소 ${SPOT_MIN_ORDER_USDT:.0f} (NOTIONAL)'
     if available < SPOT_MIN_ORDER_USDT:
         return False, f'USDT 부족 (가용 ${available:.0f})'
     if cost_usdt > available:
@@ -497,7 +507,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     equity   = _state['equity']
     kelly    = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
-    r_scale  = WEAK_TREND_RISK_SCALE if regime == REGIME_WEAK_TREND else 1.0
+    if regime == REGIME_WEAK_TREND:
+        r_scale = WEAK_TREND_RISK_SCALE
+    elif regime == REGIME_TRENDING_DOWN:
+        r_scale = TRENDING_DOWN_RISK_SCALE
+    else:
+        r_scale = 1.0
     # 펀딩비/모멘텀 스케일 (strategy_timeframe_loop에서 sig에 주입)
     funding_scale = sig.pop('_funding_scale', 1.0)
     rs_scale      = sig.pop('_rs_scale', 1.0)
@@ -507,6 +522,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     tp          = sig['tp']
     sl_dist     = abs(entry_price - sl)
     if sl_dist <= 0:
+        return False
+
+    # SL 거리 상한 필터: 넓은 SL은 소형 계좌에서 최소 주문 미달 원인
+    _sl_pct = sl_dist / entry_price
+    if _sl_pct > SPOT_MAX_SL_PCT:
+        log.info(f'[{strategy}] {symbol} 매수 차단: SL거리 {_sl_pct*100:.1f}% > 상한 {SPOT_MAX_SL_PCT*100:.0f}%')
         return False
 
     adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale
@@ -541,6 +562,11 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         try:
             order = _get_ex().create_market_buy_order(ccxt_sym, qty)
             fill_price = float(order.get('average') or order.get('price') or entry_price)
+            # 실제 체결량 사용 (수수료가 base asset에서 차감될 경우 요청량보다 적을 수 있음)
+            filled_qty = float(order.get('filled') or qty)
+            if 0 < filled_qty < qty * 0.999:
+                log.info(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {filled_qty:.6f} (실체결량 기준)')
+                qty = filled_qty
         except Exception as e:
             log.error(f'[{strategy}] {symbol} 매수 주문 실패: {e}')
             _tg(f'⚠️ [{strategy}] {symbol} 매수 실패: {e}')
@@ -549,7 +575,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
     # SL 재계산 (실제 체결가 기준)
     sl_dist_actual = abs(fill_price - sl)
     sl_final = fill_price - sl_dist_actual if sl_dist_actual > 0 else sl
-    tp_final = tp
+    # TP 재계산: RR 기반 전략은 fill_price 기준으로 보정 (S5 bb_upper는 절대가격이라 제외)
+    rr = sig.get('rr', 0)
+    if strategy != 'S5' and rr > 0 and sl_dist_actual > 0:
+        tp_final = fill_price + sl_dist_actual * rr
+    else:
+        tp_final = tp
 
     _save_position(
         strategy, symbol, fill_price, sl_final, tp_final,
@@ -580,12 +611,72 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     exit_price = price
 
     if not _state['dry_run']:
+        # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
+        try:
+            _base_asset = ccxt_sym.split('/')[0]
+            _pre_bal = _get_ex().fetch_balance()
+            _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
+            if _actual_free <= 0.0:
+                _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
+                _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
+                _pnl_u = (price - entry_price) * qty
+                _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
+                _sl_d = abs(entry_price - sl)
+                _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
+                _delete_position(strategy, symbol)
+                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                           'MANUAL_SOLD', regime, entry_ts)
+                with _state_lock:
+                    _state['day_pnl'] += _pnl_u
+                return
+            elif _actual_free < qty:
+                log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
+                qty = _actual_free
+        except Exception as _be:
+            log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
         try:
             order = _get_ex().create_market_sell_order(ccxt_sym, qty)
             exit_price = float(order.get('average') or order.get('price') or price)
         except Exception as e:
+            err_str = str(e).lower()
             log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
             _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
+            # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
+            if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
+                try:
+                    _base = ccxt_sym.split('/')[0]
+                    _bal = _get_ex().fetch_balance()
+                    _actual_free = float(_bal['free'].get(_base, 0))
+                    if _actual_free < qty * 0.05:
+                        _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                        log.warning(f'[{strategy}] {symbol} 수동매도 감지(잔고={_actual_free:.4f}) → DB자동정리')
+                        _tg(f'ℹ️ [{strategy}] {symbol} 수동매도 감지 → DB 정리 완료')
+                        _delete_position(strategy, symbol)
+                        _pnl_u = (price - entry_price) * qty
+                        _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
+                        _sl_d = abs(entry_price - sl)
+                        _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
+                        _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                   _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                   'MANUAL_SOLD', regime, entry_ts)
+                        with _state_lock:
+                            _state['day_pnl'] += _pnl_u
+                        return
+                    elif _actual_free > 0:
+                        # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
+                        log.warning(f'[{strategy}] {symbol} 잔고재시도: {_actual_free:.6f} (DB={qty:.6f})')
+                        try:
+                            _retry_order = _get_ex().create_market_sell_order(ccxt_sym, _actual_free)
+                            exit_price = float(_retry_order.get('average') or _retry_order.get('price') or price)
+                            qty = _actual_free
+                            log.info(f'[{strategy}] {symbol} 잔고재시도 성공: {_actual_free:.6f}개 @ {exit_price:.4f}')
+                        except Exception as _e3:
+                            log.error(f'[{strategy}] {symbol} 잔고재시도도 실패: {_e3}')
+                            return
+                except Exception as _e2:
+                    log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
             return
 
     sl_dist   = abs(entry_price - sl)
@@ -625,11 +716,11 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
     price     = _get_price(ccxt_sym)
     entry     = float(pos['entry_price'])
 
-    # HF-1: 2분 이상 가격 조회 불가 → 긴급 청산 (SL 미작동 방지)
     if price <= 0:
+        # 가격 조회 불가 2분 초과 → 긴급 청산 (SL 미작동 방지)
         cached = _last_known_price.get(ccxt_sym)
         if cached and (time.time() - cached[1]) >= _PRICE_CACHE_TTL:
-            log.error(f'[{strategy}/{symbol}] 가격 조회 불가 {_PRICE_CACHE_TTL}초 초과 — 긴급 청산')
+            log.error(f'[{strategy}/{symbol}] 가격 조회 불가 {_PRICE_CACHE_TTL}s 초과 — 긴급 청산')
             _tg(f'🚨 [{strategy}/{symbol}] 가격 조회 불가 — 긴급 청산')
             _spot_sell(strategy, symbol, ccxt_sym, pos, entry * 0.99, 'EMERGENCY')
         return
@@ -638,20 +729,28 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
     tp        = float(pos['tp'])
     exit_type = pos.get('exit_type', 'sl_tp')
     max_hold  = int(pos.get('max_hold_bars', 0))
+    # bars_held: 실제 보유시간 기반으로 계산 후 DB에 라이트백
+    _tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
+    _hours_per_bar = 4 if _tf == '4h' else 24
+    try:
+        _entry_dt = datetime.fromisoformat(pos['entry_ts'])
+        _hold_h   = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
+        bars_held = int(_hold_h / _hours_per_bar)
+        if bars_held != int(pos.get('bars_held', 0)):
+            with _db_lock, _db_conn() as conn:
+                conn.execute('UPDATE spot_positions SET bars_held=? WHERE strategy=? AND symbol=?',
+                             (bars_held, strategy, symbol))
+    except Exception:
+        bars_held = int(pos.get('bars_held', 0))
     peak      = float(pos.get('peak_price', entry))
 
-    # HF-2: bars_held를 시간 기반으로 재계산 (카운터 미증가 버그 수정)
-    tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
-    hours_per_bar = 4 if tf == '4h' else 24
-    entry_dt = datetime.fromisoformat(pos['entry_ts'])
-    elapsed_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
-    bars_elapsed = int(elapsed_hours / hours_per_bar)
-    if bars_elapsed != int(pos.get('bars_held', 0)):
-        with _db_lock, _db_conn() as conn:
-            conn.execute(
-                'UPDATE spot_positions SET bars_held=? WHERE strategy=? AND symbol=?',
-                (bars_elapsed, strategy, symbol)
-            )
+    # S5: BB_upper를 실시간 TP로 업데이트 (DB도 갱신하여 대시보드 정확도 향상)
+    if strategy == 'S5' and df is not None and 'bb_upper' in df.columns:
+        live_bb_upper = float(df.iloc[i]['bb_upper']) if not pd.isna(df.iloc[i]['bb_upper']) else 0
+        if live_bb_upper > 0:
+            if abs(live_bb_upper - float(pos.get('tp', 0))) > 1e-8:
+                _update_position_tp(strategy, symbol, live_bb_upper)
+            tp = live_bb_upper
 
     # SL 체크
     if price <= sl:
@@ -870,7 +969,7 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
 
 
 def _position_reconcile_loop(stop_event: threading.Event) -> None:
-    """10분마다 DB ↔ 거래소 보유 코인 검증 (HF-4: 임계값 강화 + DB 자동 수정)."""
+    """10분마다 DB ↔ 거래소 보유 코인 검증 및 자동 수정."""
     while not stop_event.is_set() and not SPOT_KILL_SWITCH.exists():
         stop_event.wait(600)
         if stop_event.is_set():
@@ -889,22 +988,18 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                 db_qty   = float(pos['qty_tokens'])
 
                 if actual < 1e-8:
-                    # 완전 소진 — DB에서 포지션 삭제
+                    # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
-                    _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — DB 포지션 강제 삭제')
+                    _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
                     _delete_position(strategy, sym)
                 elif actual < db_qty * 0.90:
-                    # 10% 이상 괴리 — DB 수량 업데이트
-                    log.warning(
-                        f'[검증] {sym} DB {db_qty:.6f} vs 실제 {actual:.6f} '
-                        f'({(1-actual/db_qty)*100:.1f}% 괴리) — DB 수정'
-                    )
+                    # 10% 이상 괴리 — DB 수량 실제값으로 업데이트
+                    log.warning(f'[검증] {sym} DB {db_qty:.6f} vs 실제 {actual:.6f} '
+                                f'({(1-actual/db_qty)*100:.1f}% 괴리) — DB 수정')
                     _tg(f'⚠️ [{strategy}/{sym}] 수량 불일치: DB {db_qty:.6f} → 실제 {actual:.6f}')
                     with _db_lock, _db_conn() as conn:
-                        conn.execute(
-                            'UPDATE spot_positions SET qty_tokens=? WHERE strategy=? AND symbol=?',
-                            (actual, strategy, sym)
-                        )
+                        conn.execute('UPDATE spot_positions SET qty_tokens=? WHERE strategy=? AND symbol=?',
+                                     (actual, strategy, sym))
         except Exception as e:
             log.warning(f'[검증루프] 오류: {e}')
 
@@ -975,7 +1070,7 @@ def _handle_tg_cmd(cmd: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description='ATLAS Spot 트레이딩 봇')
     parser.add_argument('--dry-run', action='store_true', help='가상 실행 (주문 없음)')
-    parser.add_argument('--strategies', default='S2,S3,S4,S5,S6,S7',
+    parser.add_argument('--strategies', default='S3,S5,S6,S7V4',
                         help='활성 전략 (쉼표 구분)')
     args = parser.parse_args()
 

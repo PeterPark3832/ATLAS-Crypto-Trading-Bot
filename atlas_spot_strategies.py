@@ -39,7 +39,7 @@ from atlas_spot_config import (
     S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_RR_MIN, S3_RR_MAX, S3_COOLDOWN,
     S4_RSI_PERIOD, S4_RSI_ENTRY, S4_BB_PERIOD, S4_BB_SIGMA,
     S4_ATR_PERIOD, S4_ATR_SL, S4_RR, S4_MAX_HOLD,
-    S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL,
+    S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL, S5_MAX_HOLD,
     S6_ENTRY_PERIOD, S6_EXIT_PERIOD, S6_VOL_MA, S6_VOL_MULT, S6_VOL_VWAP_CONFIRM,
     S6_ATR_PERIOD, S6_ATR_SL, S6_RR, S6_RR_MIN, S6_RR_MAX,
     S7_MACD_FAST, S7_MACD_SLOW, S7_MACD_SIG, S7_EMA_TREND,
@@ -48,7 +48,7 @@ from atlas_spot_config import (
 
 # 데이터 부족 시 반환하는 신호 없음 dict
 _NO_SIGNAL = {'signal': 0, 'sl': 0.0, 'tp': 0.0, 'rr': 0.0,
-              'exit_type': 'sl_tp', 'max_hold': 0}
+              'exit_type': 'sl_tp', 'max_hold': S5_MAX_HOLD}
 
 
 def _no_sig() -> dict:
@@ -334,7 +334,7 @@ def get_signal_s5(df: pd.DataFrame, i: int) -> dict:
     rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': 0,
+        'rr': round(rr, 2), 'exit_type': 'sl_tp', 'max_hold': S5_MAX_HOLD,
     }
 
 
@@ -380,7 +380,7 @@ def get_signal_s6(df: pd.DataFrame, i: int) -> dict:
 
     entry = float(cur['close'])
     atr   = float(cur['atr'])
-    # 진입봉 이전 don_low를 SL 기준으로 사용 (진입 후 SL 이동 방지)
+    # 진입봉 이전 don_low를 SL 기준으로 사용 (진입 당일 저점으로 즉시 SL 이동 방지)
     sl    = max(float(prev['don_low']), entry - atr * S6_ATR_SL)
     if sl >= entry or sl <= 0:
         return _no_sig()
@@ -497,3 +497,111 @@ EXIT_CHECK_FUNCS = {
     'S6': check_exit_s6,
     'S7': check_exit_s7,
 }
+
+
+# ══════════════════════════════════════════════════════════════
+#  S7V4: MACD Momentum Enhanced (4H)
+#  필터: ADX≥25 + 거래량 스파이크×1.3 + MACD 히스트≥ATR×1%
+#  백테스트: PF=2.17(RANGING) / 승률57% / MDD1.4% / WF OOS PF=3.52
+# ══════════════════════════════════════════════════════════════
+import pandas as _pd_s7v4
+import numpy as _np_s7v4
+
+from atlas_spot_config import (
+    S7_MACD_FAST as _S7V4_MACD_FAST,
+    S7_MACD_SLOW as _S7V4_MACD_SLOW,
+    S7_MACD_SIG  as _S7V4_MACD_SIG,
+    S7_EMA_TREND as _S7V4_EMA_TREND,
+    S7_ATR_PERIOD as _S7V4_ATR_PERIOD,
+    S7_ATR_SL    as _S7V4_ATR_SL,
+    S7_RR        as _S7V4_RR,
+)
+
+def calc_s7v4(ohlcv: list):
+    """S7V4 지표: MACD + EMA200 + ADX + ATR + 거래량MA."""
+    df = _ohlcv_to_df(ohlcv)
+    c  = df['close']
+    ema_fast        = c.ewm(span=_S7V4_MACD_FAST, adjust=False).mean()
+    ema_slow        = c.ewm(span=_S7V4_MACD_SLOW, adjust=False).mean()
+    df['macd']      = ema_fast - ema_slow
+    df['macd_sig']  = df['macd'].ewm(span=_S7V4_MACD_SIG, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_sig']
+    df['ema_trend'] = c.ewm(span=_S7V4_EMA_TREND, adjust=False).mean()
+    df['atr']       = _calc_atr(df, _S7V4_ATR_PERIOD)
+    h, l, cp = df['high'], df['low'], c.shift(1)
+    up = h.diff(); down = -l.diff()
+    dm_p = up.where((up > down) & (up > 0), 0.0)
+    dm_m = down.where((down > up) & (down > 0), 0.0)
+    tr   = _pd_s7v4.concat([h-l, (h-cp).abs(), (l-cp).abs()], axis=1).max(axis=1)
+    _p = 14
+    tr_s  = tr.ewm(alpha=1/_p, adjust=False).mean()
+    dmp_s = dm_p.ewm(alpha=1/_p, adjust=False).mean()
+    dmm_s = dm_m.ewm(alpha=1/_p, adjust=False).mean()
+    di_p  = 100 * dmp_s / tr_s.replace(0, _np_s7v4.nan)
+    di_m  = 100 * dmm_s / tr_s.replace(0, _np_s7v4.nan)
+    dx    = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, _np_s7v4.nan)
+    df['adx']    = dx.ewm(alpha=1/_p, adjust=False).mean()
+    df['vol_ma'] = df['volume'].rolling(20).mean()
+    return df
+
+
+def get_signal_s7v4(df, i: int) -> dict:
+    """
+    S7V4 매수 신호 (강화 필터):
+      1. MACD 히스트 0선 상향돌파
+      2. 종가 > EMA200
+      3. ADX ≥ 25 (추세 강도)
+      4. 거래량 > 거래량MA × 1.3 (돌파 확인)
+      5. MACD 히스트 ≥ ATR × 1% (신호 강도)
+    """
+    warmup = _S7V4_EMA_TREND + _S7V4_MACD_SLOW + 20 + 14 + 5
+    if i < warmup:
+        return _no_sig()
+    prev = df.iloc[i - 1]
+    cur  = df.iloc[i]
+    cols = ['macd_hist', 'ema_trend', 'atr', 'adx', 'vol_ma']
+    if any(_pd_s7v4.isna(cur[c]) for c in cols) or _pd_s7v4.isna(prev['macd_hist']):
+        return _no_sig()
+
+    hist_cross  = float(prev['macd_hist']) <= 0 and float(cur['macd_hist']) > 0
+    above_trend = float(cur['close']) > float(cur['ema_trend'])
+    if not (hist_cross and above_trend):
+        return _no_sig()
+
+    adx    = float(cur['adx'])
+    vol    = float(cur['volume'])
+    vol_ma = float(cur['vol_ma'])
+    hist   = float(cur['macd_hist'])
+    atr    = float(cur['atr'])
+
+    if adx < 25:              return _no_sig()
+    if vol < vol_ma * 1.3:    return _no_sig()
+    if hist < atr * 0.01:     return _no_sig()
+
+    entry = float(cur['close'])
+    sl    = entry - atr * _S7V4_ATR_SL
+    if sl >= entry or sl <= 0:
+        return _no_sig()
+    tp = entry + (entry - sl) * _S7V4_RR
+
+    rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
+    return {
+        'signal': 1, 'sl': sl, 'tp': tp,
+        'rr': _S7V4_RR, 'exit_type': 'sl_tp', 'max_hold': 0,
+    }
+
+
+def check_exit_s7v4(df, i: int) -> bool:
+    """S7V4 추가 청산: MACD 히스토그램 음수 전환."""
+    if i < 1 or i >= len(df):
+        return False
+    cur = df.iloc[i]
+    if _pd_s7v4.isna(cur['macd_hist']):
+        return False
+    return float(cur['macd_hist']) < 0
+
+
+# S7V4 레지스트리 등록
+CALC_FUNCS['S7V4']       = calc_s7v4
+SIGNAL_FUNCS['S7V4']     = get_signal_s7v4
+EXIT_CHECK_FUNCS['S7V4'] = check_exit_s7v4

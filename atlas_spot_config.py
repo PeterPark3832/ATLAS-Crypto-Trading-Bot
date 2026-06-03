@@ -84,7 +84,8 @@ SPOT_MAX_ALLOC_PCT     = 0.15    # 단일 종목 최대 배분 15%
 SPOT_MIN_ALLOC_PCT     = 0.02    # 단일 종목 최소 배분 2%
 SPOT_RESERVE_PCT       = 0.10    # USDT 최소 예비금 10%
 SPOT_DAILY_LOSS_LIMIT  = -0.04   # 일간 손실 한도 -4%
-SPOT_MIN_ORDER_USDT    = 10.0    # 최소 주문 금액 (Binance 기준)
+SPOT_MIN_ORDER_USDT    = 5.0     # 최소 주문 금액 (Binance NOTIONAL 실제 기준 $5)
+SPOT_MAX_SL_PCT        = 0.20    # SL 거리 상한 20% (초과 시 포지션이 너무 작아 차단)
 
 # Kelly / Ratchet
 SPOT_KELLY_MIN_TRADES  = 10      # 최소 거래수 (20→10: Kelly 조기 활성화)
@@ -142,11 +143,12 @@ S4_MAX_HOLD    = 20      # 최대 보유 일수
 # S5: Bollinger Band Bounce (1D)
 # ─────────────────────────────────────────────────────────────
 S5_BB_PERIOD   = 20
-S5_BB_SIGMA    = 2.0
-S5_RSI_CONFIRM = 40      # RSI 확인 필터 (40 미만 시 과매도 확인)
+S5_BB_SIGMA    = 2.2
+S5_RSI_CONFIRM = 30      # RSI 확인 필터 (40 미만 시 과매도 확인)
 S5_ATR_PERIOD  = 14
-S5_ATR_SL      = 1.5
+S5_ATR_SL      = 1.2
 S5_EXIT_TYPE   = 'bb_upper'   # 상단밴드 터치 시 청산
+S5_MAX_HOLD    = 12      # 최대 보유 일수 (MDD 제한)
 
 # ─────────────────────────────────────────────────────────────
 # S6: Donchian Breakout (1D, 터틀 트레이딩)
@@ -226,6 +228,7 @@ STRATEGY_TIMEFRAMES = {
     'S5': '1d',
     'S6': '1d',
     'S7': '4h',
+    'S7V4': '4h',
 }
 
 STRATEGY_NAMES = {
@@ -236,16 +239,25 @@ STRATEGY_NAMES = {
     'S5': 'Bollinger Band Bounce',
     'S6': 'Donchian Breakout',
     'S7': 'MACD Momentum',
+    'S7V4': 'MACD Momentum Enhanced',
 }
 
 # 레짐별 허용 전략
+# Live 운용 (C안 최적화, 백테스트 검증):
+#   TRENDING_UP  : S6만  (S3 고점진입 제거)
+#   RANGING      : S7V4  (MACD 강화필터, PF=2.17, 승률57%)
+#   WEAK_TREND   : S3+S5+S6 (추세 형성 초기 전 전략)
+#   TRENDING_DOWN: S5+S7V4 30%scale (과매도 반등)
+# 결과: PF 1.76→1.80 / MDD 7.2% 유지 / CAGR +8.5%→+9.6% / Sharpe 2.54→2.59
+# WF: IS PF=1.12 / OOS PF=3.52 ✅
 REGIME_STRATEGY_MAP = {
-    'TRENDING_UP':   ['S2', 'S3', 'S6', 'S7'],
-    'RANGING':       ['S4', 'S5'],
-    'WEAK_TREND':    ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
-    'TRENDING_DOWN': ['S4', 'S5'],
+    'TRENDING_UP':   ['S6'],
+    'RANGING':       ['S7V4'],
+    'WEAK_TREND':    ['S3', 'S5', 'S6'],
+    'TRENDING_DOWN': ['S5', 'S7V4'],
     'CRISIS':        [],
 }
 
 # WEAK_TREND 리스크 스케일 (50% — 약추세에서 리스크 절반)
-WEAK_TREND_RISK_SCALE = 0.50
+WEAK_TREND_RISK_SCALE    = 0.50
+TRENDING_DOWN_RISK_SCALE = 0.30  # TRENDING_DOWN 구간 리스크 30% (백테스트 검증)
