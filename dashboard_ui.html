@@ -107,14 +107,15 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 
 /* ── Topbar (tablet/mobile) ── */
 .topbar{display:none;align-items:center;justify-content:space-between;
-  height:var(--th);padding:0 16px;
-  background:rgba(19,19,43,.9);border-bottom:1px solid var(--bd);
+  height:var(--th);padding:0 14px;
+  background:rgba(19,19,43,.95);border-bottom:1px solid var(--bd);
   position:sticky;top:0;z-index:100;
-  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-.topbar-left{display:flex;align-items:center;gap:10px}
-.topbar-right{display:flex;align-items:center;gap:8px}
-.btn-hamburger{color:var(--tx2);font-size:20px;padding:4px 8px}
-.topbar-logo{font-size:16px;font-weight:800;letter-spacing:-.5px}
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  overflow:hidden}
+.topbar-left{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.topbar-right{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.btn-hamburger{color:var(--tx2);font-size:20px;padding:4px 8px;flex-shrink:0}
+.topbar-logo{font-size:15px;font-weight:800;letter-spacing:-.5px;white-space:nowrap}
 .countdown{font-size:12px;color:var(--tx2);background:var(--sf2);
   padding:4px 10px;border-radius:20px;font-variant-numeric:tabular-nums;min-width:42px;text-align:center}
 .btn-icon{color:var(--tx2);background:var(--sf2);padding:6px 10px;
@@ -128,26 +129,30 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 /* ── Hero ── */
 .hero-section{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;margin-bottom:24px}
 .hero-card{background:linear-gradient(135deg,var(--hero-a) 0%,var(--hero-b) 100%);
-  border-radius:var(--r);padding:24px;position:relative;overflow:hidden;min-height:200px}
+  border-radius:var(--r);padding:22px;position:relative;overflow:hidden;min-height:200px}
 .hero-card::before{content:'';position:absolute;top:-30px;right:-30px;
   width:180px;height:180px;border-radius:50%;
   background:rgba(255,255,255,.06)}
 .hero-card::after{content:'';position:absolute;bottom:-50px;right:40px;
   width:140px;height:140px;border-radius:50%;
   background:rgba(255,255,255,.04)}
-.hero-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px}
+.hero-top{display:flex;align-items:flex-start;justify-content:space-between;
+  margin-bottom:8px;gap:8px;min-width:0}
+.hero-top-left{min-width:0;flex:1}
 .hero-label{font-size:11px;color:rgba(255,255,255,.7);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
-.hero-value{font-size:36px;font-weight:800;letter-spacing:-1.5px;color:#fff;line-height:1}
-.hero-change{font-size:13px;color:rgba(255,255,255,.85);margin-top:6px;font-weight:500}
-.hero-chart-wrap{height:70px;margin:14px -4px 0;position:relative;z-index:1}
-.hero-metas{display:flex;gap:16px;margin-top:12px}
-.hero-meta-item{font-size:11px;color:rgba(255,255,255,.65)}
-.hero-meta-val{font-size:13px;font-weight:700;color:#fff}
-.hero-badges{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.hero-value{font-size:36px;font-weight:800;letter-spacing:-1.5px;color:#fff;line-height:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hero-change{font-size:12px;color:rgba(255,255,255,.85);margin-top:6px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hero-chart-wrap{height:64px;margin:12px -4px 0;position:relative;z-index:1}
+.hero-metas{display:flex;gap:12px;margin-top:10px;flex-wrap:nowrap;overflow:hidden}
+.hero-meta-item{font-size:10px;color:rgba(255,255,255,.65);flex-shrink:0}
+.hero-meta-val{font-size:12px;font-weight:700;color:#fff;white-space:nowrap}
+.hero-badges{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
 .regime-badge{display:inline-flex;align-items:center;gap:4px;
   background:rgba(255,255,255,.15);backdrop-filter:blur(4px);
-  padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;color:#fff;
-  white-space:nowrap}
+  padding:3px 8px;border-radius:20px;font-size:10px;font-weight:600;color:#fff;
+  white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis}
 
 /* Stat cards grid (right of hero) */
 .stat-cards{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}
@@ -429,34 +434,58 @@ button:disabled{opacity:.35;cursor:not-allowed}
   .topbar{display:flex}
   .topbar .btn-hamburger{display:none}
   .bottom-nav{display:none !important}
-  .app-main{margin-left:72px;padding-top:var(--th)}
+  .app-main{margin-left:72px;padding-top:0}
+  .scroll-area{padding-top:calc(var(--th) + 20px)}
   .hero-section{grid-template-columns:1fr}
   .stat-cards{grid-template-columns:repeat(4,1fr)}
 }
 /* Mobile <768px */
 @media(max-width:767px){
-  .sidebar{transform:translateX(-100%);width:min(var(--sw),80vw)}
+  .sidebar{transform:translateX(-100%);width:min(var(--sw),82vw)}
   .sidebar.open{transform:translateX(0)}
   .sidebar-overlay.open{display:block}
   .btn-close-sb{display:flex}
   .topbar{display:flex}
   .bottom-nav{display:flex}
-  .app-main{margin-left:0;padding-bottom:var(--bh);padding-top:var(--th)}
-  .scroll-area{padding:16px}
+  .app-main{margin-left:0;padding-bottom:var(--bh);padding-top:0}
+  .scroll-area{padding:14px;padding-top:calc(var(--th) + 14px)}
   .hero-section{grid-template-columns:1fr}
   .stat-cards{grid-template-columns:repeat(2,1fr);grid-template-rows:auto}
+  .stat-card{padding:14px}
+  .stat-icon{font-size:18px;margin-bottom:6px}
+  .stat-val{font-size:20px}
   .grid-2,.grid-3-2{grid-template-columns:1fr}
   .ctrl-grid{grid-template-columns:1fr}
-  .hero-value{font-size:28px}
+  .hero-value{font-size:26px}
+  .hero-change{font-size:11px}
+  .hero-metas{gap:10px}
+  /* 모바일 topbar: 레짐 배지 숨김, 상태 라벨 숨김 → 우측 좁게 */
+  #regime-badge-wrap-mobile{display:none}
+  .status-label{display:none}
+  /* 히어로 배지: 모바일에서 줄여서 표시 */
+  .hero-badges{max-width:110px}
   .rm-timeline{padding-left:36px}
   .rm-timeline::before{left:12px}
   .rm-dot{left:-28px}
   .pos-cards{grid-template-columns:1fr}
+  .section{padding:14px}
+  .section-hdr{margin-bottom:12px}
+  .filter-bar{margin-bottom:14px}
 }
+/* 소형 모바일 <480px */
 @media(max-width:480px){
   .stat-cards{grid-template-columns:repeat(2,1fr)}
+  .stat-val{font-size:18px}
+  .stat-sub{font-size:10px}
   .period-btn{padding:5px 9px;font-size:12px}
   .filter-btn{padding:4px 7px;font-size:11px}
+  .hero-value{font-size:24px}
+  .hero-metas{gap:8px}
+  .hero-meta-val{font-size:11px}
+  .trade-item{gap:10px}
+  .trade-icon{width:36px;height:36px;border-radius:10px;font-size:14px}
+  .trade-name{font-size:12px}
+  .trade-pnl{font-size:13px}
 }
 /* Tab switching */
 .tab-content{display:none}
@@ -561,7 +590,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
         <div class="hero-section">
           <div class="hero-card" id="hero-card">
             <div class="hero-top">
-              <div>
+              <div class="hero-top-left">
                 <div class="hero-label">총 자산</div>
                 <div class="hero-value" id="hero-value">—</div>
                 <div class="hero-change" id="hero-change">—</div>
