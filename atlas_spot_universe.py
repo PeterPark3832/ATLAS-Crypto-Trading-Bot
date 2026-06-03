@@ -32,6 +32,7 @@ from atlas_spot_config import (
     UNIVERSE_MIN_VOLUME_USD, UNIVERSE_MAX_SYMBOLS,
     UNIVERSE_STABLECOIN_BASE, UNIVERSE_LEVERAGED_KEYWORDS,
     UNIVERSE_MOMENTUM_DAYS, UNIVERSE_REFRESH_HOURS,
+    UNIVERSE_STABLE_PRICE_MIN, UNIVERSE_STABLE_PRICE_MAX,
 )
 
 
@@ -47,6 +48,13 @@ def _is_excluded(base: str) -> bool:
         if kw in base:
             return True
     return False
+
+
+def _is_stable_price(price: float) -> bool:
+    """현재가가 $1 페그 범위($0.97~$1.03)이면 스테이블코인으로 간주."""
+    if price is None or price <= 0:
+        return False
+    return UNIVERSE_STABLE_PRICE_MIN <= price <= UNIVERSE_STABLE_PRICE_MAX
 
 
 def discover_universe(ex, min_volume: float = None,
@@ -75,14 +83,21 @@ def discover_universe(ex, min_volume: float = None,
         return []
 
     candidates = []
+    stable_price_skipped = 0
     for symbol, data in tickers.items():
         # USDT 페어만
         if not symbol.endswith('/USDT'):
             continue
         base = symbol.replace('/USDT', '')
 
-        # 제외 목록 확인
+        # 목록 기반 제외 (스테이블코인 / 레버리지 토큰)
         if _is_excluded(base):
+            continue
+
+        # 가격 기반 스테이블코인 자동 감지 ($0.97~$1.03)
+        last_price = data.get('last') or data.get('close') or 0
+        if _is_stable_price(float(last_price)):
+            stable_price_skipped += 1
             continue
 
         # 거래량 필터
@@ -95,6 +110,9 @@ def discover_universe(ex, min_volume: float = None,
             'base':   base,
             'volume': float(quote_vol),
         })
+
+    if stable_price_skipped:
+        print(f'  [Universe] 가격 페그 감지 → {stable_price_skipped}개 자동 제외')
 
     # 거래량 내림차순 정렬
     candidates.sort(key=lambda x: x['volume'], reverse=True)
