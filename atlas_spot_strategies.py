@@ -352,6 +352,20 @@ def calc_s6(ohlcv: list) -> pd.DataFrame:
     # VWAP 20봉 롤링 (가짜 브레이크아웃 필터용)
     pv = df['close'] * df['volume']
     df['vwap'] = pv.rolling(S6_VOL_MA).sum() / df['volume'].rolling(S6_VOL_MA).sum()
+    # ADX (동적 RR 계산용)
+    h, l, cp = df['high'], df['low'], df['close'].shift(1)
+    up = h.diff(); down = -l.diff()
+    dm_p = up.where((up > down) & (up > 0), 0.0)
+    dm_m = down.where((down > up) & (down > 0), 0.0)
+    tr   = pd.concat([h-l, (h-cp).abs(), (l-cp).abs()], axis=1).max(axis=1)
+    _p = S6_ATR_PERIOD
+    tr_s  = tr.ewm(alpha=1/_p, adjust=False).mean()
+    dmp_s = dm_p.ewm(alpha=1/_p, adjust=False).mean()
+    dmm_s = dm_m.ewm(alpha=1/_p, adjust=False).mean()
+    di_p  = 100 * dmp_s / tr_s.replace(0, float('nan'))
+    di_m  = 100 * dmm_s / tr_s.replace(0, float('nan'))
+    dx    = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, float('nan'))
+    df['adx'] = dx.ewm(alpha=1/_p, adjust=False).mean()
     return df
 
 
@@ -384,9 +398,15 @@ def get_signal_s6(df: pd.DataFrame, i: int) -> dict:
     sl    = max(float(prev['don_low']), entry - atr * S6_ATR_SL)
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = entry + atr * S6_ATR_SL * S6_RR
 
-    rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
+    # 동적 RR: ADX 강도 비례 (S6_RR_MIN~S6_RR_MAX)
+    adx_val = float(cur['adx']) if 'adx' in cur.index and not pd.isna(cur['adx']) else 0.0
+    sl_dist = entry - sl
+    ema_gap_pct = 0.0  # S6는 EMA 갭 불필요 — ADX 강도만 반영
+    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct)
+    tp = entry + sl_dist * rr_actual
+
+    rr = (tp - entry) / sl_dist if sl_dist > 0 else 0.0
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
         'rr': round(rr, 2), 'exit_type': 'sl_tp_or_don_low', 'max_hold': 0,
@@ -448,11 +468,16 @@ def get_signal_s7(df: pd.DataFrame, i: int) -> dict:
     sl    = entry - atr * S7_ATR_SL
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = entry + (entry - sl) * S7_RR
+
+    # 동적 RR: ADX 강도 비례 (S7_RR_MIN~S7_RR_MAX)
+    adx_val = float(cur['adx']) if 'adx' in cur.index and not pd.isna(cur['adx']) else 0.0
+    ema_gap_pct = abs(float(cur['close']) - float(cur['ema_trend'])) / float(cur['ema_trend']) * 100
+    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct)
+    tp = entry + (entry - sl) * rr_actual
 
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': S7_RR, 'exit_type': 'sl_tp', 'max_hold': 0,
+        'rr': round(rr_actual, 2), 'exit_type': 'sl_tp', 'max_hold': 0,
     }
 
 
@@ -582,23 +607,27 @@ def get_signal_s7v4(df, i: int) -> dict:
     sl    = entry - atr * _S7V4_ATR_SL
     if sl >= entry or sl <= 0:
         return _no_sig()
-    tp = entry + (entry - sl) * _S7V4_RR
 
-    rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0.0
+    # 동적 RR: ADX 강도 + EMA 갭 비례
+    ema_gap_pct = abs(entry - float(cur['ema_trend'])) / float(cur['ema_trend']) * 100
+    rr_actual = calc_dynamic_rr_ma(adx, ema_gap_pct)
+    tp = entry + (entry - sl) * rr_actual
+
     return {
         'signal': 1, 'sl': sl, 'tp': tp,
-        'rr': _S7V4_RR, 'exit_type': 'sl_tp', 'max_hold': 0,
+        'rr': round(rr_actual, 2), 'exit_type': 'sl_tp', 'max_hold': 0,
     }
 
 
 def check_exit_s7v4(df, i: int) -> bool:
-    """S7V4 추가 청산: MACD 히스토그램 음수 전환."""
-    if i < 1 or i >= len(df):
+    """S7V4 추가 청산: MACD 히스토그램 S7_HIST_EXIT_BARS봉 연속 음수 시 청산 (단봉 노이즈 방지)."""
+    if i < S7_HIST_EXIT_BARS or i >= len(df):
         return False
-    cur = df.iloc[i]
-    if _pd_s7v4.isna(cur['macd_hist']):
-        return False
-    return float(cur['macd_hist']) < 0
+    for k in range(S7_HIST_EXIT_BARS):
+        val = df.iloc[i - k]['macd_hist']
+        if _pd_s7v4.isna(val) or float(val) >= 0:
+            return False
+    return True
 
 
 # S7V4 레지스트리 등록
