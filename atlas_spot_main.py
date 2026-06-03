@@ -804,8 +804,8 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
         except Exception:
             pass
 
-    # 시간 기반 청산 (HF-2 수정 후 bars_elapsed 사용)
-    if max_hold > 0 and bars_elapsed >= max_hold:
+    # 시간 기반 청산
+    if max_hold > 0 and bars_held >= max_hold:
         _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'TIME')
         return
 
