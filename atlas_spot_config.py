@@ -68,12 +68,27 @@ UNIVERSE_MOMENTUM_DAYS    = 45           # 모멘텀 랭킹 기간 (90→45일: 
 
 # 스테이블코인 기초자산 제외 목록
 UNIVERSE_STABLECOIN_BASE = {
+    # USD 페그
     'USDT', 'BUSD', 'USDC', 'DAI', 'TUSD', 'USDP', 'FDUSD',
     'PYUSD', 'UST', 'LUSD', 'FRAX', 'USDD', 'SUSD', 'GUSD',
-    'HUSD', 'EURS', 'USTC', 'EUROC', 'PAXG', 'XAUT',
+    'HUSD', 'USTC', 'EUROC', 'USDX', 'USDY', 'USDM',
+    'RLUSD',           # Ripple USD (2025년 출시, $1 페그)
+    'CRVUSD',          # Curve USD
+    'CUSD',            # Celo USD
+    'USDE', 'SUSDE',   # Ethena USD
+    'FBTC', 'LBTC',    # BTC 래핑 (가격≈BTC, 변동성 제로에 가까움)
+    # 귀금속 페그
+    'PAXG', 'XAUT',
+    # EUR 페그
+    'EURS',
 }
 # 레버리지/인버스 토큰 키워드 제외
 UNIVERSE_LEVERAGED_KEYWORDS = ['3L', '3S', '2L', '2S', 'UP', 'DOWN', 'BULL', 'BEAR']
+
+# 가격 기반 스테이블코인 자동 감지 범위 ($0.97~$1.03)
+# discover_universe()에서 현재가가 이 범위 내면 자동 제외
+UNIVERSE_STABLE_PRICE_MIN = 0.97
+UNIVERSE_STABLE_PRICE_MAX = 1.03
 
 # ─────────────────────────────────────────────────────────────
 # 포트폴리오 리스크
