@@ -260,19 +260,33 @@ STRATEGY_NAMES = {
 # 레짐별 허용 전략
 # 레짐별 전략 배치 원칙:
 #   TRENDING_UP  : S6 (돌파 전용 — S3 고점 진입 제거)
-#   RANGING      : S4, S5 (평균회귀 — ADX<20 구간, 추세추종 불가)
+#   RANGING      : S5 (평균회귀 — ADX<20 구간)
 #   WEAK_TREND   : S3, S5, S6 (추세 형성 초기 혼합)
-#   TRENDING_DOWN: S4, S5 (과매도 반등 한정, 30% 리스크 스케일)
+#   TRENDING_DOWN: S7V4 only — S5 제거 (실전 10전 0승 실증, ADX35+ 하락추세에서 반등전략 무효)
 #   CRISIS       : 전면 차단
 # NOTE: S7V4는 ADX≥25 필터를 내부적으로 요구하므로 RANGING(ADX<20) 배치 불가
 REGIME_STRATEGY_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S4', 'S5'],
+    'RANGING':       ['S5'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S4', 'S5'],
+    'TRENDING_DOWN': ['S7V4'],
     'CRISIS':        [],
 }
 
 # WEAK_TREND 리스크 스케일 (50% — 약추세에서 리스크 절반)
 WEAK_TREND_RISK_SCALE    = 0.50
 TRENDING_DOWN_RISK_SCALE = 0.30  # TRENDING_DOWN 구간 리스크 30% (백테스트 검증)
+
+# ─────────────────────────────────────────────────────────────
+# S5 리스크 제어 — 전문가 회의 결론 반영 (2026-06-04)
+# ─────────────────────────────────────────────────────────────
+# SL 후 같은 종목 재진입 금지 기간 (bars = 1D 봉 단위)
+S5_SL_COOLDOWN_BARS = 2   # 2 bar = 48h. SL 직후 재진입 루프 방지
+
+# BTC 고상관 종목 — 동시 S5 포지션 1개 한도
+# (BTC 하락 시 전부 동반 하락 → 사실상 BTC 집중 베팅 방지)
+S5_BTC_CORR_SYMBOLS = frozenset({
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT',
+    'LINKUSDT', 'AVAXUSDT', 'DOTUSDT', 'BNBUSDT', 'LTCUSDT',
+})
+S5_CORR_MAX_POS = 1  # 위 그룹에서 동시 S5 최대 포지션 수

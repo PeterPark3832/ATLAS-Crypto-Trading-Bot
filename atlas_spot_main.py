@@ -66,6 +66,7 @@ from atlas_spot_config import (
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
+    S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
 )
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
@@ -899,6 +900,36 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     sig = signal_fn(df, i - 1)
                     if sig['signal'] != 1:
                         continue
+
+                    # ── S5 전용 안전 필터 (전문가 회의 결론 2026-06-04) ──────
+                    if strategy_id == 'S5':
+                        # [1] SL 쿨다운: 같은 종목 SL 후 N 바 재진입 금지
+                        with _db_lock, _db_conn() as _c:
+                            _sl_row = _c.execute(
+                                "SELECT exit_ts FROM spot_trades "
+                                "WHERE strategy='S5' AND symbol=? AND reason='SL' "
+                                "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
+                            ).fetchone()
+                        if _sl_row:
+                            _sl_h = (datetime.now(timezone.utc) -
+                                     datetime.fromisoformat(_sl_row[0])).total_seconds() / 3600
+                            _limit_h = S5_SL_COOLDOWN_BARS * 24
+                            if _sl_h < _limit_h:
+                                log.info(f'[S5] {symbol} SL쿨다운: {_sl_h:.0f}h 전 SL ({_limit_h:.0f}h 대기)')
+                                continue
+
+                        # [2] BTC 상관 그룹 동시 포지션 한도
+                        if symbol in S5_BTC_CORR_SYMBOLS:
+                            _syms = tuple(S5_BTC_CORR_SYMBOLS)
+                            with _db_lock, _db_conn() as _c:
+                                _corr_n = _c.execute(
+                                    "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
+                                    f"AND symbol IN ({','.join('?'*len(_syms))})", _syms
+                                ).fetchone()[0]
+                            if _corr_n >= S5_CORR_MAX_POS:
+                                log.info(f'[S5] {symbol} BTC상관 한도: {_corr_n}/{S5_CORR_MAX_POS}개 진입중')
+                                continue
+                    # ────────────────────────────────────────────────────────
 
                     # RS Gate: S6/S7은 모멘텀 하위 67% 심볼 진입 차단
                     if strategy_id in MOMENTUM_RS_GATE_STRATS:
