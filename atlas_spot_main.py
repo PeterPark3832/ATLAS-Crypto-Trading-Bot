@@ -876,7 +876,24 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     cur_ts = int(df.iloc[i]['ts'].timestamp())
                     if last_bar.get(key) == cur_ts:
                         continue
-                    last_bar[key] = cur_ts
+                    last_bar[key] = cur_ts  # 중복 방지 먼저 등록
+
+                    # 재시작 보호: last_bar는 메모리라 재시작 시 초기화됨
+                    # DB에서 이번 봉 이후 진입 기록 확인 → 동봉 재진입 방지
+                    with _db_lock, _db_conn() as _rc:
+                        _dupe = _rc.execute(
+                            "SELECT 1 FROM spot_positions "
+                            "WHERE strategy=? AND symbol=? "
+                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') "
+                            "UNION SELECT 1 FROM spot_trades "
+                            "WHERE strategy=? AND symbol=? "
+                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') LIMIT 1",
+                            (strategy_id, symbol, cur_ts,
+                             strategy_id, symbol, cur_ts)
+                        ).fetchone()
+                    if _dupe:
+                        log.debug(f'[{strategy_id}] {symbol} 재시작 보호: 이번 봉 이미 처리됨')
+                        continue
 
                     # 쿨다운 체크 (S3 전용)
                     if cooldowns.get(key, 0) > 0:
