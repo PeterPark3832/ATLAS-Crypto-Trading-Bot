@@ -707,22 +707,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 except Exception as _e2:
                     log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
             # NOTIONAL 미달: 가격 하락으로 포지션 가치 < $5 → Binance 거부
-            # 실매도 불가이므로 DB만 정리 (BTC 소량 잔여분 계좌에 남음)
+            # _manage_position에서 사전 차단하지만, 혹시 도달하면 DB 유지 후 반환
+            # (가격 회복 시 _manage_position이 자동으로 SL/TP 재시도)
             elif 'notional' in err_str or '-1013' in err_str:
-                _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
-                _pnl_u = (price - entry_price) * qty
-                _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                _sl_d  = abs(entry_price - sl)
-                _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
-                log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — DB 정리, 실계좌 소량 잔여')
-                _tg(f'⚠️ [{strategy}] {symbol} NOTIONAL 미달 — 매도 불가, DB 정리 완료 (소량 잔여)')
-                _delete_position(strategy, symbol)
-                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                           'NOTIONAL_DUST', regime, entry_ts)
-                with _state_lock:
-                    _state['day_pnl'] += _pnl_u
-                return
+                log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — 포지션 유지, 가격 회복 대기')
+                return  # DB 유지 (삭제하지 않음)
             return
 
     sl_dist   = abs(entry_price - sl)
@@ -800,6 +789,12 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
 
     # SL 체크
     if price <= sl:
+        # NOTIONAL 사전 검사: 포지션 가치 < $5이면 Binance가 주문 거부
+        # → 매도 시도하지 않고 DB 유지, 가격 회복 시 자동 매도
+        _pos_val = price * float(pos.get('qty_tokens', 0))
+        if _pos_val < SPOT_MIN_ORDER_USDT:
+            log.info(f'[{strategy}] {symbol} SL 감지 → NOTIONAL 미달(${_pos_val:.2f}) — 가격 회복 대기')
+            return  # 포지션 DB 유지, 다음 폴링에서 재검사
         _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'SL')
         return
 
