@@ -706,6 +706,23 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                             return
                 except Exception as _e2:
                     log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
+            # NOTIONAL 미달: 가격 하락으로 포지션 가치 < $5 → Binance 거부
+            # 실매도 불가이므로 DB만 정리 (BTC 소량 잔여분 계좌에 남음)
+            elif 'notional' in err_str or '-1013' in err_str:
+                _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                _pnl_u = (price - entry_price) * qty
+                _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
+                _sl_d  = abs(entry_price - sl)
+                _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
+                log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — DB 정리, 실계좌 소량 잔여')
+                _tg(f'⚠️ [{strategy}] {symbol} NOTIONAL 미달 — 매도 불가, DB 정리 완료 (소량 잔여)')
+                _delete_position(strategy, symbol)
+                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                           'NOTIONAL_DUST', regime, entry_ts)
+                with _state_lock:
+                    _state['day_pnl'] += _pnl_u
+                return
             return
 
     sl_dist   = abs(entry_price - sl)
