@@ -172,15 +172,6 @@ def _get_slippage(symbol: str) -> float:
     return BT_SLIPPAGE_BY_TIER['tier3']
 
 
-def _get_slippage(symbol: str) -> float:
-    """심볼별 슬리피지 티어 반환 (백테스트 비용 현실화)."""
-    if symbol in BT_TIER1_SYMBOLS:
-        return BT_SLIPPAGE_BY_TIER['tier1']
-    if symbol in BT_TIER2_SYMBOLS:
-        return BT_SLIPPAGE_BY_TIER['tier2']
-    return BT_SLIPPAGE_BY_TIER['tier3']
-
-
 # ══════════════════════════════════════════════════════════════
 #  데이터 로드 (스팟 전용)
 # ══════════════════════════════════════════════════════════════
