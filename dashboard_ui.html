@@ -81,6 +81,8 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 .nav-item.active{background:linear-gradient(135deg,rgba(91,138,240,.18),rgba(110,53,177,.12));
   color:var(--blue);font-weight:600}
 .nav-item.active .nav-icon{color:var(--blue)}
+.ico{width:1em;height:1em;display:inline-block;vertical-align:-.18em;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ico-fill{fill:currentColor;stroke:none}
 .nav-icon{font-size:17px;width:22px;text-align:center;flex-shrink:0}
 .nav-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar-ftr{padding:16px;border-top:1px solid var(--bd)}
@@ -424,8 +426,8 @@ button:disabled{opacity:.35;cursor:not-allowed}
 @media(min-width:768px) and (max-width:1023px){
   :root{--sw:72px}
   .sidebar{transform:none !important;width:72px}
-  .nav-label,.logo-sub,.sidebar-ftr{display:none !important}
-  .logo-mark{font-size:18px}
+  .nav-label,.logo-sub,.logo-text,.sidebar-ftr{display:none !important}
+  .logo-mark{font-size:22px}
   .sidebar-hdr{padding:16px 0;justify-content:center}
   .btn-close-sb{display:none !important}
   .nav-item{justify-content:center;padding:12px 0}
@@ -501,7 +503,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
 <!-- Login -->
 <div id="login-overlay">
   <div class="login-box">
-    <div class="login-logo">⚡</div>
+    <div class="login-logo">🌐</div>
     <h1>ATLAS Spot</h1>
     <p>대시보드 접속 비밀번호를 입력하세요</p>
     <input type="password" id="pw-input" placeholder="비밀번호" onkeydown="if(event.key==='Enter')doLogin()">
@@ -517,29 +519,29 @@ button:disabled{opacity:.35;cursor:not-allowed}
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-hdr">
       <div>
-        <div class="logo-mark">⚡ ATLAS</div>
+        <div class="logo-mark">🌐<span class="logo-text"> ATLAS</span></div>
         <div class="logo-sub">SPOT BOT</div>
       </div>
       <button class="btn-close-sb" onclick="closeSidebar()">✕</button>
     </div>
     <nav class="sidebar-nav">
       <div class="nav-item active" onclick="switchTab('overview',this)" data-tab="overview">
-        <span class="nav-icon">📊</span><span class="nav-label">Overview</span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="11" width="3" height="6" rx="1"/><rect x="8.5" y="7" width="3" height="10" rx="1"/><rect x="14" y="3" width="3" height="14" rx="1"/></svg></span><span class="nav-label">Overview</span>
       </div>
       <div class="nav-item" onclick="switchTab('positions',this)" data-tab="positions">
-        <span class="nav-icon">💼</span><span class="nav-label">포지션 <span id="tab-pos-cnt"></span></span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="7" width="14" height="9" rx="1.5"/><path d="M7 7V5.5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 13 5.5V7"/><line x1="3" y1="11.5" x2="17" y2="11.5"/></svg></span><span class="nav-label">포지션 <span id="tab-pos-cnt"></span></span>
       </div>
       <div class="nav-item" onclick="switchTab('analysis',this)" data-tab="analysis">
-        <span class="nav-icon">📈</span><span class="nav-label">분석</span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><polyline points="3,14 8,9 11,12 17,5"/><polyline points="13,5 17,5 17,9"/></svg></span><span class="nav-label">분석</span>
       </div>
       <div class="nav-item" onclick="switchTab('trades',this)" data-tab="trades">
-        <span class="nav-icon">📋</span><span class="nav-label">거래 내역</span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="4" y="3" width="12" height="14" rx="1.5"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="11" y2="13"/></svg></span><span class="nav-label">거래 내역</span>
       </div>
       <div class="nav-item" onclick="switchTab('roadmap',this)" data-tab="roadmap">
-        <span class="nav-icon">🗺</span><span class="nav-label">로드맵</span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><path d="M10 17s-6-5.2-6-9a6 6 0 0 1 12 0c0 3.8-6 9-6 9z"/><circle cx="10" cy="8" r="2"/></svg></span><span class="nav-label">로드맵</span>
       </div>
       <div class="nav-item" onclick="switchTab('control',this)" data-tab="control">
-        <span class="nav-icon">⚙</span><span class="nav-label">제어</span>
+        <span class="nav-icon"><svg class="ico" viewBox="0 0 20 20"><line x1="4" y1="6" x2="16" y2="6"/><circle cx="12" cy="6" r="1.7"/><line x1="4" y1="10" x2="16" y2="10"/><circle cx="8" cy="10" r="1.7"/><line x1="4" y1="14" x2="16" y2="14"/><circle cx="13" cy="14" r="1.7"/></svg></span><span class="nav-label">제어</span>
       </div>
     </nav>
     <div class="sidebar-ftr">
@@ -566,7 +568,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
     <header class="topbar">
       <div class="topbar-left">
         <button class="btn-hamburger" onclick="openSidebar()">☰</button>
-        <div class="topbar-logo">⚡ ATLAS</div>
+        <div class="topbar-logo">🌐 ATLAS</div>
       </div>
       <div class="topbar-right">
         <div id="regime-badge-wrap-mobile"></div>
@@ -624,25 +626,25 @@ button:disabled{opacity:.35;cursor:not-allowed}
           </div>
           <div class="stat-cards">
             <div class="stat-card">
-              <span class="stat-icon">💰</span>
+              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="6" width="14" height="10" rx="2"/><line x1="3" y1="9.3" x2="17" y2="9.3"/><circle class="ico-fill" cx="14" cy="13" r="1.2"/></svg></span>
               <div class="stat-label">총 PnL</div>
               <div class="stat-val" id="k-pnl">—</div>
               <div class="stat-sub" id="k-equity">자산 —</div>
             </div>
             <div class="stat-card">
-              <span class="stat-icon">🎯</span>
+              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="3.5"/><circle class="ico-fill" cx="10" cy="10" r="1"/></svg></span>
               <div class="stat-label">승률</div>
               <div class="stat-val" id="k-wr">—</div>
               <div class="stat-sub" id="k-wl">— W / — L</div>
             </div>
             <div class="stat-card">
-              <span class="stat-icon">⚖</span>
+              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><line x1="10" y1="3" x2="10" y2="17"/><line x1="4" y1="6" x2="16" y2="6"/><path d="M4 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/><path d="M16 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/></svg></span>
               <div class="stat-label">Profit Factor</div>
               <div class="stat-val" id="k-pf">—</div>
               <div class="stat-sub" id="k-avgr">avg R —</div>
             </div>
             <div class="stat-card">
-              <span class="stat-icon">📉</span>
+              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><polyline points="3,6 8,11 11,8 17,15"/><polyline points="13,15 17,15 17,11"/></svg></span>
               <div class="stat-label">MDD</div>
               <div class="stat-val" id="k-mdd">—</div>
               <div class="stat-sub" id="k-sharpe">Sharpe —</div>
@@ -897,19 +899,19 @@ button:disabled{opacity:.35;cursor:not-allowed}
   <!-- Bottom nav (mobile) -->
   <nav class="bottom-nav">
     <div class="bnav-item active" data-tab="overview" onclick="switchTab('overview',this)">
-      <span class="bnav-icon">📊</span><span>Overview</span>
+      <span class="bnav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="11" width="3" height="6" rx="1"/><rect x="8.5" y="7" width="3" height="10" rx="1"/><rect x="14" y="3" width="3" height="14" rx="1"/></svg></span><span>Overview</span>
     </div>
     <div class="bnav-item" data-tab="positions" onclick="switchTab('positions',this)">
-      <span class="bnav-icon">💼</span><span>포지션</span>
+      <span class="bnav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="7" width="14" height="9" rx="1.5"/><path d="M7 7V5.5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 13 5.5V7"/><line x1="3" y1="11.5" x2="17" y2="11.5"/></svg></span><span>포지션</span>
     </div>
     <div class="bnav-item" onclick="manualRefresh()">
       <div class="bnav-fab">↻</div>
     </div>
     <div class="bnav-item" data-tab="trades" onclick="switchTab('trades',this)">
-      <span class="bnav-icon">📋</span><span>거래</span>
+      <span class="bnav-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="4" y="3" width="12" height="14" rx="1.5"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="11" y2="13"/></svg></span><span>거래</span>
     </div>
     <div class="bnav-item" data-tab="control" onclick="switchTab('control',this)">
-      <span class="bnav-icon">⚙</span><span>제어</span>
+      <span class="bnav-icon"><svg class="ico" viewBox="0 0 20 20"><line x1="4" y1="6" x2="16" y2="6"/><circle cx="12" cy="6" r="1.7"/><line x1="4" y1="10" x2="16" y2="10"/><circle cx="8" cy="10" r="1.7"/><line x1="4" y1="14" x2="16" y2="14"/><circle cx="13" cy="14" r="1.7"/></svg></span><span>제어</span>
     </div>
   </nav>
 
