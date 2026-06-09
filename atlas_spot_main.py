@@ -12,11 +12,11 @@ ATLAS Spot — 라이브 트레이딩 엔진
   ├─ tg_cmd_loop ─────────── Telegram 명령 수신
   └─ strategy_loop × N ───── 4H/1D 타임프레임별 통합 루프
 
-[전략별 레짐 라우팅]
-  TRENDING_UP  : S2(SMA Cross), S3(EMA Trend), S6(Donchian), S7(MACD)
-  RANGING      : S4(RSI MR), S5(BB Bounce)
-  WEAK_TREND   : 전체 (70% 리스크)
-  TRENDING_DOWN: S4, S5만 허용 (하락추세 반등)
+[전략별 레짐 라우팅] (REGIME_STRATEGY_MAP 기준)
+  TRENDING_UP  : S6(Donchian)
+  RANGING      : S5(BB Bounce)
+  WEAK_TREND   : S3, S5, S6 (50% 리스크)
+  TRENDING_DOWN: S7V4(MACD) — S5 하락장 0승 이력으로 차단, 30% 리스크
   CRISIS       : 전면 차단
 
 [스팟 특화]
