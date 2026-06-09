@@ -975,6 +975,7 @@ let eqChart=null,dailyChart=null,modChart=null,wrChart=null,ddChart=null,heroCha
 let refreshTimer=null,countdownTimer=null,countdownVal=60;
 let allTrades=[];
 let logFilter='ALL',logInterval=null,posRefreshInterval=null;
+let _isFirstLoad=true;
 
 // ── Auth ──────────────────────────────────────────────────────
 async function doLogin(){
@@ -1094,6 +1095,7 @@ function render(d){
   renderMonthlyHeatmap(d.monthly_pnl||[]);
   updateControlPanel(d.bot_alive,d.log_time);
   allTrades=d.recent||[];
+  _isFirstLoad=false;
 }
 
 // ── Bot status ────────────────────────────────────────────────
@@ -1160,7 +1162,7 @@ function renderHero(m,actualBal,initialCap,eqCurve){
   const pnlC=m.total_pnl>=0?'pos':'neg';
   const ev=document.getElementById('hero-value');
   const ec=document.getElementById('hero-change');
-  if(ev)ev.textContent=`$${equity.toFixed(2)}`;
+  if(ev) countUpFmt('hero-value',equity,v=>`$${v.toFixed(2)}`);
   if(ec){
     ec.textContent=`${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
     ec.style.color=m.total_pnl>=0?'rgba(255,255,255,.9)':'rgba(255,160,160,.9)';
@@ -1197,19 +1199,21 @@ function renderStatCards(m,actualBal,initialCap){
   const equity=(actualBal!=null&&actualBal>0)?actualBal:m.equity;
   // PnL
   const pnlC=m.total_pnl>=0?'pos':'neg';
-  setText('k-pnl',`${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)}`,pnlC,'stat-val');
+  {const el=document.getElementById('k-pnl');if(el){el.className='stat-val'+(pnlC?' '+pnlC:'');countUpFmt('k-pnl',m.total_pnl,v=>`${v>=0?'+':''}$${Math.abs(v).toFixed(2)}`);}}
   setText('k-equity',`총자산 $${equity.toFixed(2)}`,'','stat-sub');
   // WR
   const wrC=m.total===0?'':(m.wr>=40?'pos':m.wr>=33?'':'neg');
-  setText('k-wr',m.total===0?'N/A':`${m.wr.toFixed(0)}%`,wrC,'stat-val');
+  if(m.total===0){setText('k-wr','N/A',wrC,'stat-val');}
+  else{const el=document.getElementById('k-wr');if(el){el.className='stat-val'+(wrC?' '+wrC:'');countUpFmt('k-wr',m.wr,v=>`${v.toFixed(0)}%`);}}
   setText('k-wl',`${m.wins}W / ${m.total-m.wins}L`,'','stat-sub');
   // PF
   const pfC=m.total===0?'':(m.pf>=1.2?'pos':m.pf>=1.0?'':'neg');
-  setText('k-pf',m.total===0?'N/A':(m.pf>0?m.pf.toFixed(2):'—'),pfC,'stat-val');
+  if(m.total===0||!(m.pf>0)){setText('k-pf',m.total===0?'N/A':'—',pfC,'stat-val');}
+  else{const el=document.getElementById('k-pf');if(el){el.className='stat-val'+(pfC?' '+pfC:'');countUpFmt('k-pf',m.pf,v=>v.toFixed(2));}}
   setText('k-avgr',`avg R ${m.avg_r>=0?'+':''}${m.avg_r.toFixed(3)}`,'','stat-sub');
   // MDD
   const mddC=m.mdd_pct>10?'neg':m.mdd_pct>5?'':'pos';
-  setText('k-mdd',`${m.mdd_pct.toFixed(1)}%`,mddC,'stat-val');
+  {const el=document.getElementById('k-mdd');if(el){el.className='stat-val'+(mddC?' '+mddC:'');countUpFmt('k-mdd',m.mdd_pct,v=>`${v.toFixed(1)}%`);}}
   setText('k-sharpe',`Sharpe ${m.sharpe.toFixed(2)}`,'','stat-sub');
   // eq badge
   const retPct=initialCap>0?(equity-initialCap)/initialCap*100:0;
@@ -1221,15 +1225,34 @@ function setText(id,val,cls,base){
   el.textContent=val;
   if(base){el.className=base+(cls?' '+cls:'');}
 }
+function countUpFmt(elId,end,fmt){
+  const el=document.getElementById(elId);
+  if(!el)return;
+  const dur=_isFirstLoad?1100:500;
+  const raw=el.textContent.replace(/[^0-9.\-]/g,'');
+  const start=_isFirstLoad?0:(parseFloat(raw)||0);
+  if(Math.abs(start-end)<0.0001){el.textContent=fmt(end);return;}
+  const t0=performance.now();
+  function frame(t){
+    const p=Math.min((t-t0)/dur,1);
+    const ease=1-Math.pow(1-p,4);
+    el.textContent=fmt(start+(end-start)*ease);
+    if(p<1)requestAnimationFrame(frame);
+    else el.textContent=fmt(end);
+  }
+  requestAnimationFrame(frame);
+}
 
 // ── Charts (dark theme) ───────────────────────────────────────
 const DARK={
   plugins:{legend:{display:false},
-    tooltip:{backgroundColor:'#1A1A38',titleColor:'rgba(238,238,255,.5)',bodyColor:'#eeeeff',
-      borderColor:'rgba(255,255,255,.08)',borderWidth:.5,padding:10,cornerRadius:10,displayColors:false}},
-  scales:{x:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(238,238,255,.3)',font:{size:10},maxTicksLimit:8}},
-          y:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(238,238,255,.3)',font:{size:10}}}},
-  responsive:true,maintainAspectRatio:false,animation:{duration:300}
+    tooltip:{backgroundColor:'rgba(18,18,24,.95)',titleColor:'rgba(255,255,255,.45)',bodyColor:'rgba(255,255,255,.88)',
+      borderColor:'rgba(255,255,255,.12)',borderWidth:1,padding:12,cornerRadius:12,displayColors:false,
+      titleFont:{size:11,family:'Inter,system-ui,sans-serif'},
+      bodyFont:{size:13,family:'Inter,system-ui,sans-serif',weight:'600'}}},
+  scales:{x:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.25)',font:{size:10,family:'Inter,system-ui,sans-serif'},maxTicksLimit:8}},
+          y:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.25)',font:{size:10,family:'Inter,system-ui,sans-serif'}}}},
+  responsive:true,maintainAspectRatio:false,animation:{duration:700,easing:'easeInOutQuart'}
 };
 
 function renderEqChart(data){
@@ -1278,7 +1301,7 @@ function renderWRChart(data){
   const grad=ctx.createLinearGradient(0,0,0,200);
   grad.addColorStop(0,'rgba(91,138,240,.22)');grad.addColorStop(1,'rgba(91,138,240,0)');
   wrChart=new Chart(ctx,{type:'line',data:{labels:data.map((_,i)=>i+1),datasets:[
-    {data:vals,borderColor:'#5B8AF0',borderWidth:2,fill:true,backgroundColor:grad,pointRadius:3,tension:0.4},
+    {data:vals,borderColor:'#5B8AF0',borderWidth:2,fill:true,backgroundColor:grad,pointRadius:0,pointHoverRadius:5,tension:0.4},
     {data:Array(vals.length).fill(33.3),borderColor:'rgba(240,90,110,.35)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
     {data:Array(vals.length).fill(40),borderColor:'rgba(46,200,138,.35)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
   ]},options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{
