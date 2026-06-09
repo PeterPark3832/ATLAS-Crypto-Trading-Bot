@@ -227,6 +227,32 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 .chart-wrap{position:relative}
 .h240{height:240px}.h200{height:200px}.h180{height:180px}
 
+/* ── Bento Grid ── */
+.bento{display:grid;gap:12px;margin-bottom:16px;
+  grid-template-columns:2.5fr 2.5fr 2fr 2fr;
+  grid-template-rows:150px 150px 220px;
+  grid-template-areas:
+    "eq    eq    pnl   wr  "
+    "eq    eq    pf    mdd "
+    "daily daily risk  risk";}
+.bento>.section{margin-bottom:0}
+.bento-eq{grid-area:eq;display:flex;flex-direction:column;padding:18px}
+.bento-daily{grid-area:daily;display:flex;flex-direction:column;padding:18px}
+.bento-risk{grid-area:risk}
+.bento-pnl{grid-area:pnl}.bento-wr-st{grid-area:wr}
+.bento-pf{grid-area:pf}.bento-mdd{grid-area:mdd}
+.bento .section-hdr{margin-bottom:8px}
+.bento-eq .chart-fill,.bento-daily .chart-fill{flex:1;min-height:0;position:relative}
+.bento .stat-card{padding:18px;justify-content:flex-end;gap:3px}
+.bento .stat-icon{position:absolute;top:14px;right:14px;margin:0;opacity:.14;font-size:0}
+.bento .stat-icon svg{width:24px;height:24px}
+.bento .stat-label{font-size:10px;margin-bottom:5px}
+.bento .stat-val{font-size:24px}
+.bento-pnl::before  {background:linear-gradient(90deg,var(--green) 0%,transparent 70%)}
+.bento-wr-st::before{background:linear-gradient(90deg,var(--blue) 0%,transparent 70%)}
+.bento-pf::before   {background:linear-gradient(90deg,var(--yellow) 0%,transparent 70%)}
+.bento-mdd::before  {background:linear-gradient(90deg,var(--red) 0%,transparent 70%)}
+
 /* ── Tables ── */
 .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse}
@@ -479,6 +505,16 @@ button:disabled{opacity:.35;cursor:not-allowed}
   .hero-section{grid-template-columns:1fr}
   .stat-cards{grid-template-columns:repeat(4,1fr)}
 }
+@media(max-width:1023px){
+  .bento{
+    grid-template-columns:3fr 2fr 2fr;
+    grid-template-rows:130px 130px 200px 190px;
+    grid-template-areas:
+      "eq   pnl  wr"
+      "eq   pf   mdd"
+      "daily daily daily"
+      "risk  risk  risk";}
+}
 @media(max-width:767px){
   .sidebar{transform:translateX(-100%);width:min(var(--sw),82vw)}
   .sidebar.open{transform:translateX(0)}
@@ -493,6 +529,17 @@ button:disabled{opacity:.35;cursor:not-allowed}
   .stat-card{padding:13px}
   .stat-val{font-size:20px}
   .grid-2,.grid-3-2{grid-template-columns:1fr}
+  .bento{
+    grid-template-columns:1fr 1fr;
+    grid-template-rows:110px 110px auto auto auto;
+    grid-template-areas:
+      "pnl  wr"
+      "pf   mdd"
+      "eq   eq"
+      "daily daily"
+      "risk  risk";}
+  .bento-eq{min-height:210px}.bento-daily{min-height:170px}.bento-risk{min-height:185px}
+  .bento .stat-val{font-size:20px}.bento .stat-card{padding:14px}
   .ctrl-grid{grid-template-columns:1fr}
   .hero-value{font-size:28px}
   .hero-change{font-size:11px}
@@ -658,32 +705,6 @@ button:disabled{opacity:.35;cursor:not-allowed}
               </div>
             </div>
           </div>
-          <div class="stat-cards">
-            <div class="stat-card">
-              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="6" width="14" height="10" rx="2"/><line x1="3" y1="9.3" x2="17" y2="9.3"/><circle class="ico-fill" cx="14" cy="13" r="1.2"/></svg></span>
-              <div class="stat-label">총 PnL</div>
-              <div class="stat-val" id="k-pnl">—</div>
-              <div class="stat-sub" id="k-equity">자산 —</div>
-            </div>
-            <div class="stat-card">
-              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="3.5"/><circle class="ico-fill" cx="10" cy="10" r="1"/></svg></span>
-              <div class="stat-label">승률</div>
-              <div class="stat-val" id="k-wr">—</div>
-              <div class="stat-sub" id="k-wl">— W / — L</div>
-            </div>
-            <div class="stat-card">
-              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><line x1="10" y1="3" x2="10" y2="17"/><line x1="4" y1="6" x2="16" y2="6"/><path d="M4 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/><path d="M16 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/></svg></span>
-              <div class="stat-label">Profit Factor</div>
-              <div class="stat-val" id="k-pf">—</div>
-              <div class="stat-sub" id="k-avgr">avg R —</div>
-            </div>
-            <div class="stat-card">
-              <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><polyline points="3,6 8,11 11,8 17,15"/><polyline points="13,15 17,15 17,11"/></svg></span>
-              <div class="stat-label">MDD</div>
-              <div class="stat-val" id="k-mdd">—</div>
-              <div class="stat-sub" id="k-sharpe">Sharpe —</div>
-            </div>
-          </div>
         </div>
 
         <!-- Period filter -->
@@ -702,28 +723,50 @@ button:disabled{opacity:.35;cursor:not-allowed}
 
       <!-- Tab panels -->
       <div id="tab-overview" class="tab-content active">
-        <div class="grid-3-2">
-          <div class="section">
+        <div class="bento">
+          <!-- ① 수익 곡선 — large tile (2col×2row) -->
+          <div class="section bento-eq">
             <div class="section-hdr">
               <span class="section-title">수익 곡선</span>
               <span class="section-badge" id="eq-badge">—</span>
             </div>
-            <div class="chart-wrap h240"><canvas id="eq-chart"></canvas></div>
+            <div class="chart-fill"><canvas id="eq-chart"></canvas></div>
           </div>
-          <div class="section">
+          <!-- ② 총 PnL -->
+          <div class="stat-card bento-pnl">
+            <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><rect x="3" y="6" width="14" height="10" rx="2"/><line x1="3" y1="9.3" x2="17" y2="9.3"/><circle class="ico-fill" cx="14" cy="13" r="1.2"/></svg></span>
+            <div class="stat-label">총 PnL</div>
+            <div class="stat-val" id="k-pnl">—</div>
+            <div class="stat-sub" id="k-equity">자산 —</div>
+          </div>
+          <!-- ③ 승률 -->
+          <div class="stat-card bento-wr-st">
+            <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="3.5"/><circle class="ico-fill" cx="10" cy="10" r="1"/></svg></span>
+            <div class="stat-label">승률</div>
+            <div class="stat-val" id="k-wr">—</div>
+            <div class="stat-sub" id="k-wl">— W / — L</div>
+          </div>
+          <!-- ④ Profit Factor -->
+          <div class="stat-card bento-pf">
+            <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><line x1="10" y1="3" x2="10" y2="17"/><line x1="4" y1="6" x2="16" y2="6"/><path d="M4 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/><path d="M16 6 l-2.4 5.2a2.4 2.4 0 0 0 4.8 0z"/></svg></span>
+            <div class="stat-label">Profit Factor</div>
+            <div class="stat-val" id="k-pf">—</div>
+            <div class="stat-sub" id="k-avgr">avg R —</div>
+          </div>
+          <!-- ⑤ MDD -->
+          <div class="stat-card bento-mdd">
+            <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><polyline points="3,6 8,11 11,8 17,15"/><polyline points="13,15 17,15 17,11"/></svg></span>
+            <div class="stat-label">MDD</div>
+            <div class="stat-val" id="k-mdd">—</div>
+            <div class="stat-sub" id="k-sharpe">Sharpe —</div>
+          </div>
+          <!-- ⑥ 일별 PnL -->
+          <div class="section bento-daily">
             <div class="section-hdr"><span class="section-title">일별 PnL (30일)</span></div>
-            <div class="chart-wrap h240"><canvas id="daily-chart"></canvas></div>
+            <div class="chart-fill"><canvas id="daily-chart"></canvas></div>
           </div>
-        </div>
-        <div class="grid-3-2">
-          <div class="section">
-            <div class="section-hdr">
-              <span class="section-title">Rolling 승률 (10건)</span>
-              <span class="section-badge" style="color:var(--tx2)">이동 평균</span>
-            </div>
-            <div class="chart-wrap h200"><canvas id="wr-chart"></canvas></div>
-          </div>
-          <div class="section">
+          <!-- ⑦ 리스크 상태 -->
+          <div class="section bento-risk">
             <div class="section-hdr"><span class="section-title">리스크 상태</span></div>
             <div class="risk-card" id="risk-card">
               <div>
@@ -765,6 +808,13 @@ button:disabled{opacity:.35;cursor:not-allowed}
 
       <!-- Analysis -->
       <div id="tab-analysis" class="tab-content">
+        <div class="section" style="margin-bottom:14px">
+          <div class="section-hdr">
+            <span class="section-title">Rolling 승률 (10건)</span>
+            <span class="section-badge" style="color:var(--tx2)">이동 평균</span>
+          </div>
+          <div class="chart-wrap h200"><canvas id="wr-chart"></canvas></div>
+        </div>
         <div class="grid-2">
           <div class="section">
             <div class="section-hdr"><span class="section-title">모듈별 성과</span></div>
@@ -1262,7 +1312,8 @@ function renderEqChart(data){
   const vals=data.map(d=>d.eq);
   const color=vals[vals.length-1]>=134?'#2EC88A':'#F05A6E';
   const labels=data.map(d=>{if(!d.ts)return'';const dt=new Date(d.ts);return`${dt.getMonth()+1}/${dt.getDate()}`;});
-  const grad=document.getElementById('eq-chart').getContext('2d').createLinearGradient(0,0,0,240);
+  const h=document.getElementById('eq-chart').closest('.chart-fill')?.clientHeight||300;
+  const grad=ctx.createLinearGradient(0,0,0,h);
   grad.addColorStop(0,color+'28');grad.addColorStop(1,color+'00');
   eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{data:vals,borderColor:color,borderWidth:2,
     fill:true,backgroundColor:grad,
