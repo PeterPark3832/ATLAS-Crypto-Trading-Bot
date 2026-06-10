@@ -12,11 +12,11 @@ ATLAS Spot — 라이브 트레이딩 엔진
   ├─ tg_cmd_loop ─────────── Telegram 명령 수신
   └─ strategy_loop × N ───── 4H/1D 타임프레임별 통합 루프
 
-[전략별 레짐 라우팅]
-  TRENDING_UP  : S2(SMA Cross), S3(EMA Trend), S6(Donchian), S7(MACD)
-  RANGING      : S4(RSI MR), S5(BB Bounce)
-  WEAK_TREND   : 전체 (70% 리스크)
-  TRENDING_DOWN: S4, S5만 허용 (하락추세 반등)
+[전략별 레짐 라우팅] (REGIME_STRATEGY_MAP 기준)
+  TRENDING_UP  : S6(Donchian)
+  RANGING      : S5(BB Bounce)
+  WEAK_TREND   : S3, S5, S6 (50% 리스크)
+  TRENDING_DOWN: S7V4(MACD) — S5 하락장 0승 이력으로 차단, 30% 리스크
   CRISIS       : 전면 차단
 
 [스팟 특화]
@@ -66,6 +66,7 @@ from atlas_spot_config import (
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
+    S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
 )
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
@@ -705,6 +706,12 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                             return
                 except Exception as _e2:
                     log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
+            # NOTIONAL 미달: 가격 하락으로 포지션 가치 < $5 → Binance 거부
+            # _manage_position에서 사전 차단하지만, 혹시 도달하면 DB 유지 후 반환
+            # (가격 회복 시 _manage_position이 자동으로 SL/TP 재시도)
+            elif 'notional' in err_str or '-1013' in err_str:
+                log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — 포지션 유지, 가격 회복 대기')
+                return  # DB 유지 (삭제하지 않음)
             return
 
     sl_dist   = abs(entry_price - sl)
@@ -782,6 +789,12 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
 
     # SL 체크
     if price <= sl:
+        # NOTIONAL 사전 검사: 포지션 가치 < $5이면 Binance가 주문 거부
+        # → 매도 시도하지 않고 DB 유지, 가격 회복 시 자동 매도
+        _pos_val = price * float(pos.get('qty_tokens', 0))
+        if _pos_val < SPOT_MIN_ORDER_USDT:
+            log.info(f'[{strategy}] {symbol} SL 감지 → NOTIONAL 미달(${_pos_val:.2f}) — 가격 회복 대기')
+            return  # 포지션 DB 유지, 다음 폴링에서 재검사
         _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'SL')
         return
 
@@ -875,7 +888,24 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     cur_ts = int(df.iloc[i]['ts'].timestamp())
                     if last_bar.get(key) == cur_ts:
                         continue
-                    last_bar[key] = cur_ts
+                    last_bar[key] = cur_ts  # 중복 방지 먼저 등록
+
+                    # 재시작 보호: last_bar는 메모리라 재시작 시 초기화됨
+                    # DB에서 이번 봉 이후 진입 기록 확인 → 동봉 재진입 방지
+                    with _db_lock, _db_conn() as _rc:
+                        _dupe = _rc.execute(
+                            "SELECT 1 FROM spot_positions "
+                            "WHERE strategy=? AND symbol=? "
+                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') "
+                            "UNION SELECT 1 FROM spot_trades "
+                            "WHERE strategy=? AND symbol=? "
+                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') LIMIT 1",
+                            (strategy_id, symbol, cur_ts,
+                             strategy_id, symbol, cur_ts)
+                        ).fetchone()
+                    if _dupe:
+                        log.debug(f'[{strategy_id}] {symbol} 재시작 보호: 이번 봉 이미 처리됨')
+                        continue
 
                     # 쿨다운 체크 (S3 전용)
                     if cooldowns.get(key, 0) > 0:
@@ -899,6 +929,36 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     sig = signal_fn(df, i - 1)
                     if sig['signal'] != 1:
                         continue
+
+                    # ── S5 전용 안전 필터 (전문가 회의 결론 2026-06-04) ──────
+                    if strategy_id == 'S5':
+                        # [1] SL 쿨다운: 같은 종목 SL 후 N 바 재진입 금지
+                        with _db_lock, _db_conn() as _c:
+                            _sl_row = _c.execute(
+                                "SELECT exit_ts FROM spot_trades "
+                                "WHERE strategy='S5' AND symbol=? AND reason='SL' "
+                                "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
+                            ).fetchone()
+                        if _sl_row:
+                            _sl_h = (datetime.now(timezone.utc) -
+                                     datetime.fromisoformat(_sl_row[0])).total_seconds() / 3600
+                            _limit_h = S5_SL_COOLDOWN_BARS * 24
+                            if _sl_h < _limit_h:
+                                log.info(f'[S5] {symbol} SL쿨다운: {_sl_h:.0f}h 전 SL ({_limit_h:.0f}h 대기)')
+                                continue
+
+                        # [2] BTC 상관 그룹 동시 포지션 한도
+                        if symbol in S5_BTC_CORR_SYMBOLS:
+                            _syms = tuple(S5_BTC_CORR_SYMBOLS)
+                            with _db_lock, _db_conn() as _c:
+                                _corr_n = _c.execute(
+                                    "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
+                                    f"AND symbol IN ({','.join('?'*len(_syms))})", _syms
+                                ).fetchone()[0]
+                            if _corr_n >= S5_CORR_MAX_POS:
+                                log.info(f'[S5] {symbol} BTC상관 한도: {_corr_n}/{S5_CORR_MAX_POS}개 진입중')
+                                continue
+                    # ────────────────────────────────────────────────────────
 
                     # RS Gate: S6/S7은 모멘텀 하위 67% 심볼 진입 차단
                     if strategy_id in MOMENTUM_RS_GATE_STRATS:
