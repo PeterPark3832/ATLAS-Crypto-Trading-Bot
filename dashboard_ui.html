@@ -1214,7 +1214,7 @@ function renderHero(m,actualBal,initialCap,eqCurve){
   const ec=document.getElementById('hero-change');
   if(ev) countUpFmt('hero-value',equity,v=>`$${v.toFixed(2)}`);
   if(ec){
-    ec.textContent=`${m.total_pnl>=0?'+':''}$${m.total_pnl.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
+    ec.textContent=`${m.total_pnl>=0?'+':'-'}$${Math.abs(m.total_pnl).toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
     ec.style.color=m.total_pnl>=0?'rgba(255,255,255,.9)':'rgba(255,160,160,.9)';
   }
   // mini stats
@@ -1249,7 +1249,8 @@ function renderStatCards(m,actualBal,initialCap){
   const equity=(actualBal!=null&&actualBal>0)?actualBal:m.equity;
   // PnL
   const pnlC=m.total_pnl>=0?'pos':'neg';
-  {const el=document.getElementById('k-pnl');if(el){el.className='stat-val'+(pnlC?' '+pnlC:'');countUpFmt('k-pnl',m.total_pnl,v=>`${v>=0?'+':''}$${Math.abs(v).toFixed(2)}`);}}
+  {const el=document.getElementById('k-pnl');if(el){el.className='stat-val'+(pnlC?' '+pnlC:'');countUpFmt('k-pnl',m.total_pnl,v=>`${v>=0?'+':'-'}$${Math.abs(v).toFixed(2)}`);}}
+
   setText('k-equity',`총자산 $${equity.toFixed(2)}`,'','stat-sub');
   // WR
   const wrC=m.total===0?'':(m.wr>=40?'pos':m.wr>=33?'':'neg');
@@ -1322,7 +1323,7 @@ function renderEqChart(data){
     pointHoverRadius:5,tension:0.35}]},
     options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{
       title:items=>labels[items[0].dataIndex],
-      label:ctx=>{const pt=data[ctx.dataIndex];return[`잔고: $${ctx.parsed.y.toFixed(2)}`,pt.reason?`${pt.reason}: ${pt.pnl>=0?'+':''}$${pt.pnl.toFixed(2)}`:null].filter(Boolean);}
+      label:ctx=>{const pt=data[ctx.dataIndex];return[`잔고: $${ctx.parsed.y.toFixed(2)}`,pt.reason?`${pt.reason}: ${pt.pnl>=0?'+':'-'}$${Math.abs(pt.pnl).toFixed(2)}`:null].filter(Boolean);}
     }}},scales:{...DARK.scales,y:{...DARK.scales.y,ticks:{...DARK.scales.y.ticks,callback:v=>`$${v.toFixed(0)}`}}}}});
 }
 
@@ -1384,7 +1385,7 @@ function renderModuleTable(stats){
       <td class="td-bold">${s.module}</td><td>${s.trades}</td>
       <td class="${s.wr>=40?'pos':s.wr>=33?'':'neg'}">${s.wr}%</td>
       <td class="${s.pf>=1.2?'pos':s.pf>=1.0?'neutral':'neg'}">${s.pf||'—'}</td>
-      <td class="${s.pnl>=0?'pos':'neg'} td-bold">${s.pnl>=0?'+':''}$${s.pnl.toFixed(2)}</td>
+      <td class="${s.pnl>=0?'pos':'neg'} td-bold">${s.pnl>=0?'+':'-'}$${Math.abs(s.pnl).toFixed(2)}</td>
       <td class="${s.avg_r>=0?'pos':'neg'}">${s.avg_r>=0?'+':''}${s.avg_r.toFixed(3)}</td>
       <td>${s.reliable?'<span class="ok-txt">✓</span>':'<span class="warn-txt">⚠</span>'}</td>
     </tr>`).join('')}</tbody></table></div>`;
@@ -1397,7 +1398,7 @@ function renderSymDirTable(data){
     <tbody>${data.map(r=>`<tr>
       <td class="td-bold">${r.symbol}</td><td>${r.trades}</td>
       <td class="${r.wr>=40?'pos':r.wr>=33?'':'neg'}">${r.wr}%</td>
-      <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
+      <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':'-'}$${Math.abs(r.pnl).toFixed(2)}</td>
       <td class="${r.avg_r>=0?'pos':'neg'}">${r.avg_r>=0?'+':''}${r.avg_r.toFixed(3)}</td>
       <td class="${r.best>=0?'pos':'neg'}">${r.best>=0?'+':'-'}$${Math.abs(r.best).toFixed(2)}</td>
       <td class="${r.worst>=0?'pos':'neg'}">${r.worst>=0?'+':'-'}$${Math.abs(r.worst).toFixed(2)}</td>
@@ -1430,7 +1431,7 @@ async function renderPositionsCards(pos){
           <div class="pos-sym">${p.symbol.replace('USDT','')}</div>
           <div class="pos-strat">${p.strategy}</div>
         </div>
-        <div class="pos-upnl ${upnlC}">${cur>0?`${upnl>=0?'+':''}$${upnl.toFixed(2)}`:'—'}</div>
+        <div class="pos-upnl ${upnlC}">${cur>0?`${upnl>=0?'+':'-'}$${Math.abs(upnl).toFixed(2)}`:'—'}</div>
       </div>
       <div class="pos-row"><span class="pos-row-label">진입가</span><span class="pos-row-val">$${p.entry.toLocaleString()}</span></div>
       <div class="pos-row"><span class="pos-row-label">현재가</span><span class="pos-row-val pos-cur" data-sym="${p.symbol}" data-entry="${p.entry}" data-qty="${p.qty}">${cur>0?'$'+cur.toLocaleString():'—'}</span></div>
@@ -1459,7 +1460,7 @@ function renderTradesList(trades){
         <div class="trade-meta">${t.ts} · ${t.reason} · ${t.regime||'—'}</div>
       </div>
       <div class="trade-right">
-        <div class="trade-pnl ${win?'pos':'neg'}">${t.pnl>=0?'+':''}$${t.pnl.toFixed(2)}</div>
+        <div class="trade-pnl ${win?'pos':'neg'}">${t.pnl>=0?'+':'-'}$${Math.abs(t.pnl).toFixed(2)}</div>
         <div class="trade-r">${t.r>=0?'+':''}${t.r.toFixed(2)}R</div>
       </div>
     </div>`;
@@ -1475,7 +1476,7 @@ function renderMonthlyHeatmap(data){
     const bg=m.pnl>=0?'rgba(46,200,138,.08)':'rgba(240,90,110,.08)';
     return`<div class="hm-cell" style="background:${bg}">
       <div class="hm-month">${m.month}</div>
-      <div class="hm-pnl" style="color:${c}">${m.pnl>=0?'+':''}$${m.pnl.toFixed(1)}</div>
+      <div class="hm-pnl" style="color:${c}">${m.pnl>=0?'+':'-'}$${Math.abs(m.pnl).toFixed(1)}</div>
       <div class="hm-meta">${m.trades}건 · ${m.wr}%</div>
     </div>`;
   }).join('');
@@ -1571,7 +1572,7 @@ async function refreshPosPrices(){
         const upnlEl=node.closest('.pos-card')?.querySelector('.pos-upnl');
         if(upnlEl){
           const v=(cur-entry)*qty;
-          upnlEl.textContent=`${v>=0?'+':''}$${v.toFixed(2)}`;
+          upnlEl.textContent=`${v>=0?'+':'-'}$${Math.abs(v).toFixed(2)}`;
           upnlEl.className=`pos-upnl td-bold ${v>=0?'pos':'neg'}`;
         }
       }
