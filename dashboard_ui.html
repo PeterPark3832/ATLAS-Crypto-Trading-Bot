@@ -1176,9 +1176,10 @@ function renderBotStatus(alive,logTime){
 function renderAlerts(alerts){
   const wrap=document.getElementById('alert-wrap');
   if(!alerts.length){wrap.innerHTML='';return;}
-  wrap.innerHTML=alerts.map(a=>
-    `<div class="alert ${a.level}">${a.level==='critical'?'🚨':'⚠️'} ${a.msg}</div>`
-  ).join('');
+  wrap.innerHTML=alerts.map(a=>{
+    const lvl=a.level==='critical'?'critical':a.level==='warn'?'warn':'warn';
+    return`<div class="alert ${lvl}">${lvl==='critical'?'🚨':'⚠️'} ${_esc(a.msg)}</div>`;
+  }).join('');
 }
 
 // ── Regime badge ──────────────────────────────────────────────
@@ -1190,7 +1191,7 @@ const RC={
   CRISIS:['#9B7FE8','🟣 CRISIS'],
 };
 function renderRegimeBadge(r){
-  const [c,l]=RC[r]||['#636366',`⚪ ${r}`];
+  const [c,l]=RC[r]||['#636366',`⚪ ${_esc(r)}`];
   const html=`<span class="regime-badge" style="background:${c}22;color:${c}">${l}</span>`;
   ['regime-badge-wrap','regime-badge-wrap-mobile'].forEach(id=>{
     const el=document.getElementById(id);
@@ -1382,7 +1383,7 @@ function renderModuleTable(stats){
   if(!stats||!stats.length){el.innerHTML='<div class="empty">데이터 없음</div>';return;}
   el.innerHTML=`<div class="tbl-wrap"><table><thead><tr><th>모듈</th><th>거래</th><th>승률</th><th>PF</th><th>총PnL</th><th>avgR</th><th></th></tr></thead>
     <tbody>${stats.map(s=>`<tr>
-      <td class="td-bold">${s.module}</td><td>${s.trades}</td>
+      <td class="td-bold">${_esc(s.module)}</td><td>${s.trades}</td>
       <td class="${s.wr>=40?'pos':s.wr>=33?'':'neg'}">${s.wr}%</td>
       <td class="${s.pf>=1.2?'pos':s.pf>=1.0?'neutral':'neg'}">${s.pf||'—'}</td>
       <td class="${s.pnl>=0?'pos':'neg'} td-bold">${s.pnl>=0?'+':'-'}$${Math.abs(s.pnl).toFixed(2)}</td>
@@ -1396,7 +1397,7 @@ function renderSymDirTable(data){
   if(!data||!data.length){el.innerHTML='<div class="empty">데이터 없음</div>';return;}
   el.innerHTML=`<div class="tbl-wrap"><table><thead><tr><th>심볼</th><th>거래</th><th>승률</th><th>총PnL</th><th>avgR</th><th>최대수익</th><th>최대손실</th></tr></thead>
     <tbody>${data.map(r=>`<tr>
-      <td class="td-bold">${r.symbol}</td><td>${r.trades}</td>
+      <td class="td-bold">${_esc(r.symbol)}</td><td>${r.trades}</td>
       <td class="${r.wr>=40?'pos':r.wr>=33?'':'neg'}">${r.wr}%</td>
       <td class="${r.pnl>=0?'pos':'neg'} td-bold">${r.pnl>=0?'+':'-'}$${Math.abs(r.pnl).toFixed(2)}</td>
       <td class="${r.avg_r>=0?'pos':'neg'}">${r.avg_r>=0?'+':''}${r.avg_r.toFixed(3)}</td>
@@ -1428,16 +1429,16 @@ async function renderPositionsCards(pos){
     return`<div class="pos-card">
       <div class="pos-card-hdr">
         <div>
-          <div class="pos-sym">${p.symbol.replace('USDT','')}</div>
-          <div class="pos-strat">${p.strategy}</div>
+          <div class="pos-sym">${_esc(p.symbol.replace('USDT',''))}</div>
+          <div class="pos-strat">${_esc(p.strategy)}</div>
         </div>
         <div class="pos-upnl ${upnlC}">${cur>0?`${upnl>=0?'+':'-'}$${Math.abs(upnl).toFixed(2)}`:'—'}</div>
       </div>
       <div class="pos-row"><span class="pos-row-label">진입가</span><span class="pos-row-val">$${p.entry.toLocaleString()}</span></div>
-      <div class="pos-row"><span class="pos-row-label">현재가</span><span class="pos-row-val pos-cur" data-sym="${p.symbol}" data-entry="${p.entry}" data-qty="${p.qty}">${cur>0?'$'+cur.toLocaleString():'—'}</span></div>
+      <div class="pos-row"><span class="pos-row-label">현재가</span><span class="pos-row-val pos-cur" data-sym="${_esc(p.symbol)}" data-entry="${p.entry}" data-qty="${p.qty}">${cur>0?'$'+cur.toLocaleString():'—'}</span></div>
       <div class="pos-row"><span class="pos-row-label">SL</span><span class="pos-row-val neg">$${p.sl.toLocaleString()} <span style="color:var(--tx3);font-size:10px">(${slDist.toFixed(1)}%)</span></span></div>
       <div class="pos-row"><span class="pos-row-label">TP</span><span class="pos-row-val pos">$${p.tp.toLocaleString()} <span style="color:var(--tx3);font-size:10px">(${tpDist.toFixed(1)}%)</span></span></div>
-      <div class="pos-row"><span class="pos-row-label">보유</span><span class="pos-row-val">${p.hold}</span></div>
+      <div class="pos-row"><span class="pos-row-label">보유</span><span class="pos-row-val">${_esc(p.hold)}</span></div>
       <div class="pos-row"><span class="pos-row-label">비용</span><span class="pos-row-val">$${p.cost_usdt.toFixed(2)}</span></div>
       <div class="pos-bar-wrap"><div class="pos-bar" style="width:${barPct.toFixed(1)}%"></div></div>
     </div>`;
@@ -1456,8 +1457,8 @@ function renderTradesList(trades){
     return`<div class="trade-item">
       <div class="trade-icon ${win?'win':'loss'}">${reasonEmoji[t.reason]||'📊'}</div>
       <div class="trade-info">
-        <div class="trade-name">${t.symbol.replace('USDT','')} <span style="font-size:11px;color:var(--tx3);font-weight:400">${t.strategy}</span></div>
-        <div class="trade-meta">${t.ts} · ${t.reason} · ${t.regime||'—'}</div>
+        <div class="trade-name">${_esc(t.symbol.replace('USDT',''))} <span style="font-size:11px;color:var(--tx3);font-weight:400">${_esc(t.strategy)}</span></div>
+        <div class="trade-meta">${_esc(t.ts)} · ${_esc(t.reason)} · ${_esc(t.regime||'—')}</div>
       </div>
       <div class="trade-right">
         <div class="trade-pnl ${win?'pos':'neg'}">${t.pnl>=0?'+':'-'}$${Math.abs(t.pnl).toFixed(2)}</div>
@@ -1475,7 +1476,7 @@ function renderMonthlyHeatmap(data){
     const c=m.pnl>=0?'var(--green)':'var(--red)';
     const bg=m.pnl>=0?'rgba(46,200,138,.08)':'rgba(240,90,110,.08)';
     return`<div class="hm-cell" style="background:${bg}">
-      <div class="hm-month">${m.month}</div>
+      <div class="hm-month">${_esc(m.month)}</div>
       <div class="hm-pnl" style="color:${c}">${m.pnl>=0?'+':'-'}$${Math.abs(m.pnl).toFixed(1)}</div>
       <div class="hm-meta">${m.trades}건 · ${m.wr}%</div>
     </div>`;
@@ -1498,7 +1499,7 @@ function renderRiskCard(ratchet,kelly){
   kEl.innerHTML=kelly.slice(0,6).map(k=>{
     const hkC=k.half_k>3?'var(--green)':k.half_k>0?'var(--yellow)':'var(--red)';
     return`<div class="kelly-row">
-      <span class="kelly-strat">${k.strategy}</span>
+      <span class="kelly-strat">${_esc(k.strategy)}</span>
       <div class="kelly-stats">
         <span style="color:var(--tx2)">${k.trades}건</span>
         <span style="color:var(--tx2)">${k.wr}%</span>
@@ -1550,7 +1551,7 @@ async function executePanic(){
   try{
     const res=await fetch('/api/panic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,confirm:'PANIC'})});
     const d=await res.json();
-    if(d.ok){logEl.innerHTML=d.results.map(r=>`• ${r}`).join('<br>');setTimeout(()=>loadDashboard(),3000);}
+    if(d.ok){logEl.innerHTML=d.results.map(r=>`• ${_esc(r)}`).join('<br>');setTimeout(()=>loadDashboard(),3000);}
     else logEl.textContent=`오류: ${d.detail||'알 수 없는 오류'}`;
   }catch(e){logEl.textContent=`네트워크 오류: ${e.message}`;}
 }
@@ -1598,7 +1599,7 @@ function _logClass(line){
   if(/스킵|쿨다운/.test(line))return'skip';
   return'';
 }
-function _esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function _esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 async function loadLogs(){
   const filter=encodeURIComponent(LOG_FILTER_MAP[logFilter]||'');
   try{

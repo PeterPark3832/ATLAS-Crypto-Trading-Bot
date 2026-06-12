@@ -20,7 +20,7 @@ LOG_FILE        = Path(__file__).parent / 'logs'  / 'spot_main.log'
 LOG_DIR         = Path(__file__).parent / 'logs'
 BOT_DIR         = Path(__file__).parent
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
-DASH_PASSWORD   = os.getenv('DASH_PASSWORD', 'atlas2026')
+DASH_PASSWORD   = os.getenv('DASH_PASSWORD') or secrets.token_urlsafe(16)
 REFRESH_SEC     = int(os.getenv('DASH_REFRESH_SEC', '60'))
 API_KEY         = os.getenv('BINANCE_API_KEY', '')
 API_SECRET      = os.getenv('BINANCE_API_SECRET', '')
@@ -513,6 +513,9 @@ async def trades_csv(token: str, period: int = 0):
     df = _trades(period if period > 0 else 9999)
     if df.empty:
         return StreamingResponse(iter(['no data']), media_type='text/plain')
+    _fml = ('=', '+', '-', '@', '\t', '\r', '\n')
+    for col in df.select_dtypes(include='object').columns:
+        df[col] = df[col].apply(lambda v: ("'" + v) if isinstance(v, str) and v and v[0] in _fml else v)
     buf = io.StringIO(); df.to_csv(buf, index=False, encoding='utf-8-sig'); buf.seek(0)
     fname = f'spot_trades_{datetime.now().strftime("%Y%m%d")}.csv'
     return StreamingResponse(iter([buf.getvalue()]), media_type='text/csv; charset=utf-8-sig',
