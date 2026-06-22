@@ -165,6 +165,30 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
   white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;
   border:1px solid rgba(255,255,255,.16)}
 
+/* ── 봇 상태 브리핑 ── */
+.briefing{display:flex;gap:13px;align-items:flex-start;
+  background:var(--glass);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+  border:1px solid var(--bd);border-left:3px solid var(--tx3);
+  border-radius:14px;padding:15px 17px;margin-bottom:16px}
+.briefing.tone-active{border-left-color:var(--green)}
+.briefing.tone-warn{border-left-color:var(--yellow)}
+.briefing.tone-danger{border-left-color:var(--red)}
+.briefing.tone-neutral{border-left-color:var(--blue)}
+.briefing-dot{width:9px;height:9px;border-radius:50%;background:var(--tx3);margin-top:5px;flex-shrink:0;
+  box-shadow:0 0 0 0 currentColor}
+.briefing.tone-active .briefing-dot{background:var(--green);animation:bpulse 2s infinite}
+.briefing.tone-warn .briefing-dot{background:var(--yellow)}
+.briefing.tone-danger .briefing-dot{background:var(--red);animation:bpulse 1.2s infinite}
+.briefing.tone-neutral .briefing-dot{background:var(--blue)}
+@keyframes bpulse{0%{box-shadow:0 0 0 0 rgba(46,200,138,.5)}70%{box-shadow:0 0 0 7px rgba(46,200,138,0)}100%{box-shadow:0 0 0 0 rgba(46,200,138,0)}}
+.briefing-body{flex:1;min-width:0}
+.briefing-head{font-size:14px;font-weight:700;color:var(--tx);letter-spacing:-.2px}
+.briefing-detail{font-size:11.5px;color:var(--tx2);margin-top:2px}
+.briefing-reason{font-size:12.5px;color:var(--tx);margin-top:8px;line-height:1.5}
+.briefing-foot{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:9px;align-items:center}
+.briefing-strats{font-size:10.5px;color:var(--tx2);font-weight:600}
+.briefing-mx{font-size:10.5px;color:var(--tx3);font-family:ui-monospace,monospace}
+
 /* ── Stat cards ── */
 .stat-cards{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}
 .stat-card{background:var(--glass);
@@ -669,6 +693,19 @@ button:disabled{opacity:.35;cursor:not-allowed}
 
       <!-- Hero (always visible on overview, hidden on other tabs) -->
       <div id="hero-wrap">
+        <!-- 봇 상태 브리핑 -->
+        <div class="briefing" id="briefing-card" style="display:none">
+          <div class="briefing-dot" id="briefing-dot"></div>
+          <div class="briefing-body">
+            <div class="briefing-head" id="briefing-head">—</div>
+            <div class="briefing-detail" id="briefing-detail">—</div>
+            <div class="briefing-reason" id="briefing-reason">—</div>
+            <div class="briefing-foot">
+              <span class="briefing-strats" id="briefing-strats"></span>
+              <span class="briefing-mx" id="briefing-mx"></span>
+            </div>
+          </div>
+        </div>
         <!-- Hero card + stat cards -->
         <div class="hero-section">
           <div class="hero-card" id="hero-card">
@@ -1129,6 +1166,7 @@ function render(d){
   renderBotStatus(d.bot_alive,d.log_time);
   renderAlerts(d.alerts||[]);
   renderRegimeBadge(d.regime);
+  renderBriefing(d.briefing);
   renderStreakBadge(d.streak);
   renderHero(m,d.actual_balance,d.initial_capital||134,d.eq_curve||[]);
   renderStatCards(m,d.actual_balance,d.initial_capital||134);
@@ -1198,6 +1236,29 @@ function renderRegimeBadge(r){
     if(el)el.innerHTML=html;
   });
 }
+function renderBriefing(b){
+  const card=document.getElementById('briefing-card');
+  if(!card)return;
+  if(!b){card.style.display='none';return;}
+  card.style.display='flex';
+  card.className='briefing tone-'+(b.tone||'neutral');
+  setTextRaw('briefing-head',b.headline||'—');
+  setTextRaw('briefing-detail',b.detail||'');
+  setTextRaw('briefing-reason',b.reason||'');
+  // 활성 전략
+  const strats=(b.active_strats&&b.active_strats.length)
+    ? '활성 전략 · '+b.active_strats.join(' / ')
+    : '활성 전략 없음';
+  setTextRaw('briefing-strats',strats);
+  // 지표 한 줄 (ADX/EMA갭)
+  const mx=b.metrics||{}; const parts=[];
+  if(mx.adx_1d!=null)parts.push(`ADX(1D) ${mx.adx_1d.toFixed(0)}`);
+  if(mx.adx_4h!=null)parts.push(`ADX(4H) ${mx.adx_4h.toFixed(0)}`);
+  if(mx.atr_pct!=null)parts.push(`ATR ${mx.atr_pct.toFixed(1)}%`);
+  if(b.ema_gap!=null)parts.push(`BTC vs EMA200 ${b.ema_gap>=0?'+':''}${b.ema_gap.toFixed(1)}%`);
+  setTextRaw('briefing-mx',parts.join('  ·  '));
+}
+function setTextRaw(id,v){const el=document.getElementById(id);if(el)el.textContent=v;}
 function renderStreakBadge(s){
   const el=document.getElementById('streak-badge-wrap');
   if(!el)return;

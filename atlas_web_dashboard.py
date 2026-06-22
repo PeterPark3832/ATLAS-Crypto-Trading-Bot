@@ -289,6 +289,124 @@ def _regime_from_log() -> str:
         log.error(f'regime_from_log 실패: {e}')
     return None
 
+
+# 레짐별 활성 전략 (atlas_spot_config.REGIME_STRATEGY_MAP 미러 — 변경 시 동기화)
+_REGIME_STRAT_MAP = {
+    'TRENDING_UP':   ['S6'],
+    'RANGING':       ['S5'],
+    'WEAK_TREND':    ['S3', 'S5', 'S6'],
+    'TRENDING_DOWN': ['S7V4'],
+    'CRISIS':        [],
+}
+_STRAT_FULL = {
+    'S3': 'EMA 추세추종', 'S4': 'RSI 평균회귀', 'S5': 'BB 밴드반등',
+    'S6': 'Donchian 돌파', 'S7': 'MACD 모멘텀', 'S7V4': 'MACD 모멘텀(강화)',
+}
+# 레짐 한글명 + 한 줄 성격 설명
+_REGIME_DESC = {
+    'TRENDING_UP':   ('상승 추세',   'BTC가 EMA200 위 + 강한 추세 — 돌파 전략으로 신고가 코인 추격'),
+    'TRENDING_DOWN': ('하락 추세',   'BTC가 EMA200 아래 + 강한 추세 — 신규 진입에 보수적'),
+    'RANGING':       ('박스권 횡보', '추세 약함(ADX 낮음) — 박스 하단 반등만 제한적으로 노림'),
+    'WEAK_TREND':    ('약한 추세',   '추세 방향 모호 — 추세·반등 전략 혼합 운용'),
+    'CRISIS':        ('변동성 위기', 'ATR 급등 — 모든 신규 진입 차단, 자본 방어 모드'),
+}
+
+
+def _parse_regime_metrics() -> dict:
+    """최근 RegimeLoop 로그 블록에서 ADX/BTC/EMA200/ATR% 파싱."""
+    out = {'adx_1d': None, 'adx_4h': None, 'atr_pct': None,
+           'btc': None, 'ema200': None}
+    try:
+        if not LOG_FILE.exists():
+            return out
+        import re
+        text = LOG_FILE.read_text(encoding='utf-8', errors='ignore')
+        # 가장 마지막 매치 사용 (최신 갱신)
+        m_adx = list(re.finditer(r'ADX\(1D\)=([\d.]+).*?ADX\(4H\)=([\d.]+).*?ATR%=([\d.]+)', text))
+        m_btc = list(re.finditer(r'BTC=([\d,]+)\s+EMA200=([\d,]+)', text))
+        if m_adx:
+            g = m_adx[-1]
+            out['adx_1d']  = float(g.group(1))
+            out['adx_4h']  = float(g.group(2))
+            out['atr_pct'] = float(g.group(3))
+        if m_btc:
+            g = m_btc[-1]
+            out['btc']    = float(g.group(1).replace(',', ''))
+            out['ema200'] = float(g.group(2).replace(',', ''))
+    except Exception as e:
+        log.error(f'parse_regime_metrics 실패: {e}')
+    return out
+
+
+def _regime_briefing(regime: str, bot_alive: bool, open_pos_cnt: int) -> dict:
+    """현재 봇 상태를 사람이 읽기 쉬운 브리핑으로 생성."""
+    if not regime or regime not in _REGIME_DESC:
+        return {'headline': '레짐 판별 대기 중',
+                'detail': '봇이 BTC 레짐을 아직 계산하지 않았습니다.',
+                'reason': '', 'active_strats': [], 'metrics': {}, 'tone': 'neutral'}
+
+    kor, character = _REGIME_DESC[regime]
+    strats = _REGIME_STRAT_MAP.get(regime, [])
+    strat_names = [f'{s}({_STRAT_FULL.get(s, s)})' for s in strats]
+    mx = _parse_regime_metrics()
+
+    # EMA200 대비 BTC 위치(%)
+    ema_gap = None
+    if mx['btc'] and mx['ema200']:
+        ema_gap = (mx['btc'] - mx['ema200']) / mx['ema200'] * 100
+
+    # "왜 지금 진입/대기인가" 판단
+    tone = 'neutral'
+    if not bot_alive:
+        reason = '⚠️ 봇 프로세스가 중단된 상태 — 신규 진입 불가. 즉시 점검 필요.'
+        tone = 'danger'
+    elif open_pos_cnt > 0:
+        reason = f'현재 {open_pos_cnt}개 포지션 보유 중. 활성 전략의 진입 신호를 계속 감시합니다.'
+        tone = 'active'
+    elif regime == 'CRISIS':
+        atr_s = f"{mx['atr_pct']:.1f}%" if mx['atr_pct'] else '높음'
+        reason = f'변동성 위기(ATR {atr_s})로 모든 전략 진입이 차단된 상태입니다. 시장 안정 시 자동 해제됩니다.'
+        tone = 'danger'
+    elif not strats:
+        reason = '이 레짐에 배정된 전략이 없어 신규 진입이 없습니다.'
+        tone = 'warn'
+    elif regime == 'TRENDING_DOWN':
+        adx4 = mx['adx_4h']
+        if adx4 is not None and adx4 < 25:
+            reason = (f'하락 추세에서 유일한 활성 전략 S7V4는 4H ADX≥25가 필요한데, '
+                      f'현재 4H ADX={adx4:.0f}로 미달입니다. 추세가 다시 강해지거나 '
+                      f'개별 코인이 진입 조건을 만족할 때까지 대기합니다.')
+        else:
+            reason = ('하락 추세 — S7V4 전략이 진입 조건(MACD 전환 + EMA200 상회)을 '
+                      '만족하는 코인을 감시 중입니다. 보수적으로 운용됩니다.')
+        tone = 'warn'
+    else:
+        reason = (f'활성 전략({", ".join(strats)})이 진입 조건을 만족하는 코인을 감시 중입니다. '
+                  f'아직 신호가 없어 현금 보유 상태입니다.')
+        tone = 'active'
+
+    # 헤드라인
+    if not bot_alive:
+        headline = '봇 중단됨 — 점검 필요'
+    elif open_pos_cnt > 0:
+        headline = f'{kor} · 포지션 {open_pos_cnt}개 운용 중'
+    elif not strats or regime == 'CRISIS':
+        headline = f'{kor} · 신규 진입 차단'
+    else:
+        headline = f'{kor} · 진입 신호 대기 중'
+
+    return {
+        'headline': headline,
+        'detail': character,
+        'reason': reason,
+        'active_strats': strat_names,
+        'regime_kor': kor,
+        'ema_gap': round(ema_gap, 1) if ema_gap is not None else None,
+        'metrics': mx,
+        'tone': tone,
+    }
+
+
 def _alerts(m: dict, bot_alive: bool) -> list:
     alerts = []
     if not bot_alive:
@@ -476,8 +594,11 @@ async def dashboard(token: str, period: int = 0):
             else: break
         streak = {'count': cnt, 'kind': 'win' if is_win else 'loss'}
 
+    briefing = _regime_briefing(regime, bot_alive, len(open_pos))
+
     return {
         'metrics': m, 'regime': regime, 'streak': streak,
+        'briefing': briefing,
         'actual_balance': actual_bal,
         'bot_alive': bot_alive, 'log_time': log_time, 'alerts': alerts,
         'eq_curve': eq_curve, 'daily': daily, 'module_stats': module_stats,
