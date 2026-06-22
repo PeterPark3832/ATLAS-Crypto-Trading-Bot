@@ -293,9 +293,9 @@ def _regime_from_log() -> str:
 # 레짐별 활성 전략 (atlas_spot_config.REGIME_STRATEGY_MAP 미러 — 변경 시 동기화)
 _REGIME_STRAT_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S5'],
+    'RANGING':       ['S4', 'S5'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S7V4'],
+    'TRENDING_DOWN': ['S4'],
     'CRISIS':        [],
 }
 _STRAT_FULL = {
@@ -371,14 +371,9 @@ def _regime_briefing(regime: str, bot_alive: bool, open_pos_cnt: int) -> dict:
         reason = '이 레짐에 배정된 전략이 없어 신규 진입이 없습니다.'
         tone = 'warn'
     elif regime == 'TRENDING_DOWN':
-        adx4 = mx['adx_4h']
-        if adx4 is not None and adx4 < 25:
-            reason = (f'하락 추세에서 유일한 활성 전략 S7V4는 4H ADX≥25가 필요한데, '
-                      f'현재 4H ADX={adx4:.0f}로 미달입니다. 추세가 다시 강해지거나 '
-                      f'개별 코인이 진입 조건을 만족할 때까지 대기합니다.')
-        else:
-            reason = ('하락 추세 — S7V4 전략이 진입 조건(MACD 전환 + EMA200 상회)을 '
-                      '만족하는 코인을 감시 중입니다. 보수적으로 운용됩니다.')
+        reason = ('하락 추세 — 과매도 반등 전략 S4(RSI 과매도)만 보수적으로 운용합니다. '
+                  'RSI가 과매도 구간에 진입한 코인을 감시하되, 강한 하락에서는 신규 진입을 '
+                  '자제합니다. (반등 전략 S5는 하락장 실전 성과가 나빠 제외됨)')
         tone = 'warn'
     else:
         reason = (f'활성 전략({", ".join(strats)})이 진입 조건을 만족하는 코인을 감시 중입니다. '
