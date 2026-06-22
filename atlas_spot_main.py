@@ -34,6 +34,7 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 import argparse
 import logging
+import shutil
 import sqlite3
 import sys
 import threading
@@ -368,6 +369,8 @@ _state = {
     'ratchet_scale':    1.0,
     'dry_run':          False,
     'active_strategies': ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
+    'ratchet_alert_tier': 0,     # 0=정상, 1=소프트DD, 2=하드DD — 알림 중복 방지용
+    'daily_loss_alerted': False, # 일간 손실 한도 알림 중복 방지 (자정 리셋)
 }
 _state_lock = threading.Lock()
 
@@ -456,6 +459,10 @@ def _get_ratchet_scale() -> float:
         return 1.0
     dd = (peak - equity) / peak
     if dd >= SPOT_RATCHET_DD_HARD:
+        if _state['ratchet_alert_tier'] < 2:
+            _state['ratchet_alert_tier'] = 2
+            _tg(f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
         # 바닥(floor) 추적: ratchet_floor에 최저점 기록
         floor = _state.get('ratchet_floor', equity)
         if equity < floor:
@@ -465,11 +472,19 @@ def _get_ratchet_scale() -> float:
         recover_pct = (equity - floor) / floor if floor > 0 else 0.0
         if recover_pct >= SPOT_RATCHET_RECOVER:
             _state['ratchet_floor'] = equity  # 회복 기준점 리셋
+            _state['ratchet_alert_tier'] = 1
             return 0.70   # Hard DD 회복 → 중간 단계로 복원
         return 0.40
     if dd >= SPOT_RATCHET_DD_THRESH:
+        if _state['ratchet_alert_tier'] < 1:
+            _state['ratchet_alert_tier'] = 1
+            _tg(f'⚠️ [경고] 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                f'(-{dd*100:.1f}%) — 리스크 스케일 70%로 축소')
         _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
         return 0.70
+    if _state['ratchet_alert_tier'] > 0:
+        _state['ratchet_alert_tier'] = 0
+        _tg(f'✅ [회복] 드로다운 해소: 현재 ${equity:,.2f} (피크 대비 -{dd*100:.1f}%) — 리스크 스케일 정상 복원')
     _state.pop('ratchet_floor', None)
     return 1.0
 
@@ -577,8 +592,13 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         return False
 
     # 일간 손실 한도
-    if _state['day_pnl'] / max(_state['day_start_eq'], 1) <= SPOT_DAILY_LOSS_LIMIT:
+    day_loss_pct = _state['day_pnl'] / max(_state['day_start_eq'], 1)
+    if day_loss_pct <= SPOT_DAILY_LOSS_LIMIT:
         log.warning(f'[{strategy}] 일간 손실 한도 초과 — 진입 차단')
+        if not _state['daily_loss_alerted']:
+            _state['daily_loss_alerted'] = True
+            _tg(f'🔴 [위험] 일간 손실 한도 초과 ({day_loss_pct*100:.1f}% ≤ '
+                f'{SPOT_DAILY_LOSS_LIMIT*100:.0f}%) — 오늘 신규 진입 차단')
         return False
 
     log.info(f'[{strategy}] {symbol} 매수 시도 | {qty:.6f}개 @ {entry_price:,.4f} | '
@@ -1039,6 +1059,7 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
             equity  = _state['equity']
             _state['day_pnl']      = 0.0
             _state['day_start_eq'] = equity
+            _state['daily_loss_alerted'] = False
 
         # 일간 브리핑
         with _db_lock, _db_conn() as conn:
@@ -1090,6 +1111,27 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                                      (actual, strategy, sym))
         except Exception as e:
             log.warning(f'[검증루프] 오류: {e}')
+
+
+def _db_backup_loop(stop_event: threading.Event) -> None:
+    """6시간마다 DB 스냅샷 백업 (state/backups/), 최근 28개(7일치)만 보관."""
+    backup_dir = SPOT_DB_FILE.parent / 'backups'
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    while not stop_event.is_set() and not SPOT_KILL_SWITCH.exists():
+        try:
+            if SPOT_DB_FILE.exists():
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+                dest = backup_dir / f'atlas_spot_{stamp}.db'
+                with _db_lock:
+                    shutil.copy2(SPOT_DB_FILE, dest)
+                backups = sorted(backup_dir.glob('atlas_spot_*.db'))
+                for old in backups[:-28]:
+                    old.unlink(missing_ok=True)
+                log.info(f'[DB백업] {dest.name} 저장 완료 (보관 {min(len(backups), 28)}개)')
+        except Exception as e:
+            log.error(f'[DB백업] 실패: {e}')
+            _tg(f'⚠️ DB 백업 실패: {e}')
+        stop_event.wait(21600)  # 6시간
 
 
 def _tg_cmd_loop(stop_event: threading.Event) -> None:
@@ -1208,6 +1250,7 @@ def main():
     _t(universe_refresh_loop,    'UniverseRefresh', ex, _state, stop_event, _state_lock)
     _t(_daily_reset_loop,        'DailyReset',      stop_event)
     _t(_position_reconcile_loop, 'Reconcile',       stop_event)
+    _t(_db_backup_loop,          'DbBackup',        stop_event)
     _t(_tg_cmd_loop,             'TgCmd',           stop_event)
 
     # 전략 루프 (타임프레임별 통합)
