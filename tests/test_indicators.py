@@ -133,6 +133,15 @@ class TestCalcRsi:
         rsi = _calc_rsi(close, 14)
         assert rsi.iloc[:14].isna().all()
 
+    def test_pure_uptrend_no_nan_after_warmup(self):
+        """구간 내 하락일이 전혀 없는 순수 상승장 → RSI=100 (NaN 아님).
+        loss=0일 때 gain/0=NaN이 되어 RSI 전체가 비어버리는 회귀 방지."""
+        close = pd.Series([100.0 + i for i in range(40)])  # 매일 상승, 하락 없음
+        rsi = _calc_rsi(close, 14)
+        valid = rsi.iloc[14:]
+        assert not valid.isna().any()
+        assert (valid == 100.0).all()
+
 
 # ══════════════════════════════════════════════════════════════
 #  _calc_atr

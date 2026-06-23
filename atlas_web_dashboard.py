@@ -2,7 +2,7 @@
 ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import io, os, time, secrets, sqlite3, subprocess, logging, hashlib, hmac
+import io, os, time, secrets, sqlite3, subprocess, logging, hashlib, hmac, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -266,6 +266,32 @@ def _bot_alive() -> bool:
     except Exception as e:
         log.error(f'bot_alive 실패: {e}'); return False
 
+_watchdog_state = {'alive': True, 'down_since': None}
+
+def _bot_watchdog_loop():
+    """대시보드 프로세스와 독립적으로 60초마다 봇 생존 확인 — 다운 감지 시 텔레그램 알림."""
+    while True:
+        try:
+            alive = _bot_alive()
+            now = time.time()
+            if not alive and _watchdog_state['alive']:
+                _watchdog_state['alive'] = False
+                _watchdog_state['down_since'] = now
+                _tg('🔴 [감시] ATLAS Spot 봇 프로세스 중단 감지 — 즉시 확인이 필요합니다.')
+                log.warning('[감시] 봇 프로세스 중단 감지')
+            elif alive and not _watchdog_state['alive']:
+                down_min = (now - _watchdog_state['down_since']) / 60 if _watchdog_state['down_since'] else 0
+                _watchdog_state['alive'] = True
+                _watchdog_state['down_since'] = None
+                _tg(f'✅ [감시] 봇 프로세스 복구 확인 (중단 {down_min:.0f}분)')
+                log.info('[감시] 봇 프로세스 복구 확인')
+        except Exception as e:
+            log.error(f'[감시루프] 오류: {e}')
+        time.sleep(60)
+
+threading.Thread(target=_bot_watchdog_loop, name='BotWatchdog', daemon=True).start()
+
+
 def _last_log_time() -> str:
     try:
         if not LOG_FILE.exists(): return None
@@ -293,14 +319,23 @@ def _regime_from_log() -> str:
 # 레짐별 활성 전략 (atlas_spot_config.REGIME_STRATEGY_MAP 미러 — 변경 시 동기화)
 _REGIME_STRAT_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S5'],
+    'RANGING':       ['S4', 'S5'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S7V4'],
+    'TRENDING_DOWN': ['S4'],
     'CRISIS':        [],
 }
 _STRAT_FULL = {
     'S3': 'EMA 추세추종', 'S4': 'RSI 평균회귀', 'S5': 'BB 밴드반등',
     'S6': 'Donchian 돌파', 'S7': 'MACD 모멘텀', 'S7V4': 'MACD 모멘텀(강화)',
+}
+# 전략별 진입 조건 요약 (atlas_spot_config.py 상수 미러 — 변경 시 동기화)
+_STRAT_CONDITION = {
+    'S3': 'EMA20이 EMA50을 상향 돌파 + 종가 > EMA200',
+    'S4': 'RSI(14)가 30을 상향 돌파 + 종가 ≤ BB하단×1.03',
+    'S5': '종가 < BB하단 + RSI(14) < 30',
+    'S6': '20일 신고가 돌파 + 거래량 2.0배 스파이크',
+    'S7': 'MACD 히스토그램 골든크로스 + 종가 > EMA200',
+    'S7V4': 'MACD 히스토그램 골든크로스 + ADX≥25 + 거래량 1.3배 + 종가 > EMA200',
 }
 # 레짐 한글명 + 한 줄 성격 설명
 _REGIME_DESC = {
@@ -343,11 +378,13 @@ def _regime_briefing(regime: str, bot_alive: bool, open_pos_cnt: int) -> dict:
     if not regime or regime not in _REGIME_DESC:
         return {'headline': '레짐 판별 대기 중',
                 'detail': '봇이 BTC 레짐을 아직 계산하지 않았습니다.',
-                'reason': '', 'active_strats': [], 'metrics': {}, 'tone': 'neutral'}
+                'reason': '', 'active_strats': [], 'conditions': [], 'metrics': {}, 'tone': 'neutral'}
 
     kor, character = _REGIME_DESC[regime]
     strats = _REGIME_STRAT_MAP.get(regime, [])
     strat_names = [f'{s}({_STRAT_FULL.get(s, s)})' for s in strats]
+    conditions = [{'strategy': s, 'name': _STRAT_FULL.get(s, s),
+                   'condition': _STRAT_CONDITION.get(s, '')} for s in strats]
     mx = _parse_regime_metrics()
 
     # EMA200 대비 BTC 위치(%)
@@ -371,14 +408,9 @@ def _regime_briefing(regime: str, bot_alive: bool, open_pos_cnt: int) -> dict:
         reason = '이 레짐에 배정된 전략이 없어 신규 진입이 없습니다.'
         tone = 'warn'
     elif regime == 'TRENDING_DOWN':
-        adx4 = mx['adx_4h']
-        if adx4 is not None and adx4 < 25:
-            reason = (f'하락 추세에서 유일한 활성 전략 S7V4는 4H ADX≥25가 필요한데, '
-                      f'현재 4H ADX={adx4:.0f}로 미달입니다. 추세가 다시 강해지거나 '
-                      f'개별 코인이 진입 조건을 만족할 때까지 대기합니다.')
-        else:
-            reason = ('하락 추세 — S7V4 전략이 진입 조건(MACD 전환 + EMA200 상회)을 '
-                      '만족하는 코인을 감시 중입니다. 보수적으로 운용됩니다.')
+        reason = ('하락 추세 — 과매도 반등 전략 S4(RSI 과매도)만 보수적으로 운용합니다. '
+                  'RSI가 과매도 구간에 진입한 코인을 감시하되, 강한 하락에서는 신규 진입을 '
+                  '자제합니다. (반등 전략 S5는 하락장 실전 성과가 나빠 제외됨)')
         tone = 'warn'
     else:
         reason = (f'활성 전략({", ".join(strats)})이 진입 조건을 만족하는 코인을 감시 중입니다. '
@@ -400,6 +432,7 @@ def _regime_briefing(regime: str, bot_alive: bool, open_pos_cnt: int) -> dict:
         'detail': character,
         'reason': reason,
         'active_strats': strat_names,
+        'conditions': conditions,
         'regime_kor': kor,
         'ema_gap': round(ema_gap, 1) if ema_gap is not None else None,
         'metrics': mx,

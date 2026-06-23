@@ -34,7 +34,13 @@ def _calc_rsi(close: pd.Series, period: int) -> pd.Series:
     delta = close.diff()
     gain  = delta.clip(lower=0).rolling(period).mean()
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    return 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    rs    = gain / loss.replace(0, np.nan)
+    rsi   = 100 - (100 / (1 + rs))
+    # loss=0 구간(구간 내 하락일 없음) → RS=무한대이므로 RSI=100(gain>0) 또는 50(완전 무변동)
+    # 분모 0 나눗셈으로 RS가 NaN이 되어 강한 상승장에서 RSI가 통째로 비는 문제 방지
+    zero_loss = loss == 0
+    rsi = rsi.where(~zero_loss, np.where(gain > 0, 100.0, 50.0))
+    return rsi
 
 
 # ══════════════════════════════════════════════════════════════

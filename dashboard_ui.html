@@ -188,6 +188,9 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 .briefing-foot{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:9px;align-items:center}
 .briefing-strats{font-size:10.5px;color:var(--tx2);font-weight:600}
 .briefing-mx{font-size:10.5px;color:var(--tx3);font-family:ui-monospace,monospace}
+.briefing-conditions{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.briefing-cond-row{font-size:10.5px;color:var(--tx3);display:flex;gap:6px}
+.briefing-cond-row b{color:var(--tx2);font-weight:700;flex-shrink:0}
 
 /* ── Stat cards ── */
 .stat-cards{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}
@@ -700,6 +703,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
             <div class="briefing-head" id="briefing-head">—</div>
             <div class="briefing-detail" id="briefing-detail">—</div>
             <div class="briefing-reason" id="briefing-reason">—</div>
+            <div class="briefing-conditions" id="briefing-conditions"></div>
             <div class="briefing-foot">
               <span class="briefing-strats" id="briefing-strats"></span>
               <span class="briefing-mx" id="briefing-mx"></span>
@@ -1250,6 +1254,14 @@ function renderBriefing(b){
     ? '활성 전략 · '+b.active_strats.join(' / ')
     : '활성 전략 없음';
   setTextRaw('briefing-strats',strats);
+  // 전략별 진입 조건 미리보기
+  const condEl=document.getElementById('briefing-conditions');
+  if(condEl){
+    const conds=b.conditions||[];
+    condEl.innerHTML=conds.map(c=>
+      `<div class="briefing-cond-row"><b>${esc(c.strategy)}</b><span>${esc(c.condition||'')}</span></div>`
+    ).join('');
+  }
   // 지표 한 줄 (ADX/EMA갭)
   const mx=b.metrics||{}; const parts=[];
   if(mx.adx_1d!=null)parts.push(`ADX(1D) ${mx.adx_1d.toFixed(0)}`);

@@ -13,10 +13,10 @@ ATLAS Spot Trading Bot — 설정
   S7: MACD Momentum          4H
 
 레짐별 활성 전략:
-  TRENDING_UP  : S2, S3, S6, S7 (추세추종)
-  RANGING      : S4, S5         (평균회귀)
-  WEAK_TREND   : 전체 (리스크 70%)
-  TRENDING_DOWN: S4, S5         (과매도 반등 한정)
+  TRENDING_UP  : S6            (돌파)
+  RANGING      : S4, S5        (평균회귀)
+  WEAK_TREND   : S3, S5, S6    (추세 형성 초기, 리스크 70%)
+  TRENDING_DOWN: S4            (과매도 반등 한정 — S5는 실전 0승으로 제외)
   CRISIS       : 전면 차단
 """
 
@@ -260,16 +260,17 @@ STRATEGY_NAMES = {
 # 레짐별 허용 전략
 # 레짐별 전략 배치 원칙:
 #   TRENDING_UP  : S6 (돌파 전용 — S3 고점 진입 제거)
-#   RANGING      : S5 (평균회귀 — ADX<20 구간)
+#   RANGING      : S4, S5 (평균회귀 — ADX<20 박스권, RSI 과매도 + BB 반등)
 #   WEAK_TREND   : S3, S5, S6 (추세 형성 초기 혼합)
-#   TRENDING_DOWN: S7V4 only — S5 제거 (실전 10전 0승 실증, ADX35+ 하락추세에서 반등전략 무효)
+#   TRENDING_DOWN: S4 only (평균회귀 — RSI 과매도 반등만 보수적으로)
+#       · S5(BB반등) 제외: 실전 10전 0승 실증 — 강한 하락추세(ADX35+)에서 BB 이탈은 추가하락 신호
+#       · S7V4 제외: 종가>EMA200 요구하는 상승 모멘텀 전략이라 하락장에 논리적으로 부적합(진입 불가)
 #   CRISIS       : 전면 차단
-# NOTE: S7V4는 ADX≥25 필터를 내부적으로 요구하므로 RANGING(ADX<20) 배치 불가
 REGIME_STRATEGY_MAP = {
     'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S5'],
+    'RANGING':       ['S4', 'S5'],
     'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S7V4'],
+    'TRENDING_DOWN': ['S4'],
     'CRISIS':        [],
 }
 

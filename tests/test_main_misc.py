@@ -1,0 +1,367 @@
+"""
+ATLAS — 가격조회/캔들캐시/텔레그램명령/포지션검증루프 단위 테스트
+================================
+atlas_spot_main.py의 _get_price, CandleCache, _get_momentum_rank_pct,
+_handle_tg_cmd, _position_reconcile_loop을 검증합니다.
+
+실행:
+  pytest tests/test_main_misc.py -v
+"""
+
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
+    os.environ.setdefault(_k, 'TEST')
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import pytest
+
+import atlas_spot_main as sm
+
+
+# ══════════════════════════════════════════════════════════════
+#  공용 fixture
+# ══════════════════════════════════════════════════════════════
+
+@pytest.fixture(autouse=True)
+def _no_telegram(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sm, '_tg', lambda msg: calls.append(msg))
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _temp_db(tmp_path, monkeypatch):
+    db_file = tmp_path / 'test_spot.db'
+    monkeypatch.setattr(sm, 'SPOT_DB_FILE', db_file)
+    sm.init_spot_db()
+    yield db_file
+
+
+@pytest.fixture(autouse=True)
+def _no_kill_switch(tmp_path, monkeypatch):
+    monkeypatch.setattr(sm, 'SPOT_KILL_SWITCH', tmp_path / 'NOT_PRESENT')
+
+
+@pytest.fixture(autouse=True)
+def _clear_price_cache(monkeypatch):
+    monkeypatch.setattr(sm, '_last_known_price', {})
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(sm.time, 'sleep', lambda s: None)
+
+
+@pytest.fixture
+def _state(monkeypatch):
+    fresh = {
+        'equity': 10_000.0,
+        'usdt_balance': 10_000.0,
+        'universe': [],
+        'universe_ranked': [],
+    }
+    monkeypatch.setattr(sm, '_state', fresh)
+    return fresh
+
+
+# ══════════════════════════════════════════════════════════════
+#  _get_price
+# ══════════════════════════════════════════════════════════════
+
+class _FakeTickerExchange:
+    def __init__(self, prices=None, raises_times=0):
+        self._prices = prices or {}
+        self._raises_times = raises_times
+        self.calls = 0
+
+    def fetch_ticker(self, ccxt_sym):
+        self.calls += 1
+        if self._raises_times > 0:
+            self._raises_times -= 1
+            raise RuntimeError('network error')
+        return self._prices.get(ccxt_sym, {'last': 0, 'close': 0})
+
+
+class TestGetPrice:
+    def test_returns_price_on_success(self, monkeypatch):
+        ex = _FakeTickerExchange(prices={'BTC/USDT': {'last': 50000.0, 'close': 50000.0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 50000.0
+
+    def test_retries_then_succeeds(self, monkeypatch):
+        ex = _FakeTickerExchange(prices={'BTC/USDT': {'last': 50000.0, 'close': 50000.0}},
+                                  raises_times=2)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 50000.0
+        assert ex.calls == 3
+
+    def test_falls_back_to_close_when_last_missing(self, monkeypatch):
+        ex = _FakeTickerExchange(prices={'BTC/USDT': {'last': None, 'close': 49000.0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 49000.0
+
+    def test_falls_back_to_cache_on_total_failure(self, monkeypatch):
+        sm._last_known_price['BTC/USDT'] = (48000.0, time.time())
+        ex = _FakeTickerExchange(raises_times=99)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 48000.0
+
+    def test_returns_zero_when_cache_stale(self, monkeypatch):
+        sm._last_known_price['BTC/USDT'] = (48000.0, time.time() - sm._PRICE_CACHE_TTL - 1)
+        ex = _FakeTickerExchange(raises_times=99)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 0.0
+
+    def test_returns_zero_when_no_cache_and_total_failure(self, monkeypatch):
+        ex = _FakeTickerExchange(raises_times=99)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._get_price('BTC/USDT') == 0.0
+
+    def test_updates_cache_on_success(self, monkeypatch):
+        ex = _FakeTickerExchange(prices={'BTC/USDT': {'last': 50000.0, 'close': 50000.0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        sm._get_price('BTC/USDT')
+        cached_price, ts = sm._last_known_price['BTC/USDT']
+        assert cached_price == 50000.0
+        assert ts > 0
+
+
+# ══════════════════════════════════════════════════════════════
+#  CandleCache
+# ══════════════════════════════════════════════════════════════
+
+class _FakeCandleExchange:
+    def __init__(self, data=None, raises_times=0):
+        self._data = data or []
+        self._raises_times = raises_times
+        self.calls = 0
+
+    def fetch_ohlcv(self, ccxt_sym, timeframe, limit):
+        self.calls += 1
+        if self._raises_times > 0:
+            self._raises_times -= 1
+            raise RuntimeError('network error')
+        return self._data
+
+
+class TestCandleCache:
+    def test_fetches_and_caches(self):
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(data=[[0, 1, 2, 0, 1, 100]])
+        result = cache.get(ex, 'BTC/USDT', '1h', 100)
+        assert result == [[0, 1, 2, 0, 1, 100]]
+        assert ex.calls == 1
+
+    def test_returns_cached_value_within_ttl(self):
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(data=[[0, 1, 2, 0, 1, 100]])
+        cache.get(ex, 'BTC/USDT', '1h', 100)
+        cache.get(ex, 'BTC/USDT', '1h', 100)
+        assert ex.calls == 1  # 두 번째 호출은 캐시에서 반환, API 미호출
+
+    def test_refetches_after_ttl_expiry(self):
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(data=[[0, 1, 2, 0, 1, 100]])
+        cache.get(ex, 'BTC/USDT', '1h', 100)
+        key = 'BTC/USDT_1h'
+        data, _ts = cache._cache[key]
+        cache._cache[key] = (data, time.time() - 61)
+        cache.get(ex, 'BTC/USDT', '1h', 100)
+        assert ex.calls == 2
+
+    def test_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr(sm.time, 'sleep', lambda s: None)
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(data=[[0, 1, 2, 0, 1, 100]], raises_times=2)
+        result = cache.get(ex, 'BTC/USDT', '1h', 100)
+        assert result == [[0, 1, 2, 0, 1, 100]]
+        assert ex.calls == 3
+
+    def test_falls_back_to_stale_cache_on_total_failure(self, monkeypatch):
+        monkeypatch.setattr(sm.time, 'sleep', lambda s: None)
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(data=[[0, 1, 2, 0, 1, 100]])
+        cache.get(ex, 'BTC/USDT', '1h', 100)
+        key = 'BTC/USDT_1h'
+        data, _ts = cache._cache[key]
+        cache._cache[key] = (data, time.time() - 61)
+        ex2 = _FakeCandleExchange(raises_times=99)
+        result = cache.get(ex2, 'BTC/USDT', '1h', 100)
+        assert result == [[0, 1, 2, 0, 1, 100]]
+
+    def test_returns_empty_when_no_cache_and_total_failure(self, monkeypatch):
+        monkeypatch.setattr(sm.time, 'sleep', lambda s: None)
+        cache = sm.CandleCache(ttl=60)
+        ex = _FakeCandleExchange(raises_times=99)
+        result = cache.get(ex, 'BTC/USDT', '1h', 100)
+        assert result == []
+
+
+# ══════════════════════════════════════════════════════════════
+#  _get_momentum_rank_pct
+# ══════════════════════════════════════════════════════════════
+
+class TestGetMomentumRankPct:
+    def test_top_ranked_returns_zero(self, _state):
+        _state['universe_ranked'] = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT']
+        assert sm._get_momentum_rank_pct('BTCUSDT') == 0.0
+
+    def test_mid_ranked_returns_fraction(self, _state):
+        _state['universe_ranked'] = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'ADAUSDT']
+        assert sm._get_momentum_rank_pct('ETHUSDT') == pytest.approx(0.25)
+
+    def test_missing_symbol_returns_half(self, _state):
+        _state['universe_ranked'] = ['BTCUSDT', 'ETHUSDT']
+        assert sm._get_momentum_rank_pct('NOPEUSDT') == 0.5
+
+    def test_no_ranked_falls_back_to_universe(self, _state):
+        _state['universe_ranked'] = []
+        _state['universe'] = ['BTCUSDT', 'ETHUSDT']
+        assert sm._get_momentum_rank_pct('ETHUSDT') == 0.5
+
+    def test_empty_universe_returns_half(self, _state):
+        _state['universe_ranked'] = []
+        _state['universe'] = []
+        assert sm._get_momentum_rank_pct('BTCUSDT') == 0.5
+
+    def test_single_symbol_universe_returns_zero(self, _state):
+        _state['universe_ranked'] = ['BTCUSDT']
+        assert sm._get_momentum_rank_pct('BTCUSDT') == 0.0
+
+
+# ══════════════════════════════════════════════════════════════
+#  _handle_tg_cmd
+# ══════════════════════════════════════════════════════════════
+
+class TestHandleTgCmd:
+    def test_status_with_no_positions(self, _no_telegram):
+        sm._handle_tg_cmd('/status')
+        assert any('포지션 없음' in m for m in _no_telegram)
+
+    def test_status_with_open_position_reports_pnl(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 1.0, 100.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        monkeypatch.setattr(sm, '_get_price', lambda ccxt_sym: 110.0)
+        sm._handle_tg_cmd('/status')
+        assert any('+10.0%' in m for m in _no_telegram)
+
+    def test_equity_reports_balances(self, _state, _no_telegram):
+        sm._handle_tg_cmd('/equity')
+        assert any('10,000.00' in m for m in _no_telegram)
+
+    def test_pause_sets_state_and_notifies(self, _state, _no_telegram):
+        _state['paused'] = False
+        sm._handle_tg_cmd('/pause')
+        assert _state['paused'] is True
+        assert any('일시정지' in m for m in _no_telegram)
+
+    def test_resume_clears_state(self, _state, _no_telegram):
+        _state['paused'] = True
+        sm._handle_tg_cmd('/resume')
+        assert _state['paused'] is False
+
+    def test_stop_touches_kill_switch(self, _no_telegram):
+        assert not sm.SPOT_KILL_SWITCH.exists()
+        sm._handle_tg_cmd('/stop')
+        assert sm.SPOT_KILL_SWITCH.exists()
+
+    def test_regime_with_cached_state(self, monkeypatch, _no_telegram):
+        class _RS:
+            regime = 'TRENDING_UP'
+            adx = 30.5
+        monkeypatch.setattr(sm, 'get_cached_regime', lambda: _RS())
+        sm._handle_tg_cmd('/regime')
+        assert any('TRENDING_UP' in m and '30.5' in m for m in _no_telegram)
+
+    def test_regime_with_no_cached_state(self, monkeypatch, _no_telegram):
+        monkeypatch.setattr(sm, 'get_cached_regime', lambda: None)
+        sm._handle_tg_cmd('/regime')
+        assert any('정보 없음' in m for m in _no_telegram)
+
+    def test_unknown_command_does_nothing(self, _no_telegram):
+        sm._handle_tg_cmd('/banana')
+        assert _no_telegram == []
+
+
+# ══════════════════════════════════════════════════════════════
+#  _position_reconcile_loop (단일 실행)
+# ══════════════════════════════════════════════════════════════
+
+class _OneShotEvent(threading.Event):
+    """wait()가 호출되면 즉시 반환하고, 두 번째 루프 진입을 막기 위해
+    다음 wait() 호출 시 set() 상태로 만든다 (1회만 본문 실행)."""
+    def __init__(self):
+        super().__init__()
+        self._waits = 0
+
+    def wait(self, timeout=None):
+        self._waits += 1
+        if self._waits >= 2:
+            self.set()
+        return self.is_set()
+
+
+class _FakeBalanceExchange:
+    def __init__(self, balances):
+        self._balances = balances
+
+    def fetch_balance(self, params=None):
+        return self._balances
+
+
+class TestPositionReconcileLoop:
+    def test_no_positions_does_nothing(self, monkeypatch, _no_telegram):
+        ev = _OneShotEvent()
+        monkeypatch.setattr(sm, '_get_ex', lambda: _FakeBalanceExchange({}))
+        sm._position_reconcile_loop(ev)
+        assert _no_telegram == []
+
+    def test_zero_balance_deletes_position(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+        ex = _FakeBalanceExchange({'BTC': {'total': 0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        sm._position_reconcile_loop(ev)
+        assert sm._load_position('S4', 'BTCUSDT') is None
+        assert any('잔고 0' in m for m in _no_telegram)
+
+    def test_large_mismatch_updates_db_qty(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+        ex = _FakeBalanceExchange({'BTC': {'total': 8.0}})  # 20% 괴리 > 10% 임계값
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        sm._position_reconcile_loop(ev)
+        pos = sm._load_position('S4', 'BTCUSDT')
+        assert pos['qty_tokens'] == pytest.approx(8.0)
+        assert any('수량 불일치' in m for m in _no_telegram)
+
+    def test_small_mismatch_does_not_update(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+        ex = _FakeBalanceExchange({'BTC': {'total': 9.5}})  # 5% 괴리 < 10% 임계값
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        sm._position_reconcile_loop(ev)
+        pos = sm._load_position('S4', 'BTCUSDT')
+        assert pos['qty_tokens'] == pytest.approx(10.0)
+        assert _no_telegram == []
+
+    def test_exception_is_caught_and_logged(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+
+        class _RaisingExchange:
+            def fetch_balance(self, params=None):
+                raise RuntimeError('network error')
+
+        monkeypatch.setattr(sm, '_get_ex', lambda: _RaisingExchange())
+        sm._position_reconcile_loop(ev)  # 예외가 전파되지 않아야 함

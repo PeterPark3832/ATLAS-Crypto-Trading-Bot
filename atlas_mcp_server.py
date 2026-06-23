@@ -115,12 +115,12 @@ def get_trade_history(days: int = 30) -> str:
     최대 25건 표시.
     """
     rows = _query_db(f"""
-        SELECT strategy, symbol, direction,
-               ROUND(pnl_usd, 2)  AS pnl_usd,
-               ROUND(pnl_r,   3)  AS pnl_r,
+        SELECT strategy, symbol, 'LONG' AS direction,
+               ROUND(pnl_usdt, 2) AS pnl_usd,
+               ROUND(pnl_r,    3) AS pnl_r,
                reason, regime,
                entry_ts, exit_ts
-        FROM trades
+        FROM spot_trades
         WHERE exit_ts >= datetime('now', '-{int(days)} days')
         ORDER BY exit_ts DESC
     """)
@@ -164,16 +164,16 @@ def get_pnl_by_strategy() -> str:
             strategy,
             symbol,
             COUNT(*)                                                              AS total,
-            SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END)                         AS wins,
-            ROUND(SUM(pnl_usd), 2)                                                AS total_pnl,
+            SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END)                        AS wins,
+            ROUND(SUM(pnl_usdt), 2)                                               AS total_pnl,
             ROUND(AVG(pnl_r),   3)                                                AS avg_r,
             ROUND(
-                SUM(CASE WHEN pnl_usd > 0 THEN pnl_usd ELSE 0.0 END) /
-                NULLIF(ABS(SUM(CASE WHEN pnl_usd < 0 THEN pnl_usd ELSE 0.0 END)), 0),
+                SUM(CASE WHEN pnl_usdt > 0 THEN pnl_usdt ELSE 0.0 END) /
+                NULLIF(ABS(SUM(CASE WHEN pnl_usdt < 0 THEN pnl_usdt ELSE 0.0 END)), 0),
             2)                                                                    AS pf,
-            ROUND(MIN(pnl_usd), 2)                                                AS worst,
-            ROUND(MAX(pnl_usd), 2)                                                AS best
-        FROM trades
+            ROUND(MIN(pnl_usdt), 2)                                               AS worst,
+            ROUND(MAX(pnl_usdt), 2)                                               AS best
+        FROM spot_trades
         GROUP BY strategy, symbol
         ORDER BY strategy, symbol
     """)
@@ -216,23 +216,23 @@ def check_alert_thresholds() -> str:
 
     거래 수가 10건 미만이면 통계 신뢰도 경고를 함께 표시합니다.
     """
-    trades = _query_db("SELECT pnl_usd, pnl_r, exit_ts FROM trades ORDER BY exit_ts")
+    trades = _query_db("SELECT pnl_usdt, pnl_r, exit_ts FROM spot_trades ORDER BY exit_ts")
 
     if not trades:
         return "거래 데이터 없음 — 아직 청산 거래가 없습니다."
 
     total      = len(trades)
-    wins       = sum(1 for t in trades if t['pnl_usd'] > 0)
+    wins       = sum(1 for t in trades if t['pnl_usdt'] > 0)
     wr         = wins / total
-    gross_win  = sum(t['pnl_usd'] for t in trades if t['pnl_usd'] > 0)
-    gross_loss = abs(sum(t['pnl_usd'] for t in trades if t['pnl_usd'] < 0))
+    gross_win  = sum(t['pnl_usdt'] for t in trades if t['pnl_usdt'] > 0)
+    gross_loss = abs(sum(t['pnl_usdt'] for t in trades if t['pnl_usdt'] < 0))
     pf         = gross_win / gross_loss if gross_loss > 0 else float('inf')
 
     cum = 0.0
     peak = 0.0
     max_dd_usd = 0.0
     for t in trades:
-        cum += t['pnl_usd']
+        cum += t['pnl_usdt']
         if cum > peak:
             peak = cum
         dd = peak - cum
@@ -240,7 +240,7 @@ def check_alert_thresholds() -> str:
             max_dd_usd = dd
 
     mdd_pct   = max_dd_usd / INITIAL_CAPITAL * 100
-    total_pnl = sum(t['pnl_usd'] for t in trades)
+    total_pnl = sum(t['pnl_usdt'] for t in trades)
 
     alerts = []
     stops  = []

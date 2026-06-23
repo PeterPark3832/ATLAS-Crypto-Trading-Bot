@@ -102,7 +102,10 @@ def load_ohlcv_csv(path: str) -> list:
         ts_ms = pd.to_datetime(df[ts_col], utc=True)
     if ts_ms.dt.tz is None:
         ts_ms = ts_ms.dt.tz_localize('UTC')
-    df['_ts'] = ts_ms.astype(int) // 1_000_000
+    # pandas datetime64 내부 정밀도(ns/us/ms)가 버전·생성경로에 따라 달라지므로
+    # astype(int)에 의존하지 않고 epoch 차분으로 ms를 직접 계산한다.
+    _epoch = pd.Timestamp('1970-01-01', tz='UTC')
+    df['_ts'] = (ts_ms - _epoch) // pd.Timedelta('1ms')
     return df[['_ts', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
 
 
