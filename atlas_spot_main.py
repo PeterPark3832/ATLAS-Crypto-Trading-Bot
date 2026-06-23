@@ -464,7 +464,11 @@ def _get_ratchet_scale() -> float:
             _tg(f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
                 f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
         # 바닥(floor) 추적: ratchet_floor에 최저점 기록
-        floor = _state.get('ratchet_floor', equity)
+        # 최초 진입 시에도 floor를 _state에 저장해야 함 — 그렇지 않으면 다음 호출에서도
+        # get()의 기본값이 항상 "현재" equity가 되어 recover_pct가 영원히 0이 되는 버그 발생
+        if 'ratchet_floor' not in _state:
+            _state['ratchet_floor'] = equity
+        floor = _state['ratchet_floor']
         if equity < floor:
             _state['ratchet_floor'] = equity
             floor = equity

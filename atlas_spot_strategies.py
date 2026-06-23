@@ -414,13 +414,17 @@ def get_signal_s6(df: pd.DataFrame, i: int) -> dict:
 
 
 def check_exit_s6(df: pd.DataFrame, i: int, entry_price: float) -> bool:
-    """10일 신저가 이탈 시 추가 청산."""
+    """10일 신저가 이탈 시 추가 청산.
+    don_low는 자기 자신의 저가를 포함한 롤링 최소값이라
+    cur['close']는 항상 cur['don_low'] 이상 — 직전 봉(prev) 기준 신저가와 비교해야
+    실제로 이탈을 감지할 수 있다 (get_signal_s6의 SL 계산과 동일한 lookahead 방지 패턴)."""
     if i < 1 or i >= len(df):
         return False
-    cur = df.iloc[i]
-    if pd.isna(cur['don_low']):
+    prev = df.iloc[i - 1]
+    cur  = df.iloc[i]
+    if pd.isna(prev['don_low']):
         return False
-    return float(cur['close']) < float(cur['don_low'])
+    return float(cur['close']) < float(prev['don_low'])
 
 
 # ══════════════════════════════════════════════════════════════
