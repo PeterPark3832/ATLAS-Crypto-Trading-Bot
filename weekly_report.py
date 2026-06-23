@@ -42,8 +42,8 @@ def load_trades(days: int) -> pd.DataFrame:
     try:
         con = sqlite3.connect(f'file:{DB_FILE}?mode=ro', uri=True, timeout=10)
         df  = pd.read_sql_query(f"""
-            SELECT strategy, symbol, direction, pnl_usd, pnl_r, reason, exit_ts
-            FROM trades
+            SELECT strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts
+            FROM spot_trades
             WHERE exit_ts >= datetime('now', '-{days} days')
             ORDER BY exit_ts ASC
         """, con)
@@ -59,16 +59,16 @@ def calc(df: pd.DataFrame) -> dict:
     if df.empty:
         return {}
     total  = len(df)
-    wins   = int((df['pnl_usd'] > 0).sum())
-    pnl    = float(df['pnl_usd'].sum())
-    gw     = float(df[df['pnl_usd'] > 0]['pnl_usd'].sum())
-    gl     = abs(float(df[df['pnl_usd'] < 0]['pnl_usd'].sum()))
+    wins   = int((df['pnl_usdt'] > 0).sum())
+    pnl    = float(df['pnl_usdt'].sum())
+    gw     = float(df[df['pnl_usdt'] > 0]['pnl_usdt'].sum())
+    gl     = abs(float(df[df['pnl_usdt'] < 0]['pnl_usdt'].sum()))
     pf     = round(gw / gl, 2) if gl > 0 else float('inf')
     avg_r  = float(df['pnl_r'].mean())
     tp_cnt = int((df['reason'] == 'TP').sum())
     sl_cnt = int((df['reason'] == 'SL').sum())
 
-    cum  = df['pnl_usd'].cumsum().values
+    cum  = df['pnl_usdt'].cumsum().values
     peak = np.maximum.accumulate(cum)
     dd   = peak - cum
     mdd  = float(dd.max()) / INITIAL_CAPITAL * 100
@@ -84,10 +84,10 @@ def strategy_summary(df: pd.DataFrame) -> str:
     lines = []
     for strat in sorted(df['strategy'].unique()):
         g     = df[df['strategy'] == strat]
-        wins  = int((g['pnl_usd'] > 0).sum())
+        wins  = int((g['pnl_usdt'] > 0).sum())
         lines.append(
             f"  {strat}: {len(g)}건 WR{wins/len(g)*100:.0f}% "
-            f"${g['pnl_usd'].sum():+.1f}"
+            f"${g['pnl_usdt'].sum():+.1f}"
         )
     return '\n'.join(lines)
 
