@@ -1259,7 +1259,7 @@ function renderBriefing(b){
   if(condEl){
     const conds=b.conditions||[];
     condEl.innerHTML=conds.map(c=>
-      `<div class="briefing-cond-row"><b>${esc(c.strategy)}</b><span>${esc(c.condition||'')}</span></div>`
+      `<div class="briefing-cond-row"><b>${_esc(c.strategy)}</b><span>${_esc(c.condition||'')}</span></div>`
     ).join('');
   }
   // 지표 한 줄 (ADX/EMA갭)
