@@ -625,13 +625,14 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
             _tg(f'⚠️ [{strategy}] {symbol} 매수 실패: {e}')
             return False
 
-    # SL 재계산 (실제 체결가 기준)
-    sl_dist_actual = abs(fill_price - sl)
-    sl_final = fill_price - sl_dist_actual if sl_dist_actual > 0 else sl
+    # SL 재계산 (실제 체결가 기준): 원래 sl_dist(신호 기준 거리)를 체결가에 그대로 적용.
+    # fill_price와 sl의 거리를 그대로 다시 빼면 항상 원래 sl과 같아져 슬리피지가
+    # 무시되는 버그가 있었음 — 거리(sl_dist)는 유지하고 기준점만 체결가로 이동해야 함.
+    sl_final = fill_price - sl_dist
     # TP 재계산: RR 기반 전략은 fill_price 기준으로 보정 (S5 bb_upper는 절대가격이라 제외)
     rr = sig.get('rr', 0)
-    if strategy != 'S5' and rr > 0 and sl_dist_actual > 0:
-        tp_final = fill_price + sl_dist_actual * rr
+    if strategy != 'S5' and rr > 0:
+        tp_final = fill_price + sl_dist * rr
     else:
         tp_final = tp
 
