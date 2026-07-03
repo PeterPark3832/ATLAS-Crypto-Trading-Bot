@@ -165,7 +165,8 @@ class TestSpotBalance:
         def _fake_get(url, params=None, headers=None, timeout=None):
             if 'account' in url:
                 return _FakeResp(json_data={'balances': [{'asset': 'USDT', 'free': '100', 'locked': '0'}]})
-            return _FakeResp(json_data={'price': '50000'})
+            # 배치 ticker 응답 (리스트 형식)
+            return _FakeResp(json_data=[{'symbol': 'BTCUSDT', 'price': '50000'}])
 
         monkeypatch.setattr(wd.requests, 'get', _fake_get)
         result = wd._spot_balance()

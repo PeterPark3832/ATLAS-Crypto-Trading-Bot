@@ -2,7 +2,7 @@
 ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import io, os, time, secrets, sqlite3, subprocess, logging, hashlib, hmac, threading
+import io, os, time, json, secrets, sqlite3, subprocess, logging, hashlib, hmac, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -60,11 +60,28 @@ def _auth(token: str):
     if not _check(token):
         raise HTTPException(401, 'Unauthorized')
 
+# ── 가격 배치 조회 ────────────────────────────────────────────────
+def _fetch_prices(symbols) -> dict:
+    """여러 심볼 현재가를 단일 요청으로 조회 (Binance batch ticker)."""
+    syms = [str(s) for s in symbols if s]
+    if not syms:
+        return {}
+    try:
+        r = requests.get('https://api.binance.com/api/v3/ticker/price',
+                         params={'symbols': json.dumps(syms, separators=(',', ':'))},
+                         timeout=6)
+        if r.ok:
+            return {d['symbol']: float(d['price']) for d in r.json()}
+    except Exception as e:
+        log.error(f'가격 배치 조회 실패: {e}')
+    return {}
+
 # ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
 _bal_cache: dict = {'val': None, 'ts': 0.0}
 
-def _spot_balance() -> float | None:
-    """USDT 잔고 + 오픈 포지션 현재가 합산 = 총 자산 (60s TTL)"""
+def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
+    """USDT 잔고 + 오픈 포지션 현재가 합산 = 총 자산 (60s TTL).
+    pos_df를 넘기면 DB 재조회를 생략한다."""
     now = time.time()
     if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:
         return _bal_cache['val']
@@ -86,24 +103,17 @@ def _spot_balance() -> float | None:
                 usdt = float(b['free']) + float(b['locked'])
                 break
 
-        # 오픈 포지션 시가 합산
+        # 오픈 포지션 시가 합산 (가격 1회 배치 조회)
         total = usdt
-        pos_df = _positions()
+        if pos_df is None:
+            pos_df = _positions()
         if not pos_df.empty:
-            for _, p in pos_df.iterrows():
-                qty = float(p['qty'])
-                if qty <= 0:
-                    continue
-                try:
-                    pr = requests.get(
-                        'https://api.binance.com/api/v3/ticker/price',
-                        params={'symbol': str(p['symbol'])}, timeout=4)
-                    if pr.ok:
-                        total += qty * float(pr.json()['price'])
-                    else:
-                        total += float(p['risk_usd'])
-                except Exception:
-                    total += float(p['risk_usd'])
+            open_pos = [(str(p['symbol']), float(p['qty']), float(p['risk_usd']))
+                        for _, p in pos_df.iterrows() if float(p['qty']) > 0]
+            prices = _fetch_prices([s for s, _, _ in open_pos])
+            for sym, qty, risk in open_pos:
+                pr = prices.get(sym)
+                total += qty * pr if pr else risk
 
         val = round(total, 2)
         _bal_cache.update({'val': val, 'ts': now})
@@ -539,7 +549,7 @@ async def dashboard(token: str, period: int = 0):
     log_time  = _last_log_time()
     regime = _regime_from_log() or 'UNKNOWN'
     alerts = _alerts(m, bot_alive)
-    actual_bal = _spot_balance()
+    actual_bal = _spot_balance(pos)
 
     # 수익 곡선
     eq_curve = []
@@ -678,15 +688,7 @@ async def trades_csv(token: str, period: int = 0):
 @app.get('/api/prices')
 async def prices(token: str, symbols: str = ''):
     _auth(token)
-    result = {}
-    for sym in (symbols.split(',') if symbols else []):
-        try:
-            r = requests.get('https://api.binance.com/api/v3/ticker/price',
-                             params={'symbol': sym}, timeout=5)
-            if r.ok: result[sym] = float(r.json().get('price', 0))
-        except Exception as e:
-            log.error(f'가격 조회 실패 {sym}: {e}')
-    return result
+    return _fetch_prices(symbols.split(',') if symbols else [])
 
 @app.get('/', response_class=HTMLResponse)
 async def root():

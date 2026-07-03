@@ -1323,22 +1323,21 @@ function renderStatCards(m,actualBal,initialCap){
   const equity=(actualBal!=null&&actualBal>0)?actualBal:m.equity;
   // PnL
   const pnlC=m.total_pnl>=0?'pos':'neg';
-  {const el=document.getElementById('k-pnl');if(el){el.className='stat-val'+(pnlC?' '+pnlC:'');countUpFmt('k-pnl',m.total_pnl,v=>`${v>=0?'+':'-'}$${Math.abs(v).toFixed(2)}`);}}
-
+  setStatVal('k-pnl',pnlC,m.total_pnl,v=>`${v>=0?'+':'-'}$${Math.abs(v).toFixed(2)}`);
   setText('k-equity',`총자산 $${equity.toFixed(2)}`,'','stat-sub');
   // WR
   const wrC=m.total===0?'':(m.wr>=40?'pos':m.wr>=33?'':'neg');
   if(m.total===0){setText('k-wr','N/A',wrC,'stat-val');}
-  else{const el=document.getElementById('k-wr');if(el){el.className='stat-val'+(wrC?' '+wrC:'');countUpFmt('k-wr',m.wr,v=>`${v.toFixed(0)}%`);}}
+  else{setStatVal('k-wr',wrC,m.wr,v=>`${v.toFixed(0)}%`);}
   setText('k-wl',`${m.wins}W / ${m.total-m.wins}L`,'','stat-sub');
   // PF
   const pfC=m.total===0?'':(m.pf>=1.2?'pos':m.pf>=1.0?'':'neg');
   if(m.total===0||!(m.pf>0)){setText('k-pf',m.total===0?'N/A':'—',pfC,'stat-val');}
-  else{const el=document.getElementById('k-pf');if(el){el.className='stat-val'+(pfC?' '+pfC:'');countUpFmt('k-pf',m.pf,v=>v.toFixed(2));}}
+  else{setStatVal('k-pf',pfC,m.pf,v=>v.toFixed(2));}
   setText('k-avgr',`avg R ${m.avg_r>=0?'+':''}${m.avg_r.toFixed(3)}`,'','stat-sub');
   // MDD
   const mddC=m.mdd_pct>10?'neg':m.mdd_pct>5?'':'pos';
-  {const el=document.getElementById('k-mdd');if(el){el.className='stat-val'+(mddC?' '+mddC:'');countUpFmt('k-mdd',m.mdd_pct,v=>`${v.toFixed(1)}%`);}}
+  setStatVal('k-mdd',mddC,m.mdd_pct,v=>`${v.toFixed(1)}%`);
   setText('k-sharpe',`Sharpe ${m.sharpe.toFixed(2)}`,'','stat-sub');
   // eq badge
   const retPct=initialCap>0?(equity-initialCap)/initialCap*100:0;
@@ -1349,6 +1348,12 @@ function setText(id,val,cls,base){
   if(!el)return;
   el.textContent=val;
   if(base){el.className=base+(cls?' '+cls:'');}
+}
+function setStatVal(id,cls,end,fmt){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.className='stat-val'+(cls?' '+cls:'');
+  countUpFmt(id,end,fmt);
 }
 function countUpFmt(elId,end,fmt){
   const el=document.getElementById(elId);
