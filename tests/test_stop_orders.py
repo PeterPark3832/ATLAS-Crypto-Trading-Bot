@@ -251,7 +251,9 @@ class TestHandleStopOrderState:
         assert len(rows) == 1
         assert rows[0]['reason'] == 'SL'
         assert rows[0]['exit_price'] == pytest.approx(94.8)
-        assert _state['day_pnl'] == pytest.approx((94.8 - 100.0) * 10.0)
+        # day_pnl은 왕복 수수료 차감 net
+        _fee = (100.0 + 94.8) * 10.0 * 0.001
+        assert _state['day_pnl'] == pytest.approx((94.8 - 100.0) * 10.0 - _fee)
 
     def test_canceled_stop_rearms_new_order(self, _state, _fake_ex, _temp_db):
         _save_pos(order_id='STOP-OLD')

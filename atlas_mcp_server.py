@@ -116,7 +116,7 @@ def get_trade_history(days: int = 30) -> str:
     """
     rows = _query_db(f"""
         SELECT strategy, symbol, 'LONG' AS direction,
-               ROUND(pnl_usdt, 2) AS pnl_usd,
+               ROUND(pnl_usdt - COALESCE(fee_usdt, 0), 2) AS pnl_usd,
                ROUND(pnl_r,    3) AS pnl_r,
                reason, regime,
                entry_ts, exit_ts
@@ -160,20 +160,25 @@ def get_pnl_by_strategy() -> str:
     거래수, 승률, PF, 평균R을 심볼별로 반환합니다.
     """
     rows = _query_db("""
+        WITH t AS (
+            SELECT strategy, symbol, pnl_r,
+                   pnl_usdt - COALESCE(fee_usdt, 0) AS net_pnl
+            FROM spot_trades
+        )
         SELECT
             strategy,
             symbol,
             COUNT(*)                                                              AS total,
-            SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END)                        AS wins,
-            ROUND(SUM(pnl_usdt), 2)                                               AS total_pnl,
+            SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END)                          AS wins,
+            ROUND(SUM(net_pnl), 2)                                                AS total_pnl,
             ROUND(AVG(pnl_r),   3)                                                AS avg_r,
             ROUND(
-                SUM(CASE WHEN pnl_usdt > 0 THEN pnl_usdt ELSE 0.0 END) /
-                NULLIF(ABS(SUM(CASE WHEN pnl_usdt < 0 THEN pnl_usdt ELSE 0.0 END)), 0),
+                SUM(CASE WHEN net_pnl > 0 THEN net_pnl ELSE 0.0 END) /
+                NULLIF(ABS(SUM(CASE WHEN net_pnl < 0 THEN net_pnl ELSE 0.0 END)), 0),
             2)                                                                    AS pf,
-            ROUND(MIN(pnl_usdt), 2)                                               AS worst,
-            ROUND(MAX(pnl_usdt), 2)                                               AS best
-        FROM spot_trades
+            ROUND(MIN(net_pnl), 2)                                                AS worst,
+            ROUND(MAX(net_pnl), 2)                                                AS best
+        FROM t
         GROUP BY strategy, symbol
         ORDER BY strategy, symbol
     """)
@@ -216,7 +221,10 @@ def check_alert_thresholds() -> str:
 
     거래 수가 10건 미만이면 통계 신뢰도 경고를 함께 표시합니다.
     """
-    trades = _query_db("SELECT pnl_usdt, pnl_r, exit_ts FROM spot_trades ORDER BY exit_ts")
+    trades = _query_db("""
+        SELECT pnl_usdt - COALESCE(fee_usdt, 0) AS pnl_usdt, pnl_r, exit_ts
+        FROM spot_trades ORDER BY exit_ts
+    """)
 
     if not trades:
         return "거래 데이터 없음 — 아직 청산 거래가 없습니다."

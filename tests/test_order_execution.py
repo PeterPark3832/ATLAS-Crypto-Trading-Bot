@@ -252,7 +252,8 @@ class TestSpotSellDryRun:
         pos = sm._load_position('S3', 'BTCUSDT')
         sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 110.0, 'TP')
         assert sm._load_position('S3', 'BTCUSDT') is None
-        assert _state['day_pnl'] == pytest.approx(100.0)  # (110-100)*10
+        # day_pnl은 왕복 수수료 차감 net: (110-100)*10 - (100+110)*10*0.001
+        assert _state['day_pnl'] == pytest.approx(100.0 - 2.1)
 
     def test_dry_run_records_correct_pnl_r(self, _state, _temp_db):
         sm._save_position('S3', 'BTCUSDT', 100.0, 95.0, 110.0, 10.0, 1000.0,

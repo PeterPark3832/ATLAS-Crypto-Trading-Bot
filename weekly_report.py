@@ -42,9 +42,11 @@ def load_trades(days: int) -> pd.DataFrame:
     try:
         con = sqlite3.connect(f'file:{DB_FILE}?mode=ro', uri=True, timeout=10)
         df  = pd.read_sql_query(f"""
-            SELECT strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts
+            SELECT strategy, symbol,
+                   pnl_usdt - COALESCE(fee_usdt, 0) AS pnl_usdt,
+                   pnl_r, reason, exit_ts
             FROM spot_trades
-            WHERE exit_ts >= datetime('now', '-{days} days')
+            WHERE exit_ts >= datetime('now', '-{int(days)} days')
             ORDER BY exit_ts ASC
         """, con)
         con.close()

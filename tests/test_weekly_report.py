@@ -55,10 +55,11 @@ def _make_db(tmp_path, rows):
     for r in rows:
         con.execute("""
             INSERT INTO spot_trades
-            (strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts)
-            VALUES (?,?,?,?,?,?)
+            (strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts, fee_usdt)
+            VALUES (?,?,?,?,?,?,?)
         """, (r['strategy'], r.get('symbol', 'BTCUSDT'), r['pnl_usdt'],
-              r.get('pnl_r', 0.0), r.get('reason', 'TP'), r['exit_ts']))
+              r.get('pnl_r', 0.0), r.get('reason', 'TP'), r['exit_ts'],
+              r.get('fee', 0.0)))
     con.commit()
     con.close()
     return db_file
@@ -91,6 +92,15 @@ class TestLoadTrades:
         result = wr.load_trades(7)
         assert len(result) == 1
         assert result.iloc[0]['pnl_usdt'] == 50.0
+
+    def test_pnl_is_net_of_fees(self, tmp_path, monkeypatch):
+        now = datetime.now(timezone.utc)
+        rows = [{'strategy': 'S6', 'pnl_usdt': 50.0, 'fee': 2.5,
+                 'exit_ts': now.isoformat()}]
+        db_file = _make_db(tmp_path, rows)
+        monkeypatch.setattr(wr, 'DB_FILE', db_file)
+        result = wr.load_trades(7)
+        assert result.iloc[0]['pnl_usdt'] == pytest.approx(47.5)
 
     def test_returns_empty_on_query_failure(self, tmp_path, monkeypatch):
         db_file = tmp_path / 'bad.db'

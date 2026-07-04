@@ -403,8 +403,11 @@ def _fetch_stop_order(ccxt_sym: str, order_id: str) -> Optional[dict]:
 def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float,
                qty: float, cost: float, pnl_usdt: float, pnl_pct: float,
                pnl_r: float, hold_hours: float, reason: str, regime: str,
-               entry_ts: str):
-    fee = exit_price * qty * BT_SPOT_FEE
+               entry_ts: str) -> float:
+    """거래 기록 저장. 반환값: 수수료 차감 net PnL (day_pnl 등 리스크 로직용).
+    pnl_usdt/pnl_r 컬럼은 백테스트와의 비교 일관성을 위해 gross로 유지하고,
+    수수료는 fee_usdt(매수+매도 왕복)에 별도 기록한다."""
+    fee = (entry_price + exit_price) * qty * BT_SPOT_FEE
     with _db_lock, _db_conn() as conn:
         conn.execute("""
         INSERT INTO spot_trades
@@ -416,6 +419,7 @@ def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float
               round(hold_hours, 2), reason,
               entry_ts, datetime.now(timezone.utc).isoformat(),
               regime, round(fee, 4)))
+    return pnl_usdt - fee
 
 
 # ══════════════════════════════════════════════════════════════
@@ -753,11 +757,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 _sl_d = abs(entry_price - sl)
                 _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                 _delete_position(strategy, symbol)
-                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                           'MANUAL_SOLD', regime, entry_ts)
+                _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                  _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                  'MANUAL_SOLD', regime, entry_ts)
                 with _state_lock:
-                    _state['day_pnl'] += _pnl_u
+                    _state['day_pnl'] += _net
                 return
             elif _actual_free < qty:
                 log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
@@ -786,11 +790,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                         _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
                         _sl_d = abs(entry_price - sl)
                         _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
-                        _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                                   _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                                   'MANUAL_SOLD', regime, entry_ts)
+                        _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                          _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                          'MANUAL_SOLD', regime, entry_ts)
                         with _state_lock:
-                            _state['day_pnl'] += _pnl_u
+                            _state['day_pnl'] += _net
                         return
                     elif _actual_free > 0:
                         # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
@@ -822,11 +826,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     hold_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
 
     _delete_position(strategy, symbol)
-    _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
-               pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts)
+    net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
+                         pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts)
 
     with _state_lock:
-        _state['day_pnl'] += pnl_usdt
+        _state['day_pnl'] += net_pnl
 
     emoji = '✅' if pnl_usdt > 0 else '❌'
     msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason})\n'
@@ -866,11 +870,11 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
         hold_hours  = (datetime.now(timezone.utc) -
                        datetime.fromisoformat(entry_ts)).total_seconds() / 3600
         _delete_position(strategy, symbol)
-        _log_trade(strategy, symbol, entry_price, exit_price, qty,
-                   float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
-                   hold_hours, 'SL', pos.get('regime', ''), entry_ts)
+        net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty,
+                             float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
+                             hold_hours, 'SL', pos.get('regime', ''), entry_ts)
         with _state_lock:
-            _state['day_pnl'] += pnl_usdt
+            _state['day_pnl'] += net_pnl
         msg = (f'❌ [{strategy}] {symbol} 청산 (SL — 거래소 스탑 체결)\n'
                f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
                f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)')

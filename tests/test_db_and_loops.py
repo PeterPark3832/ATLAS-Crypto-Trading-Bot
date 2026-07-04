@@ -129,19 +129,21 @@ class TestPositionCrud:
 # ══════════════════════════════════════════════════════════════
 
 class TestLogTrade:
-    def test_inserts_row_with_rounded_values_and_fee(self):
-        sm._log_trade('S3', 'BTCUSDT', 100.0, 110.0, 1.0, 100.0,
-                       10.0001234, 10.0001234, 1.23456, 5.555, 'TP',
-                       'TRENDING_UP', '2099-01-01T00:00:00+00:00')
+    def test_inserts_row_with_rounded_values_and_roundtrip_fee(self):
+        net = sm._log_trade('S3', 'BTCUSDT', 100.0, 110.0, 1.0, 100.0,
+                             10.0001234, 10.0001234, 1.23456, 5.555, 'TP',
+                             'TRENDING_UP', '2099-01-01T00:00:00+00:00')
         with sm._db_lock, sm._db_conn() as conn:
             row = dict(conn.execute('SELECT * FROM spot_trades').fetchone())
         assert row['pnl_usdt'] == pytest.approx(10.0001)
         assert row['pnl_r'] == pytest.approx(1.2346)
         assert row['hold_hours'] == pytest.approx(5.55)
-        # fee = exit_price * qty * BT_SPOT_FEE = 110 * 1.0 * 0.001
-        assert row['fee_usdt'] == pytest.approx(0.11)
+        # 왕복 수수료 = (entry + exit) * qty * BT_SPOT_FEE = (100+110) * 1.0 * 0.001
+        assert row['fee_usdt'] == pytest.approx(0.21)
         assert row['reason'] == 'TP'
         assert row['regime'] == 'TRENDING_UP'
+        # 반환값은 수수료 차감 net PnL (day_pnl 등 리스크 로직용)
+        assert net == pytest.approx(10.0001234 - 0.21)
 
 
 # ══════════════════════════════════════════════════════════════
