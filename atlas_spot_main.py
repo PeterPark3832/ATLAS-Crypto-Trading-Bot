@@ -14,9 +14,9 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 [전략별 레짐 라우팅] (REGIME_STRATEGY_MAP 기준)
   TRENDING_UP  : S6(Donchian)
-  RANGING      : S5(BB Bounce)
+  RANGING      : S4(RSI), S5(BB Bounce)
   WEAK_TREND   : S3, S5, S6 (50% 리스크)
-  TRENDING_DOWN: S7V4(MACD) — S5 하락장 0승 이력으로 차단, 30% 리스크
+  TRENDING_DOWN: S4(RSI 과매도 반등만, 30% 리스크) — S5 하락장 0승 이력으로 차단
   CRISIS       : 전면 차단
 
 [스팟 특화]
@@ -62,7 +62,8 @@ from atlas_spot_config import (
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
+    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
@@ -368,7 +369,7 @@ _state = {
     'universe_ranked':  [],   # 모멘텀 정렬 순서 (RS Gate용)
     'ratchet_scale':    1.0,
     'dry_run':          False,
-    'active_strategies': ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
+    'active_strategies': list(DEFAULT_ACTIVE_STRATEGIES),
     'ratchet_alert_tier': 0,     # 0=정상, 1=소프트DD, 2=하드DD — 알림 중복 방지용
     'daily_loss_alerted': False, # 일간 손실 한도 알림 중복 방지 (자정 리셋)
 }
@@ -1205,7 +1206,7 @@ def _handle_tg_cmd(cmd: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description='ATLAS Spot 트레이딩 봇')
     parser.add_argument('--dry-run', action='store_true', help='가상 실행 (주문 없음)')
-    parser.add_argument('--strategies', default='S3,S5,S6,S7V4',
+    parser.add_argument('--strategies', default=','.join(DEFAULT_ACTIVE_STRATEGIES),
                         help='활성 전략 (쉼표 구분)')
     args = parser.parse_args()
 

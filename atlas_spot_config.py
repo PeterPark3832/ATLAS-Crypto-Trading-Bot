@@ -274,6 +274,13 @@ REGIME_STRATEGY_MAP = {
     'CRISIS':        [],
 }
 
+# 기본 활성 전략 (main.py --strategies 기본값)
+# REGIME_STRATEGY_MAP의 어느 레짐에든 배정된 전략만 나열할 것 —
+# 맵에 없는 전략은 레짐 라우팅에서 항상 차단되어 지표 계산만 낭비한다.
+# (과거 기본값의 S7V4가 어떤 레짐에도 배정되지 않아 영구 진입불가 상태였고,
+#  TRENDING_DOWN 담당 S4는 기본값에 빠져 있어 하락장 마비가 지속됐음)
+DEFAULT_ACTIVE_STRATEGIES = ['S3', 'S4', 'S5', 'S6']
+
 # WEAK_TREND 리스크 스케일 (50% — 약추세에서 리스크 절반)
 WEAK_TREND_RISK_SCALE    = 0.50
 TRENDING_DOWN_RISK_SCALE = 0.30  # TRENDING_DOWN 구간 리스크 30% (백테스트 검증)
