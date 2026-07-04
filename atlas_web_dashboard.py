@@ -2,7 +2,7 @@
 ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import io, os, time, json, secrets, sqlite3, subprocess, logging, hashlib, hmac, threading
+import io, os, time, json, secrets, shlex, sqlite3, subprocess, logging, hashlib, hmac, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -22,6 +22,10 @@ BOT_DIR         = Path(__file__).parent
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 DASH_PASSWORD   = os.getenv('DASH_PASSWORD') or secrets.token_urlsafe(16)
 REFRESH_SEC     = int(os.getenv('DASH_REFRESH_SEC', '60'))
+# 봇 기동 인자 보존: 대시보드 start가 원래 운용 구성(--dry-run, --strategies 등)
+# 그대로 재기동하도록 .env에 명시 (예: BOT_START_ARGS="--strategies S3,S5,S6")
+# 미설정 시 인자 없이(라이브 모드 + 기본 전략) 기동되므로 반드시 확인할 것.
+BOT_START_ARGS  = os.getenv('BOT_START_ARGS', '')
 API_KEY         = os.getenv('BINANCE_API_KEY', '')
 API_SECRET      = os.getenv('BINANCE_API_SECRET', '')
 TG_TOKEN        = os.getenv('TG_TOKEN', '')
@@ -40,10 +44,20 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+
+if not os.getenv('DASH_PASSWORD'):
+    log.warning('DASH_PASSWORD 미설정 — 무작위 비밀번호가 생성되어 사실상 로그인 불가 '
+                '상태입니다. .env에 DASH_PASSWORD를 설정하세요.')
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 # ── 인증 ──────────────────────────────────────────────────────────
 _tokens: dict[str, float] = {}
+
+# 로그인 브루트포스 방어: IP당 실패 기록 (윈도 내 초과 시 429)
+_login_failures: dict[str, list[float]] = {}
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SEC   = 900   # 15분
 
 def _new_token() -> str:
     tok = secrets.token_hex(32)
@@ -75,6 +89,22 @@ def _fetch_prices(symbols) -> dict:
     except Exception as e:
         log.error(f'가격 배치 조회 실패: {e}')
     return {}
+
+
+def _try_login(password: str, client_ip: str) -> str:
+    """패스워드 검증 후 토큰 발급. 브루트포스 차단(429)/실패(401) 시 예외."""
+    now = time.time()
+    fails = [t for t in _login_failures.get(client_ip, []) if now - t < LOGIN_WINDOW_SEC]
+    if len(fails) >= LOGIN_MAX_FAILURES:
+        _login_failures[client_ip] = fails
+        log.warning(f'로그인 차단(브루트포스 의심): {client_ip}')
+        raise HTTPException(429, 'Too many attempts — try again later')
+    if hmac.compare_digest(str(password or ''), str(DASH_PASSWORD)):
+        _login_failures.pop(client_ip, None)
+        return _new_token()
+    fails.append(now)
+    _login_failures[client_ip] = fails
+    raise HTTPException(401, 'Invalid password')
 
 # ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
 _bal_cache: dict = {'val': None, 'ts': 0.0}
@@ -472,9 +502,8 @@ def _alerts(m: dict, bot_alive: bool) -> list:
 @app.post('/api/auth')
 async def auth(req: Request):
     body = await req.json()
-    if body.get('password') == DASH_PASSWORD:
-        return {'token': _new_token()}
-    raise HTTPException(401, 'Invalid password')
+    client_ip = req.client.host if req.client else 'unknown'
+    return {'token': _try_login(body.get('password'), client_ip)}
 
 @app.get('/api/status')
 async def status(token: str):
@@ -495,15 +524,19 @@ async def control(req: Request):
             return {'ok': False, 'msg': '봇이 이미 실행 중입니다'}
         if KILL_SWITCH.exists(): KILL_SWITCH.unlink()
         log_path = LOG_DIR / 'spot_main.log'
+        # BOT_START_ARGS로 원래 운용 구성 보존 — 인자 없이 띄우면 dry-run으로
+        # 돌리던 봇이 실주문 모드로 재기동되는 사고가 날 수 있다.
+        cmd = ['python3', '-u', 'atlas_spot_main.py'] + shlex.split(BOT_START_ARGS)
         subprocess.Popen(
-            ['python3', '-u', 'atlas_spot_main.py'],
+            cmd,
             cwd=str(BOT_DIR),
             stdout=open(log_path, 'a'),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        _tg('▶️ [스팟 대시보드] 봇 시작 명령')
-        return {'ok': True, 'msg': '봇 시작 완료'}
+        args_desc = BOT_START_ARGS or '(기본 인자 — 라이브 모드)'
+        _tg(f'▶️ [스팟 대시보드] 봇 시작 명령: {args_desc}')
+        return {'ok': True, 'msg': f'봇 시작 완료 ({args_desc})'}
     return {'ok': False, 'msg': f'알 수 없는 명령: {action}'}
 
 @app.post('/api/panic')
