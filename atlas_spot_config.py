@@ -102,6 +102,10 @@ SPOT_DAILY_LOSS_LIMIT  = -0.04   # 일간 손실 한도 -4%
 SPOT_MIN_ORDER_USDT    = 5.0     # 최소 주문 금액 (Binance NOTIONAL 실제 기준 $5)
 SPOT_MAX_SL_PCT        = 0.20    # SL 거리 상한 20% (초과 시 포지션이 너무 작아 차단)
 
+# 거래소 측 스탑 주문 (봇 다운 중에도 SL 집행 — 소프트웨어 SL은 백업)
+SPOT_EXCHANGE_STOP     = True    # STOP_LOSS_LIMIT 주문 사용 여부
+SPOT_STOP_LIMIT_GAP    = 0.005   # 지정가 = 트리거가 × (1 - 0.5%) — 급락 시 미체결 방지 버퍼
+
 # Kelly / Ratchet
 SPOT_KELLY_MIN_TRADES  = 10      # 최소 거래수 (20→10: Kelly 조기 활성화)
 SPOT_KELLY_SCALE_MIN   = 0.30

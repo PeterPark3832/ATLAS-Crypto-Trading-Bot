@@ -58,6 +58,7 @@ from atlas_spot_config import (
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
+    SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
@@ -242,6 +243,7 @@ def init_spot_db():
             peak_price   REAL DEFAULT 0,
             entry_ts     TEXT NOT NULL,
             regime       TEXT DEFAULT '',
+            sl_order_id  TEXT DEFAULT '',
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -269,6 +271,11 @@ def init_spot_db():
             value TEXT
         );
         """)
+        # 마이그레이션: 기존 DB에 sl_order_id 컬럼이 없으면 추가
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(spot_positions)').fetchall()]
+        if 'sl_order_id' not in cols:
+            conn.execute("ALTER TABLE spot_positions ADD COLUMN sl_order_id TEXT DEFAULT ''")
+            log.info('[DB] spot_positions.sl_order_id 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -334,6 +341,63 @@ def _delete_position(strategy: str, symbol: str):
             'DELETE FROM spot_positions WHERE strategy=? AND symbol=?',
             (strategy, symbol)
         )
+
+
+def _update_position_order_id(strategy: str, symbol: str, order_id: str):
+    with _db_lock, _db_conn() as conn:
+        conn.execute(
+            'UPDATE spot_positions SET sl_order_id=? WHERE strategy=? AND symbol=?',
+            (order_id, strategy, symbol)
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+#  거래소 측 스탑 주문 (봇 다운 중에도 SL 집행 — 소프트웨어 SL은 백업)
+# ══════════════════════════════════════════════════════════════
+
+def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
+                           qty: float, sl_price: float) -> str:
+    """거래소에 STOP_LOSS_LIMIT 매도 주문 등록. 실패 시 '' 반환(소프트웨어 SL 폴백)."""
+    if not SPOT_EXCHANGE_STOP:
+        return ''
+    limit_price = sl_price * (1 - SPOT_STOP_LIMIT_GAP)
+    if qty * limit_price < SPOT_MIN_ORDER_USDT:
+        log.info(f'[{strategy}] {symbol} 스탑주문 생략: NOTIONAL 미달 '
+                 f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
+        return ''
+    try:
+        order = _get_ex().create_order(
+            ccxt_sym, 'limit', 'sell', qty, limit_price,
+            params={'stopPrice': sl_price, 'timeInForce': 'GTC'})
+        order_id = str(order.get('id', '') or '')
+        log.info(f'[{strategy}] {symbol} 거래소 스탑주문 등록: id={order_id} '
+                 f'trigger={sl_price:,.4f} limit={limit_price:,.4f}')
+        return order_id
+    except Exception as e:
+        log.warning(f'[{strategy}] {symbol} 스탑주문 등록 실패(소프트웨어 SL로 폴백): {e}')
+        _tg(f'⚠️ [{strategy}] {symbol} 거래소 스탑주문 실패 — 소프트웨어 SL만 작동: {e}')
+        return ''
+
+
+def _cancel_stop_order(strategy: str, symbol: str, ccxt_sym: str, order_id: str) -> None:
+    """스탑 주문 취소. 이미 체결/취소된 주문이면 조용히 무시."""
+    if not order_id:
+        return
+    try:
+        _get_ex().cancel_order(order_id, ccxt_sym)
+        log.info(f'[{strategy}] {symbol} 스탑주문 취소: id={order_id}')
+    except Exception as e:
+        # 이미 체결/취소된 경우 등 — 매도 진행에 지장 없으므로 경고만
+        log.warning(f'[{strategy}] {symbol} 스탑주문 취소 실패(무시): {e}')
+
+
+def _fetch_stop_order(ccxt_sym: str, order_id: str) -> Optional[dict]:
+    """스탑 주문 상태 조회. 실패 시 None (소프트웨어 SL이 계속 커버)."""
+    try:
+        return _get_ex().fetch_order(order_id, ccxt_sym)
+    except Exception as e:
+        log.warning(f'{ccxt_sym} 스탑주문 조회 실패(무시): {e}')
+        return None
 
 
 def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float,
@@ -643,6 +707,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
     )
 
+    # 거래소 측 스탑 주문 등록 (봇 다운 중에도 SL 집행 — 실패 시 소프트웨어 SL 폴백)
+    if not _state['dry_run']:
+        stop_id = _place_stop_loss_order(strategy, symbol, ccxt_sym, qty, sl_final)
+        if stop_id:
+            _update_position_order_id(strategy, symbol, stop_id)
+
     msg = (f'✅ [{strategy}] {symbol} 매수\n'
            f'   체결가: {fill_price:,.4f} | SL: {sl_final:,.4f}\n'
            f'   수량: {qty:.6f} | 비용: ${cost_usdt:.2f}\n'
@@ -666,6 +736,9 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     exit_price = price
 
     if not _state['dry_run']:
+        # 거래소 스탑 주문 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
+        # 시장가 매도가 실패하고, 아래 사전잔고 확인이 수동매도로 오판한다.
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
         # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
         try:
             _base_asset = ccxt_sym.split('/')[0]
@@ -768,11 +841,65 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
 #  포지션 관리
 # ══════════════════════════════════════════════════════════════
 
+def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
+                             pos: dict) -> bool:
+    """거래소 스탑 주문 상태 처리.
+    체결(closed) → 거래 기록 + 포지션 삭제 후 True 반환 (관리 종료).
+    취소/거부/만료 → 재등록 시도(실패 시 소프트웨어 SL 폴백) 후 False.
+    조회 실패/미체결 → False (평소 관리 계속).
+    """
+    order_id = pos.get('sl_order_id') or ''
+    order = _fetch_stop_order(ccxt_sym, order_id)
+    if order is None:
+        return False
+
+    status = str(order.get('status', '') or '').lower()
+    if status == 'closed':
+        entry_price = float(pos['entry_price'])
+        qty         = float(order.get('filled') or pos['qty_tokens'])
+        exit_price  = float(order.get('average') or order.get('price') or pos['sl'])
+        sl_dist     = abs(entry_price - float(pos['sl']))
+        pnl_usdt    = (exit_price - entry_price) * qty
+        pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+        pnl_r       = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
+        entry_ts    = pos['entry_ts']
+        hold_hours  = (datetime.now(timezone.utc) -
+                       datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+        _delete_position(strategy, symbol)
+        _log_trade(strategy, symbol, entry_price, exit_price, qty,
+                   float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
+                   hold_hours, 'SL', pos.get('regime', ''), entry_ts)
+        with _state_lock:
+            _state['day_pnl'] += pnl_usdt
+        msg = (f'❌ [{strategy}] {symbol} 청산 (SL — 거래소 스탑 체결)\n'
+               f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
+               f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)')
+        log.info(msg)
+        _tg(msg)
+        return True
+
+    if status in ('canceled', 'cancelled', 'rejected', 'expired'):
+        # 봇 외부에서 취소된 경우 등 — 재등록 시도, 실패 시 소프트웨어 SL 폴백
+        log.warning(f'[{strategy}] {symbol} 스탑주문 {status} 감지 — 재등록 시도')
+        new_id = _place_stop_loss_order(strategy, symbol, ccxt_sym,
+                                        float(pos['qty_tokens']), float(pos['sl']))
+        _update_position_order_id(strategy, symbol, new_id)
+    return False
+
+
 def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> None:
     """현재 포지션 SL/TP/청산 체크."""
     pos = _load_position(strategy, symbol)
     if pos is None:
         return
+
+    # 거래소 스탑 주문 상태 확인 (체결됐으면 여기서 거래 기록 후 종료)
+    if not _state['dry_run'] and (pos.get('sl_order_id') or ''):
+        if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
+            return
+        pos = _load_position(strategy, symbol)   # 재무장 시 sl_order_id 갱신 반영
+        if pos is None:
+            return
 
     price     = _get_price(ccxt_sym)
     entry     = float(pos['entry_price'])
@@ -1106,6 +1233,9 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                     # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
                     _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
+                    # 고아 스탑 주문 방지: 남아있으면 취소 (이미 체결/취소면 무시됨)
+                    _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
+                                       pos.get('sl_order_id') or '')
                     _delete_position(strategy, sym)
                 elif actual < db_qty * 0.90:
                     # 10% 이상 괴리 — DB 수량 실제값으로 업데이트
@@ -1209,6 +1339,14 @@ def main():
     parser.add_argument('--strategies', default=','.join(DEFAULT_ACTIVE_STRATEGIES),
                         help='활성 전략 (쉼표 구분)')
     args = parser.parse_args()
+
+    # 킬스위치 기동 가드: systemd Restart=on-failure와 함께 사용 —
+    # 킬스위치가 있으면 정상 종료(exit 0)해 재시작 루프를 막는다.
+    # 재가동하려면 킬스위치 파일을 삭제할 것 (대시보드 start는 자동 삭제).
+    if SPOT_KILL_SWITCH.exists():
+        log.warning(f'[메인] 킬스위치 감지({SPOT_KILL_SWITCH}) — 기동 중단. '
+                    f'재가동하려면 파일을 삭제하세요.')
+        return
 
     _state['dry_run'] = args.dry_run
     _state['active_strategies'] = [s.strip().upper() for s in args.strategies.split(',')]

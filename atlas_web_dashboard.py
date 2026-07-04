@@ -528,6 +528,11 @@ async def panic(req: Request):
                     sym = p['symbol'].replace('USDT', '/USDT')
                     qty = float(p['qty'])
                     if qty > 0:
+                        # 열린 스탑 주문이 잔고를 잠그므로 먼저 전부 취소
+                        try:
+                            ex.cancel_all_orders(sym)
+                        except Exception:
+                            pass
                         ex.create_order(sym, 'market', 'sell', qty)
                         sold += 1
                         log.warning(f'강제 매도: {sym} {qty}')
