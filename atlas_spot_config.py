@@ -285,6 +285,43 @@ REGIME_STRATEGY_MAP = {
 #  TRENDING_DOWN 담당 S4는 기본값에 빠져 있어 하락장 마비가 지속됐음)
 DEFAULT_ACTIVE_STRATEGIES = ['S3', 'S4', 'S5', 'S6']
 
+# 라이브 라우팅되는 전략 = REGIME_STRATEGY_MAP에 배정된 전략의 합집합.
+# 여기 없는 전략(S1/S2/S7/S7V4)은 백테스트·연구 전용이며 라이브에서
+# 신호가 나와도 진입하지 않는다. (atlas_spot_backtest.py는 전 전략 실행 가능)
+#   · S1 : Buy&Hold 벤치마크 (백테스트 비교 기준)
+#   · S2 : SMA 골든크로스 — 1D 장기추세, 현재 라우팅 제외
+#   · S7 : MACD 모멘텀 — S7V4(강화판)로 대체된 구버전
+#   · S7V4: MACD 강화판 — 상승 모멘텀 전략이라 하락장 부적합해 벤치(b470232)
+LIVE_STRATEGIES = sorted({s for strats in REGIME_STRATEGY_MAP.values() for s in strats})
+
+# ─────────────────────────────────────────────────────────────
+# 전략/레짐 표시 메타데이터 (대시보드·리포트 공용 단일 출처)
+# ─────────────────────────────────────────────────────────────
+STRATEGY_NAMES_KR = {
+    'S1': 'Buy & Hold',   'S2': 'SMA 골든크로스', 'S3': 'EMA 추세추종',
+    'S4': 'RSI 평균회귀',  'S5': 'BB 밴드반등',    'S6': 'Donchian 돌파',
+    'S7': 'MACD 모멘텀',   'S7V4': 'MACD 모멘텀(강화)',
+}
+
+# 전략별 진입 조건 요약 (아래 상수 변경 시 문구도 함께 갱신)
+STRATEGY_CONDITIONS = {
+    'S3': 'EMA20이 EMA50을 상향 돌파 + 종가 > EMA200',
+    'S4': 'RSI(14)가 30을 상향 돌파 + 종가 ≤ BB하단×1.03',
+    'S5': '종가 < BB하단 + RSI(14) < 30',
+    'S6': '20일 신고가 돌파 + 거래량 2.0배 스파이크',
+    'S7': 'MACD 히스토그램 골든크로스 + 종가 > EMA200',
+    'S7V4': 'MACD 히스토그램 골든크로스 + ADX≥25 + 거래량 1.3배 + 종가 > EMA200',
+}
+
+# 레짐 한글명 + 한 줄 성격 설명
+REGIME_DESCRIPTIONS = {
+    'TRENDING_UP':   ('상승 추세',   'BTC가 EMA200 위 + 강한 추세 — 돌파 전략으로 신고가 코인 추격'),
+    'TRENDING_DOWN': ('하락 추세',   'BTC가 EMA200 아래 + 강한 추세 — 신규 진입에 보수적'),
+    'RANGING':       ('박스권 횡보', '추세 약함(ADX 낮음) — 박스 하단 반등만 제한적으로 노림'),
+    'WEAK_TREND':    ('약한 추세',   '추세 방향 모호 — 추세·반등 전략 혼합 운용'),
+    'CRISIS':        ('변동성 위기', 'ATR 급등 — 모든 신규 진입 차단, 자본 방어 모드'),
+}
+
 # WEAK_TREND 리스크 스케일 (50% — 약추세에서 리스크 절반)
 WEAK_TREND_RISK_SCALE    = 0.50
 TRENDING_DOWN_RISK_SCALE = 0.30  # TRENDING_DOWN 구간 리스크 30% (백테스트 검증)

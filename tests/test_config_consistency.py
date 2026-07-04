@@ -72,7 +72,21 @@ class TestMainUsesDefaultList:
         import atlas_spot_main as sm
         assert sm._state['active_strategies'] == list(DEFAULT_ACTIVE_STRATEGIES)
 
-    def test_dashboard_mirror_map_matches_config(self):
-        """대시보드의 수동 미러 맵이 config와 어긋나면 브리핑이 거짓말을 한다."""
+    def test_dashboard_imports_map_from_config(self):
+        """대시보드가 레짐 맵을 config에서 직접 import하는지 — 수동 복사본이면
+        drift로 브리핑이 거짓말을 하게 된다 (이제 동일 객체여야 함)."""
         import atlas_web_dashboard as wd
-        assert wd._REGIME_STRAT_MAP == REGIME_STRATEGY_MAP
+        assert wd._REGIME_STRAT_MAP is REGIME_STRATEGY_MAP
+
+    def test_dashboard_metadata_covers_live_strategies(self):
+        """라이브 라우팅되는 전 전략이 대시보드 표시 메타데이터에 존재해야
+        브리핑에서 이름/조건이 누락되지 않는다."""
+        import atlas_web_dashboard as wd
+        from atlas_spot_config import LIVE_STRATEGIES
+        for s in LIVE_STRATEGIES:
+            assert s in wd._STRAT_FULL, f'{s}: 한글명 누락'
+            assert s in wd._STRAT_CONDITION, f'{s}: 진입조건 누락'
+
+    def test_live_strategies_derived_from_regime_map(self):
+        from atlas_spot_config import LIVE_STRATEGIES
+        assert set(LIVE_STRATEGIES) == _mapped_strategies()

@@ -34,6 +34,7 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 import argparse
 import logging
+import queue
 import shutil
 import sqlite3
 import sys
@@ -451,14 +452,55 @@ _entry_lock = threading.Lock()
 #  Telegram
 # ══════════════════════════════════════════════════════════════
 
+# 텔레그램 전송 큐 — 전략 루프가 동기 HTTP(타임아웃)로 막히지 않도록
+# 실제 전송은 백그라운드 워커(_tg_worker)가 처리한다.
+_tg_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
+
+
 def _tg(msg: str):
+    """텔레그램 메시지를 큐에 넣고 즉시 반환 (논블로킹)."""
     if not TG_TOKEN or not TG_CHAT_ID:
         return
+    try:
+        _tg_queue.put_nowait(msg)
+    except queue.Full:
+        # 텔레그램 장기 장애로 큐가 가득 차면 가장 오래된 메시지를 버리고 최신 우선
+        try:
+            _tg_queue.get_nowait()
+            _tg_queue.put_nowait(msg)
+        except queue.Empty:
+            pass
+
+
+def _tg_send_now(msg: str) -> None:
+    """실제 HTTP 전송 (워커/flush 전용)."""
     try:
         url = f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage'
         requests.post(url, data={'chat_id': TG_CHAT_ID, 'text': msg}, timeout=5)
     except Exception:
         pass
+
+
+def _tg_worker(stop_event: threading.Event) -> None:
+    """큐에 쌓인 텔레그램 메시지를 백그라운드에서 순차 전송."""
+    while not stop_event.is_set():
+        try:
+            msg = _tg_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        _tg_send_now(msg)
+    # 종료 시 남은 메시지 flush (루프 실행 중 쌓인 것)
+    _tg_flush()
+
+
+def _tg_flush() -> None:
+    """큐에 남은 메시지를 동기적으로 모두 전송 (종료 시 유실 방지)."""
+    while True:
+        try:
+            msg = _tg_queue.get_nowait()
+        except queue.Empty:
+            break
+        _tg_send_now(msg)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1436,6 +1478,7 @@ def main():
         threads.append(t)
 
     # 백그라운드 루프 시작
+    _t(_tg_worker,               'TgWorker',        stop_event)   # 텔레그램 비동기 전송
     _t(_balance_poller,          'BalancePoll',     stop_event)
     _t(regime_loop,              'RegimeLoop',       stop_event)
     _t(universe_refresh_loop,    'UniverseRefresh', ex, _state, stop_event, _state_lock)
@@ -1470,7 +1513,9 @@ def main():
         stop_event.set()
         for t in threads:
             t.join(timeout=5)
+        # 워커 종료 후 enqueue되므로 종료 알림은 동기 flush로 확실히 전송
         _tg('🔴 ATLAS Spot 봇 종료')
+        _tg_flush()
         log.info('[메인] 종료 완료')
 
 

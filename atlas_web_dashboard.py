@@ -13,6 +13,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+# 전략/레짐 표시 메타데이터는 config를 단일 출처로 사용 (수동 복사 금지 — drift 방지)
+from atlas_spot_config import (
+    REGIME_STRATEGY_MAP as _REGIME_STRAT_MAP,
+    STRATEGY_NAMES_KR   as _STRAT_FULL,
+    STRATEGY_CONDITIONS as _STRAT_CONDITION,
+    REGIME_DESCRIPTIONS as _REGIME_DESC,
+)
+
 load_dotenv(Path(__file__).parent / '.env')
 
 DB_FILE         = Path(__file__).parent / 'state' / 'atlas_spot.db'
@@ -354,37 +362,6 @@ def _regime_from_log() -> str:
     except Exception as e:
         log.error(f'regime_from_log 실패: {e}')
     return None
-
-
-# 레짐별 활성 전략 (atlas_spot_config.REGIME_STRATEGY_MAP 미러 — 변경 시 동기화)
-_REGIME_STRAT_MAP = {
-    'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S4', 'S5'],
-    'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S4'],
-    'CRISIS':        [],
-}
-_STRAT_FULL = {
-    'S3': 'EMA 추세추종', 'S4': 'RSI 평균회귀', 'S5': 'BB 밴드반등',
-    'S6': 'Donchian 돌파', 'S7': 'MACD 모멘텀', 'S7V4': 'MACD 모멘텀(강화)',
-}
-# 전략별 진입 조건 요약 (atlas_spot_config.py 상수 미러 — 변경 시 동기화)
-_STRAT_CONDITION = {
-    'S3': 'EMA20이 EMA50을 상향 돌파 + 종가 > EMA200',
-    'S4': 'RSI(14)가 30을 상향 돌파 + 종가 ≤ BB하단×1.03',
-    'S5': '종가 < BB하단 + RSI(14) < 30',
-    'S6': '20일 신고가 돌파 + 거래량 2.0배 스파이크',
-    'S7': 'MACD 히스토그램 골든크로스 + 종가 > EMA200',
-    'S7V4': 'MACD 히스토그램 골든크로스 + ADX≥25 + 거래량 1.3배 + 종가 > EMA200',
-}
-# 레짐 한글명 + 한 줄 성격 설명
-_REGIME_DESC = {
-    'TRENDING_UP':   ('상승 추세',   'BTC가 EMA200 위 + 강한 추세 — 돌파 전략으로 신고가 코인 추격'),
-    'TRENDING_DOWN': ('하락 추세',   'BTC가 EMA200 아래 + 강한 추세 — 신규 진입에 보수적'),
-    'RANGING':       ('박스권 횡보', '추세 약함(ADX 낮음) — 박스 하단 반등만 제한적으로 노림'),
-    'WEAK_TREND':    ('약한 추세',   '추세 방향 모호 — 추세·반등 전략 혼합 운용'),
-    'CRISIS':        ('변동성 위기', 'ATR 급등 — 모든 신규 진입 차단, 자본 방어 모드'),
-}
 
 
 def _parse_regime_metrics() -> dict:
