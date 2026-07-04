@@ -14,9 +14,9 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 [전략별 레짐 라우팅] (REGIME_STRATEGY_MAP 기준)
   TRENDING_UP  : S6(Donchian)
-  RANGING      : S5(BB Bounce)
+  RANGING      : S4(RSI), S5(BB Bounce)
   WEAK_TREND   : S3, S5, S6 (50% 리스크)
-  TRENDING_DOWN: S7V4(MACD) — S5 하락장 0승 이력으로 차단, 30% 리스크
+  TRENDING_DOWN: S4(RSI 과매도 반등만, 30% 리스크) — S5 하락장 0승 이력으로 차단
   CRISIS       : 전면 차단
 
 [스팟 특화]
@@ -34,6 +34,7 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 import argparse
 import logging
+import queue
 import shutil
 import sqlite3
 import sys
@@ -58,11 +59,13 @@ from atlas_spot_config import (
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
+    SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
+    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
@@ -241,6 +244,7 @@ def init_spot_db():
             peak_price   REAL DEFAULT 0,
             entry_ts     TEXT NOT NULL,
             regime       TEXT DEFAULT '',
+            sl_order_id  TEXT DEFAULT '',
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -268,6 +272,11 @@ def init_spot_db():
             value TEXT
         );
         """)
+        # 마이그레이션: 기존 DB에 sl_order_id 컬럼이 없으면 추가
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(spot_positions)').fetchall()]
+        if 'sl_order_id' not in cols:
+            conn.execute("ALTER TABLE spot_positions ADD COLUMN sl_order_id TEXT DEFAULT ''")
+            log.info('[DB] spot_positions.sl_order_id 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -335,11 +344,71 @@ def _delete_position(strategy: str, symbol: str):
         )
 
 
+def _update_position_order_id(strategy: str, symbol: str, order_id: str):
+    with _db_lock, _db_conn() as conn:
+        conn.execute(
+            'UPDATE spot_positions SET sl_order_id=? WHERE strategy=? AND symbol=?',
+            (order_id, strategy, symbol)
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+#  거래소 측 스탑 주문 (봇 다운 중에도 SL 집행 — 소프트웨어 SL은 백업)
+# ══════════════════════════════════════════════════════════════
+
+def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
+                           qty: float, sl_price: float) -> str:
+    """거래소에 STOP_LOSS_LIMIT 매도 주문 등록. 실패 시 '' 반환(소프트웨어 SL 폴백)."""
+    if not SPOT_EXCHANGE_STOP:
+        return ''
+    limit_price = sl_price * (1 - SPOT_STOP_LIMIT_GAP)
+    if qty * limit_price < SPOT_MIN_ORDER_USDT:
+        log.info(f'[{strategy}] {symbol} 스탑주문 생략: NOTIONAL 미달 '
+                 f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
+        return ''
+    try:
+        order = _get_ex().create_order(
+            ccxt_sym, 'limit', 'sell', qty, limit_price,
+            params={'stopPrice': sl_price, 'timeInForce': 'GTC'})
+        order_id = str(order.get('id', '') or '')
+        log.info(f'[{strategy}] {symbol} 거래소 스탑주문 등록: id={order_id} '
+                 f'trigger={sl_price:,.4f} limit={limit_price:,.4f}')
+        return order_id
+    except Exception as e:
+        log.warning(f'[{strategy}] {symbol} 스탑주문 등록 실패(소프트웨어 SL로 폴백): {e}')
+        _tg(f'⚠️ [{strategy}] {symbol} 거래소 스탑주문 실패 — 소프트웨어 SL만 작동: {e}')
+        return ''
+
+
+def _cancel_stop_order(strategy: str, symbol: str, ccxt_sym: str, order_id: str) -> None:
+    """스탑 주문 취소. 이미 체결/취소된 주문이면 조용히 무시."""
+    if not order_id:
+        return
+    try:
+        _get_ex().cancel_order(order_id, ccxt_sym)
+        log.info(f'[{strategy}] {symbol} 스탑주문 취소: id={order_id}')
+    except Exception as e:
+        # 이미 체결/취소된 경우 등 — 매도 진행에 지장 없으므로 경고만
+        log.warning(f'[{strategy}] {symbol} 스탑주문 취소 실패(무시): {e}')
+
+
+def _fetch_stop_order(ccxt_sym: str, order_id: str) -> Optional[dict]:
+    """스탑 주문 상태 조회. 실패 시 None (소프트웨어 SL이 계속 커버)."""
+    try:
+        return _get_ex().fetch_order(order_id, ccxt_sym)
+    except Exception as e:
+        log.warning(f'{ccxt_sym} 스탑주문 조회 실패(무시): {e}')
+        return None
+
+
 def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float,
                qty: float, cost: float, pnl_usdt: float, pnl_pct: float,
                pnl_r: float, hold_hours: float, reason: str, regime: str,
-               entry_ts: str):
-    fee = exit_price * qty * BT_SPOT_FEE
+               entry_ts: str) -> float:
+    """거래 기록 저장. 반환값: 수수료 차감 net PnL (day_pnl 등 리스크 로직용).
+    pnl_usdt/pnl_r 컬럼은 백테스트와의 비교 일관성을 위해 gross로 유지하고,
+    수수료는 fee_usdt(매수+매도 왕복)에 별도 기록한다."""
+    fee = (entry_price + exit_price) * qty * BT_SPOT_FEE
     with _db_lock, _db_conn() as conn:
         conn.execute("""
         INSERT INTO spot_trades
@@ -351,6 +420,7 @@ def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float
               round(hold_hours, 2), reason,
               entry_ts, datetime.now(timezone.utc).isoformat(),
               regime, round(fee, 4)))
+    return pnl_usdt - fee
 
 
 # ══════════════════════════════════════════════════════════════
@@ -368,25 +438,69 @@ _state = {
     'universe_ranked':  [],   # 모멘텀 정렬 순서 (RS Gate용)
     'ratchet_scale':    1.0,
     'dry_run':          False,
-    'active_strategies': ['S2', 'S3', 'S4', 'S5', 'S6', 'S7'],
+    'active_strategies': list(DEFAULT_ACTIVE_STRATEGIES),
     'ratchet_alert_tier': 0,     # 0=정상, 1=소프트DD, 2=하드DD — 알림 중복 방지용
     'daily_loss_alerted': False, # 일간 손실 한도 알림 중복 방지 (자정 리셋)
 }
 _state_lock = threading.Lock()
+# 매수 경로 직렬화: 4H/1D 두 전략 루프가 동시에 진입하면 포지션 수 한도
+# 체크→저장 사이(TOCTOU)에 SPOT_MAX_POSITIONS를 초과할 수 있다.
+_entry_lock = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════════
 #  Telegram
 # ══════════════════════════════════════════════════════════════
 
+# 텔레그램 전송 큐 — 전략 루프가 동기 HTTP(타임아웃)로 막히지 않도록
+# 실제 전송은 백그라운드 워커(_tg_worker)가 처리한다.
+_tg_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
+
+
 def _tg(msg: str):
+    """텔레그램 메시지를 큐에 넣고 즉시 반환 (논블로킹)."""
     if not TG_TOKEN or not TG_CHAT_ID:
         return
+    try:
+        _tg_queue.put_nowait(msg)
+    except queue.Full:
+        # 텔레그램 장기 장애로 큐가 가득 차면 가장 오래된 메시지를 버리고 최신 우선
+        try:
+            _tg_queue.get_nowait()
+            _tg_queue.put_nowait(msg)
+        except queue.Empty:
+            pass
+
+
+def _tg_send_now(msg: str) -> None:
+    """실제 HTTP 전송 (워커/flush 전용)."""
     try:
         url = f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage'
         requests.post(url, data={'chat_id': TG_CHAT_ID, 'text': msg}, timeout=5)
     except Exception:
         pass
+
+
+def _tg_worker(stop_event: threading.Event) -> None:
+    """큐에 쌓인 텔레그램 메시지를 백그라운드에서 순차 전송."""
+    while not stop_event.is_set():
+        try:
+            msg = _tg_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        _tg_send_now(msg)
+    # 종료 시 남은 메시지 flush (루프 실행 중 쌓인 것)
+    _tg_flush()
+
+
+def _tg_flush() -> None:
+    """큐에 남은 메시지를 동기적으로 모두 전송 (종료 시 유실 방지)."""
+    while True:
+        try:
+            msg = _tg_queue.get_nowait()
+        except queue.Empty:
+            break
+        _tg_send_now(msg)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -452,45 +566,55 @@ def _get_kelly_scale(strategy: str) -> float:
 def _get_ratchet_scale() -> float:
     """Drawdown Ratchet 스케일.
     회복 조건: DD 바닥 대비 +SPOT_RATCHET_RECOVER(15%) 상승 시 스케일 복원.
+    읽기-수정-쓰기(alert_tier/floor)가 잔고폴러·양쪽 전략 루프와 경합하지
+    않도록 _state_lock으로 원자화한다. 알림 전송은 락 밖에서 수행.
     """
-    equity = _state['equity']
-    peak   = _state['peak_equity']
-    if peak <= 0 or equity <= 0:
-        return 1.0
-    dd = (peak - equity) / peak
-    if dd >= SPOT_RATCHET_DD_HARD:
-        if _state['ratchet_alert_tier'] < 2:
-            _state['ratchet_alert_tier'] = 2
-            _tg(f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
-                f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
-        # 바닥(floor) 추적: ratchet_floor에 최저점 기록
-        # 최초 진입 시에도 floor를 _state에 저장해야 함 — 그렇지 않으면 다음 호출에서도
-        # get()의 기본값이 항상 "현재" equity가 되어 recover_pct가 영원히 0이 되는 버그 발생
-        if 'ratchet_floor' not in _state:
-            _state['ratchet_floor'] = equity
-        floor = _state['ratchet_floor']
-        if equity < floor:
-            _state['ratchet_floor'] = equity
-            floor = equity
-        # 바닥 대비 회복률 확인
-        recover_pct = (equity - floor) / floor if floor > 0 else 0.0
-        if recover_pct >= SPOT_RATCHET_RECOVER:
-            _state['ratchet_floor'] = equity  # 회복 기준점 리셋
-            _state['ratchet_alert_tier'] = 1
-            return 0.70   # Hard DD 회복 → 중간 단계로 복원
-        return 0.40
-    if dd >= SPOT_RATCHET_DD_THRESH:
-        if _state['ratchet_alert_tier'] < 1:
-            _state['ratchet_alert_tier'] = 1
-            _tg(f'⚠️ [경고] 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
-                f'(-{dd*100:.1f}%) — 리스크 스케일 70%로 축소')
-        _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
-        return 0.70
-    if _state['ratchet_alert_tier'] > 0:
-        _state['ratchet_alert_tier'] = 0
-        _tg(f'✅ [회복] 드로다운 해소: 현재 ${equity:,.2f} (피크 대비 -{dd*100:.1f}%) — 리스크 스케일 정상 복원')
-    _state.pop('ratchet_floor', None)
-    return 1.0
+    msg = None
+    with _state_lock:
+        equity = _state['equity']
+        peak   = _state['peak_equity']
+        if peak <= 0 or equity <= 0:
+            return 1.0
+        dd = (peak - equity) / peak
+        if dd >= SPOT_RATCHET_DD_HARD:
+            if _state['ratchet_alert_tier'] < 2:
+                _state['ratchet_alert_tier'] = 2
+                msg = (f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                       f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
+            # 바닥(floor) 추적: ratchet_floor에 최저점 기록
+            # 최초 진입 시에도 floor를 _state에 저장해야 함 — 그렇지 않으면 다음 호출에서도
+            # get()의 기본값이 항상 "현재" equity가 되어 recover_pct가 영원히 0이 되는 버그 발생
+            if 'ratchet_floor' not in _state:
+                _state['ratchet_floor'] = equity
+            floor = _state['ratchet_floor']
+            if equity < floor:
+                _state['ratchet_floor'] = equity
+                floor = equity
+            # 바닥 대비 회복률 확인
+            recover_pct = (equity - floor) / floor if floor > 0 else 0.0
+            if recover_pct >= SPOT_RATCHET_RECOVER:
+                _state['ratchet_floor'] = equity  # 회복 기준점 리셋
+                _state['ratchet_alert_tier'] = 1
+                scale = 0.70   # Hard DD 회복 → 중간 단계로 복원
+            else:
+                scale = 0.40
+        elif dd >= SPOT_RATCHET_DD_THRESH:
+            if _state['ratchet_alert_tier'] < 1:
+                _state['ratchet_alert_tier'] = 1
+                msg = (f'⚠️ [경고] 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                       f'(-{dd*100:.1f}%) — 리스크 스케일 70%로 축소')
+            _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
+            scale = 0.70
+        else:
+            if _state['ratchet_alert_tier'] > 0:
+                _state['ratchet_alert_tier'] = 0
+                msg = (f'✅ [회복] 드로다운 해소: 현재 ${equity:,.2f} '
+                       f'(피크 대비 -{dd*100:.1f}%) — 리스크 스케일 정상 복원')
+            _state.pop('ratchet_floor', None)
+            scale = 1.0
+    if msg:
+        _tg(msg)
+    return scale
 
 
 def _get_spot_funding(sym: str) -> float:
@@ -534,7 +658,14 @@ def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
 
 def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
               sig: dict, price: float, regime: str) -> bool:
-    """현물 매수 실행."""
+    """현물 매수 실행. 4H/1D 두 전략 루프가 동시에 진입해도 포지션 수
+    한도 체크→저장이 원자적이 되도록 _entry_lock으로 직렬화한다."""
+    with _entry_lock:
+        return _spot_buy_locked(strategy, symbol, ccxt_sym, sig, price, regime)
+
+
+def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
+                     sig: dict, price: float, regime: str) -> bool:
     if _state['paused']:
         log.info(f'[{strategy}] {symbol} 매수 차단 (일시정지)')
         return False
@@ -642,6 +773,12 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
     )
 
+    # 거래소 측 스탑 주문 등록 (봇 다운 중에도 SL 집행 — 실패 시 소프트웨어 SL 폴백)
+    if not _state['dry_run']:
+        stop_id = _place_stop_loss_order(strategy, symbol, ccxt_sym, qty, sl_final)
+        if stop_id:
+            _update_position_order_id(strategy, symbol, stop_id)
+
     msg = (f'✅ [{strategy}] {symbol} 매수\n'
            f'   체결가: {fill_price:,.4f} | SL: {sl_final:,.4f}\n'
            f'   수량: {qty:.6f} | 비용: ${cost_usdt:.2f}\n'
@@ -665,6 +802,9 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     exit_price = price
 
     if not _state['dry_run']:
+        # 거래소 스탑 주문 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
+        # 시장가 매도가 실패하고, 아래 사전잔고 확인이 수동매도로 오판한다.
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
         # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
         try:
             _base_asset = ccxt_sym.split('/')[0]
@@ -679,11 +819,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 _sl_d = abs(entry_price - sl)
                 _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                 _delete_position(strategy, symbol)
-                _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                           'MANUAL_SOLD', regime, entry_ts)
+                _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                  _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                  'MANUAL_SOLD', regime, entry_ts)
                 with _state_lock:
-                    _state['day_pnl'] += _pnl_u
+                    _state['day_pnl'] += _net
                 return
             elif _actual_free < qty:
                 log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
@@ -712,11 +852,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                         _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
                         _sl_d = abs(entry_price - sl)
                         _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
-                        _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                                   _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                                   'MANUAL_SOLD', regime, entry_ts)
+                        _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
+                                          _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
+                                          'MANUAL_SOLD', regime, entry_ts)
                         with _state_lock:
-                            _state['day_pnl'] += _pnl_u
+                            _state['day_pnl'] += _net
                         return
                     elif _actual_free > 0:
                         # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
@@ -748,11 +888,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     hold_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
 
     _delete_position(strategy, symbol)
-    _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
-               pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts)
+    net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
+                         pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts)
 
     with _state_lock:
-        _state['day_pnl'] += pnl_usdt
+        _state['day_pnl'] += net_pnl
 
     emoji = '✅' if pnl_usdt > 0 else '❌'
     msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason})\n'
@@ -767,11 +907,65 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
 #  포지션 관리
 # ══════════════════════════════════════════════════════════════
 
+def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
+                             pos: dict) -> bool:
+    """거래소 스탑 주문 상태 처리.
+    체결(closed) → 거래 기록 + 포지션 삭제 후 True 반환 (관리 종료).
+    취소/거부/만료 → 재등록 시도(실패 시 소프트웨어 SL 폴백) 후 False.
+    조회 실패/미체결 → False (평소 관리 계속).
+    """
+    order_id = pos.get('sl_order_id') or ''
+    order = _fetch_stop_order(ccxt_sym, order_id)
+    if order is None:
+        return False
+
+    status = str(order.get('status', '') or '').lower()
+    if status == 'closed':
+        entry_price = float(pos['entry_price'])
+        qty         = float(order.get('filled') or pos['qty_tokens'])
+        exit_price  = float(order.get('average') or order.get('price') or pos['sl'])
+        sl_dist     = abs(entry_price - float(pos['sl']))
+        pnl_usdt    = (exit_price - entry_price) * qty
+        pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+        pnl_r       = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
+        entry_ts    = pos['entry_ts']
+        hold_hours  = (datetime.now(timezone.utc) -
+                       datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+        _delete_position(strategy, symbol)
+        net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty,
+                             float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
+                             hold_hours, 'SL', pos.get('regime', ''), entry_ts)
+        with _state_lock:
+            _state['day_pnl'] += net_pnl
+        msg = (f'❌ [{strategy}] {symbol} 청산 (SL — 거래소 스탑 체결)\n'
+               f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
+               f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)')
+        log.info(msg)
+        _tg(msg)
+        return True
+
+    if status in ('canceled', 'cancelled', 'rejected', 'expired'):
+        # 봇 외부에서 취소된 경우 등 — 재등록 시도, 실패 시 소프트웨어 SL 폴백
+        log.warning(f'[{strategy}] {symbol} 스탑주문 {status} 감지 — 재등록 시도')
+        new_id = _place_stop_loss_order(strategy, symbol, ccxt_sym,
+                                        float(pos['qty_tokens']), float(pos['sl']))
+        _update_position_order_id(strategy, symbol, new_id)
+    return False
+
+
 def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> None:
     """현재 포지션 SL/TP/청산 체크."""
     pos = _load_position(strategy, symbol)
     if pos is None:
         return
+
+    # 거래소 스탑 주문 상태 확인 (체결됐으면 여기서 거래 기록 후 종료)
+    if not _state['dry_run'] and (pos.get('sl_order_id') or ''):
+        if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
+            return
+        pos = _load_position(strategy, symbol)   # 재무장 시 sl_order_id 갱신 반영
+        if pos is None:
+            return
 
     price     = _get_price(ccxt_sym)
     entry     = float(pos['entry_price'])
@@ -1105,7 +1299,31 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                     # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
                     _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
+                    # 고아 스탑 주문 방지: 남아있으면 취소 (이미 체결/취소면 무시됨)
+                    _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
+                                       pos.get('sl_order_id') or '')
                     _delete_position(strategy, sym)
+                    # 거래 기록 — _spot_sell의 수동매도 경로와 동일하게 통계 보존
+                    # (체결가 불명이므로 현재가로 추정, 조회 불가 시 진입가)
+                    try:
+                        est_price = _get_price(sym.replace('USDT', '/USDT'))
+                        entry_price = float(pos['entry_price'])
+                        if est_price <= 0:
+                            est_price = entry_price
+                        sl_d   = abs(entry_price - float(pos['sl']))
+                        pnl_u  = (est_price - entry_price) * db_qty
+                        pnl_p  = (est_price - entry_price) / entry_price if entry_price > 0 else 0
+                        pnl_r  = pnl_u / (sl_d * db_qty) if sl_d > 0 and db_qty > 0 else 0
+                        hold_h = (datetime.now(timezone.utc) -
+                                  datetime.fromisoformat(pos['entry_ts'])).total_seconds() / 3600
+                        net = _log_trade(strategy, sym, entry_price, est_price, db_qty,
+                                         float(pos['cost_usdt']), pnl_u, pnl_p, pnl_r,
+                                         round(hold_h, 2), 'MANUAL_SOLD',
+                                         pos.get('regime', ''), pos['entry_ts'])
+                        with _state_lock:
+                            _state['day_pnl'] += net
+                    except Exception as _le:
+                        log.warning(f'[검증] {sym} 수동매도 거래기록 실패(무시): {_le}')
                 elif actual < db_qty * 0.90:
                     # 10% 이상 괴리 — DB 수량 실제값으로 업데이트
                     log.warning(f'[검증] {sym} DB {db_qty:.6f} vs 실제 {actual:.6f} '
@@ -1179,11 +1397,13 @@ def _handle_tg_cmd(cmd: str) -> None:
         _tg(f'[Spot] 총자산: ${_state["equity"]:,.2f} (USDT: ${_state["usdt_balance"]:,.2f})')
 
     elif '/pause' in cmd:
-        _state['paused'] = True
+        with _state_lock:
+            _state['paused'] = True
         _tg('[Spot] 신규 진입 일시정지')
 
     elif '/resume' in cmd:
-        _state['paused'] = False
+        with _state_lock:
+            _state['paused'] = False
         _tg('[Spot] 신규 진입 재개')
 
     elif '/stop' in cmd:
@@ -1205,9 +1425,17 @@ def _handle_tg_cmd(cmd: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description='ATLAS Spot 트레이딩 봇')
     parser.add_argument('--dry-run', action='store_true', help='가상 실행 (주문 없음)')
-    parser.add_argument('--strategies', default='S3,S5,S6,S7V4',
+    parser.add_argument('--strategies', default=','.join(DEFAULT_ACTIVE_STRATEGIES),
                         help='활성 전략 (쉼표 구분)')
     args = parser.parse_args()
+
+    # 킬스위치 기동 가드: systemd Restart=on-failure와 함께 사용 —
+    # 킬스위치가 있으면 정상 종료(exit 0)해 재시작 루프를 막는다.
+    # 재가동하려면 킬스위치 파일을 삭제할 것 (대시보드 start는 자동 삭제).
+    if SPOT_KILL_SWITCH.exists():
+        log.warning(f'[메인] 킬스위치 감지({SPOT_KILL_SWITCH}) — 기동 중단. '
+                    f'재가동하려면 파일을 삭제하세요.')
+        return
 
     _state['dry_run'] = args.dry_run
     _state['active_strategies'] = [s.strip().upper() for s in args.strategies.split(',')]
@@ -1250,6 +1478,7 @@ def main():
         threads.append(t)
 
     # 백그라운드 루프 시작
+    _t(_tg_worker,               'TgWorker',        stop_event)   # 텔레그램 비동기 전송
     _t(_balance_poller,          'BalancePoll',     stop_event)
     _t(regime_loop,              'RegimeLoop',       stop_event)
     _t(universe_refresh_loop,    'UniverseRefresh', ex, _state, stop_event, _state_lock)
@@ -1284,7 +1513,9 @@ def main():
         stop_event.set()
         for t in threads:
             t.join(timeout=5)
+        # 워커 종료 후 enqueue되므로 종료 알림은 동기 flush로 확실히 전송
         _tg('🔴 ATLAS Spot 봇 종료')
+        _tg_flush()
         log.info('[메인] 종료 완료')
 
 

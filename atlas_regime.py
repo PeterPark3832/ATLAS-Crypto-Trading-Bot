@@ -187,21 +187,24 @@ def update_regime(ex, candle_cache=None) -> RegimeState:
         return get_cached_regime()
 
 
-def regime_loop(ex=None, candle_cache=None):
+def regime_loop(stop_event=None, candle_cache=None):
     """
     백그라운드 스레드: 1시간마다 레짐 갱신.
-    ex 파라미터는 하위 호환용으로만 유지 — 실제로는 스레드 전용
-    인스턴스(_make_regime_ex())를 사용하여 Nonce 충돌을 방지한다.
+    stop_event: threading.Event — set되면 루프 종료 (graceful shutdown).
+    CCXT는 스레드 전용 인스턴스(_make_regime_ex())를 생성해 Nonce 충돌 방지.
     """
     log    = logging.getLogger('atlas')
     _ex    = _make_regime_ex()   # 이 스레드만의 전용 CCXT 인스턴스
-    while True:
+    while stop_event is None or not stop_event.is_set():
         try:
             state = update_regime(_ex, candle_cache)
             log.info(f'[Regime] {state.summary()}')
         except Exception as e:
             log.warning(f'[Regime] loop 오류: {e}')
-        time.sleep(_REGIME_TTL)
+        if stop_event is not None:
+            stop_event.wait(_REGIME_TTL)
+        else:
+            time.sleep(_REGIME_TTL)
 
 
 def is_crisis() -> bool:

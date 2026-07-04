@@ -44,11 +44,12 @@ def _mock_query_db(monkeypatch, tmp_path, rows):
     for r in rows:
         con.execute("""
             INSERT INTO spot_trades (strategy, symbol, pnl_usdt, pnl_r, reason, regime,
-                                      entry_ts, exit_ts)
-            VALUES (?,?,?,?,?,?,?,?)
+                                      entry_ts, exit_ts, fee_usdt)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (r.get('strategy', 'S6'), r.get('symbol', 'BTCUSDT'), r['pnl_usdt'],
               r.get('pnl_r', 0.0), r.get('reason', 'TP'), r.get('regime', 'TRENDING_UP'),
-              r.get('entry_ts', '2021-01-01T00:00:00'), r['exit_ts']))
+              r.get('entry_ts', '2021-01-01T00:00:00'), r['exit_ts'],
+              r.get('fee', 0.0)))
     con.commit()
     con.close()
 
@@ -88,6 +89,13 @@ class TestGetTradeHistory:
         _mock_query_db(monkeypatch, tmp_path, [])
         result = ms.get_trade_history(30)
         assert '없음' in result
+
+    def test_pnl_is_net_of_fees(self, monkeypatch, tmp_path):
+        _mock_query_db(monkeypatch, tmp_path, [
+            {'pnl_usdt': 50.0, 'fee': 2.5, 'exit_ts': '2099-01-01T00:00:00'},
+        ])
+        result = ms.get_trade_history(9999)
+        assert '+47.50' in result
 
     def test_caps_display_at_25_rows(self, monkeypatch, tmp_path):
         rows = [{'pnl_usdt': 1.0, 'exit_ts': f'2099-01-{i+1:02d}T00:00:00'} for i in range(30)]

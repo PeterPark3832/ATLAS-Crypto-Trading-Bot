@@ -2,7 +2,7 @@
 ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import io, os, time, json, secrets, sqlite3, subprocess, logging, hashlib, hmac, threading
+import io, os, time, json, secrets, shlex, sqlite3, subprocess, logging, hashlib, hmac, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -13,6 +13,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+# 전략/레짐 표시 메타데이터는 config를 단일 출처로 사용 (수동 복사 금지 — drift 방지)
+from atlas_spot_config import (
+    REGIME_STRATEGY_MAP as _REGIME_STRAT_MAP,
+    STRATEGY_NAMES_KR   as _STRAT_FULL,
+    STRATEGY_CONDITIONS as _STRAT_CONDITION,
+    REGIME_DESCRIPTIONS as _REGIME_DESC,
+)
+
 load_dotenv(Path(__file__).parent / '.env')
 
 DB_FILE         = Path(__file__).parent / 'state' / 'atlas_spot.db'
@@ -22,6 +30,10 @@ BOT_DIR         = Path(__file__).parent
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 DASH_PASSWORD   = os.getenv('DASH_PASSWORD') or secrets.token_urlsafe(16)
 REFRESH_SEC     = int(os.getenv('DASH_REFRESH_SEC', '60'))
+# 봇 기동 인자 보존: 대시보드 start가 원래 운용 구성(--dry-run, --strategies 등)
+# 그대로 재기동하도록 .env에 명시 (예: BOT_START_ARGS="--strategies S3,S5,S6")
+# 미설정 시 인자 없이(라이브 모드 + 기본 전략) 기동되므로 반드시 확인할 것.
+BOT_START_ARGS  = os.getenv('BOT_START_ARGS', '')
 API_KEY         = os.getenv('BINANCE_API_KEY', '')
 API_SECRET      = os.getenv('BINANCE_API_SECRET', '')
 TG_TOKEN        = os.getenv('TG_TOKEN', '')
@@ -40,10 +52,20 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+
+if not os.getenv('DASH_PASSWORD'):
+    log.warning('DASH_PASSWORD 미설정 — 무작위 비밀번호가 생성되어 사실상 로그인 불가 '
+                '상태입니다. .env에 DASH_PASSWORD를 설정하세요.')
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 # ── 인증 ──────────────────────────────────────────────────────────
 _tokens: dict[str, float] = {}
+
+# 로그인 브루트포스 방어: IP당 실패 기록 (윈도 내 초과 시 429)
+_login_failures: dict[str, list[float]] = {}
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SEC   = 900   # 15분
 
 def _new_token() -> str:
     tok = secrets.token_hex(32)
@@ -75,6 +97,22 @@ def _fetch_prices(symbols) -> dict:
     except Exception as e:
         log.error(f'가격 배치 조회 실패: {e}')
     return {}
+
+
+def _try_login(password: str, client_ip: str) -> str:
+    """패스워드 검증 후 토큰 발급. 브루트포스 차단(429)/실패(401) 시 예외."""
+    now = time.time()
+    fails = [t for t in _login_failures.get(client_ip, []) if now - t < LOGIN_WINDOW_SEC]
+    if len(fails) >= LOGIN_MAX_FAILURES:
+        _login_failures[client_ip] = fails
+        log.warning(f'로그인 차단(브루트포스 의심): {client_ip}')
+        raise HTTPException(429, 'Too many attempts — try again later')
+    if hmac.compare_digest(str(password or ''), str(DASH_PASSWORD)):
+        _login_failures.pop(client_ip, None)
+        return _new_token()
+    fails.append(now)
+    _login_failures[client_ip] = fails
+    raise HTTPException(401, 'Invalid password')
 
 # ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
 _bal_cache: dict = {'val': None, 'ts': 0.0}
@@ -326,37 +364,6 @@ def _regime_from_log() -> str:
     return None
 
 
-# 레짐별 활성 전략 (atlas_spot_config.REGIME_STRATEGY_MAP 미러 — 변경 시 동기화)
-_REGIME_STRAT_MAP = {
-    'TRENDING_UP':   ['S6'],
-    'RANGING':       ['S4', 'S5'],
-    'WEAK_TREND':    ['S3', 'S5', 'S6'],
-    'TRENDING_DOWN': ['S4'],
-    'CRISIS':        [],
-}
-_STRAT_FULL = {
-    'S3': 'EMA 추세추종', 'S4': 'RSI 평균회귀', 'S5': 'BB 밴드반등',
-    'S6': 'Donchian 돌파', 'S7': 'MACD 모멘텀', 'S7V4': 'MACD 모멘텀(강화)',
-}
-# 전략별 진입 조건 요약 (atlas_spot_config.py 상수 미러 — 변경 시 동기화)
-_STRAT_CONDITION = {
-    'S3': 'EMA20이 EMA50을 상향 돌파 + 종가 > EMA200',
-    'S4': 'RSI(14)가 30을 상향 돌파 + 종가 ≤ BB하단×1.03',
-    'S5': '종가 < BB하단 + RSI(14) < 30',
-    'S6': '20일 신고가 돌파 + 거래량 2.0배 스파이크',
-    'S7': 'MACD 히스토그램 골든크로스 + 종가 > EMA200',
-    'S7V4': 'MACD 히스토그램 골든크로스 + ADX≥25 + 거래량 1.3배 + 종가 > EMA200',
-}
-# 레짐 한글명 + 한 줄 성격 설명
-_REGIME_DESC = {
-    'TRENDING_UP':   ('상승 추세',   'BTC가 EMA200 위 + 강한 추세 — 돌파 전략으로 신고가 코인 추격'),
-    'TRENDING_DOWN': ('하락 추세',   'BTC가 EMA200 아래 + 강한 추세 — 신규 진입에 보수적'),
-    'RANGING':       ('박스권 횡보', '추세 약함(ADX 낮음) — 박스 하단 반등만 제한적으로 노림'),
-    'WEAK_TREND':    ('약한 추세',   '추세 방향 모호 — 추세·반등 전략 혼합 운용'),
-    'CRISIS':        ('변동성 위기', 'ATR 급등 — 모든 신규 진입 차단, 자본 방어 모드'),
-}
-
-
 def _parse_regime_metrics() -> dict:
     """최근 RegimeLoop 로그 블록에서 ADX/BTC/EMA200/ATR% 파싱."""
     out = {'adx_1d': None, 'adx_4h': None, 'atr_pct': None,
@@ -472,9 +479,8 @@ def _alerts(m: dict, bot_alive: bool) -> list:
 @app.post('/api/auth')
 async def auth(req: Request):
     body = await req.json()
-    if body.get('password') == DASH_PASSWORD:
-        return {'token': _new_token()}
-    raise HTTPException(401, 'Invalid password')
+    client_ip = req.client.host if req.client else 'unknown'
+    return {'token': _try_login(body.get('password'), client_ip)}
 
 @app.get('/api/status')
 async def status(token: str):
@@ -495,15 +501,19 @@ async def control(req: Request):
             return {'ok': False, 'msg': '봇이 이미 실행 중입니다'}
         if KILL_SWITCH.exists(): KILL_SWITCH.unlink()
         log_path = LOG_DIR / 'spot_main.log'
+        # BOT_START_ARGS로 원래 운용 구성 보존 — 인자 없이 띄우면 dry-run으로
+        # 돌리던 봇이 실주문 모드로 재기동되는 사고가 날 수 있다.
+        cmd = ['python3', '-u', 'atlas_spot_main.py'] + shlex.split(BOT_START_ARGS)
         subprocess.Popen(
-            ['python3', '-u', 'atlas_spot_main.py'],
+            cmd,
             cwd=str(BOT_DIR),
             stdout=open(log_path, 'a'),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        _tg('▶️ [스팟 대시보드] 봇 시작 명령')
-        return {'ok': True, 'msg': '봇 시작 완료'}
+        args_desc = BOT_START_ARGS or '(기본 인자 — 라이브 모드)'
+        _tg(f'▶️ [스팟 대시보드] 봇 시작 명령: {args_desc}')
+        return {'ok': True, 'msg': f'봇 시작 완료 ({args_desc})'}
     return {'ok': False, 'msg': f'알 수 없는 명령: {action}'}
 
 @app.post('/api/panic')
@@ -528,6 +538,11 @@ async def panic(req: Request):
                     sym = p['symbol'].replace('USDT', '/USDT')
                     qty = float(p['qty'])
                     if qty > 0:
+                        # 열린 스탑 주문이 잔고를 잠그므로 먼저 전부 취소
+                        try:
+                            ex.cancel_all_orders(sym)
+                        except Exception:
+                            pass
                         ex.create_order(sym, 'market', 'sell', qty)
                         sold += 1
                         log.warning(f'강제 매도: {sym} {qty}')

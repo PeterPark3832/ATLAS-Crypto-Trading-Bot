@@ -1,0 +1,36 @@
+# ATLAS Spot Trading Bot — systemd 유닛
+# =====================================
+# 설치:
+#   sudo cp deploy/atlas-spot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-spot
+#
+# 동작 원리:
+#   - Restart=on-failure: 크래시(비정상 종료) 시에만 10초 후 자동 재기동.
+#   - 킬스위치(/tmp/ATLAS_SPOT_STOP)가 있으면 봇이 기동 즉시 정상 종료(exit 0)
+#     하므로 재시작 루프에 빠지지 않는다 (atlas_spot_main.py 기동 가드).
+#   - 정지: systemctl stop atlas-spot  (또는 킬스위치 touch 후 자연 종료 대기)
+#   - 재가동: 킬스위치 삭제 후 systemctl start atlas-spot
+#
+# 주의: WorkingDirectory와 ExecStart 경로를 실제 배포 경로에 맞게 수정할 것.
+#       인자 변경(--dry-run 등) 시 이 파일과 대시보드 .env의 BOT_START_ARGS를
+#       함께 수정해 두 기동 경로가 항상 같은 구성으로 뜨게 유지한다.
+
+[Unit]
+Description=ATLAS Spot Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/atlas_bot
+ExecStart=/usr/bin/python3 -u atlas_spot_main.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+# 로그는 봇 자체 파일 로거 + journald 이중 기록
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -55,10 +55,11 @@ def _make_db(tmp_path, rows):
     for r in rows:
         con.execute("""
             INSERT INTO spot_trades
-            (strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts)
-            VALUES (?,?,?,?,?,?)
+            (strategy, symbol, pnl_usdt, pnl_r, reason, exit_ts, fee_usdt)
+            VALUES (?,?,?,?,?,?,?)
         """, (r['strategy'], r.get('symbol', 'BTCUSDT'), r['pnl_usdt'],
-              r.get('pnl_r', 0.0), r.get('reason', 'TP'), r['exit_ts']))
+              r.get('pnl_r', 0.0), r.get('reason', 'TP'), r['exit_ts'],
+              r.get('fee', 0.0)))
     con.commit()
     con.close()
     return db_file
@@ -91,6 +92,15 @@ class TestLoadTrades:
         result = wr.load_trades(7)
         assert len(result) == 1
         assert result.iloc[0]['pnl_usdt'] == 50.0
+
+    def test_pnl_is_net_of_fees(self, tmp_path, monkeypatch):
+        now = datetime.now(timezone.utc)
+        rows = [{'strategy': 'S6', 'pnl_usdt': 50.0, 'fee': 2.5,
+                 'exit_ts': now.isoformat()}]
+        db_file = _make_db(tmp_path, rows)
+        monkeypatch.setattr(wr, 'DB_FILE', db_file)
+        result = wr.load_trades(7)
+        assert result.iloc[0]['pnl_usdt'] == pytest.approx(47.5)
 
     def test_returns_empty_on_query_failure(self, tmp_path, monkeypatch):
         db_file = tmp_path / 'bad.db'
@@ -131,7 +141,7 @@ class TestCalc:
         result = wr.calc(df)
         assert result['pf'] == float('inf')
 
-    def test_drawdown_computed_relative_to_initial_capital(self, monkeypatch):
+    def test_drawdown_computed_relative_to_peak_equity(self, monkeypatch):
         monkeypatch.setattr(wr, 'INITIAL_CAPITAL', 1000.0)
         df = _df([
             {'pnl_usdt': 100.0, 'pnl_r': 1.0, 'reason': 'TP'},
@@ -139,8 +149,15 @@ class TestCalc:
             {'pnl_usdt': 20.0, 'pnl_r': 0.5, 'reason': 'TP'},
         ])
         result = wr.calc(df)
-        # peak=100, cum 이후 -50 → dd=150, mdd% = 150/1000*100
-        assert result['mdd'] == pytest.approx(15.0)
+        # 자산곡선 1000→1100→950→970, 피크 1100 → mdd = 150/1100
+        assert result['mdd'] == pytest.approx(150 / 1100 * 100)
+
+    def test_drawdown_from_start_without_new_peak(self, monkeypatch):
+        monkeypatch.setattr(wr, 'INITIAL_CAPITAL', 1000.0)
+        df = _df([{'pnl_usdt': -200.0, 'pnl_r': -1.0, 'reason': 'SL'}])
+        result = wr.calc(df)
+        # 피크 = 초기자본 1000 → mdd = 200/1000
+        assert result['mdd'] == pytest.approx(20.0)
 
 
 # ══════════════════════════════════════════════════════════════

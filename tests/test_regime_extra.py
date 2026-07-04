@@ -166,6 +166,37 @@ class TestUpdateRegime:
         result = update_regime(_RaisingExchange())
         assert result is cached
 
+    def test_regime_loop_exits_on_stop_event(self, monkeypatch):
+        """regime_loop이 stop_event로 종료 가능해야 함 (과거: while True로 종료 불가 +
+        main이 stop_event를 ex 자리에 넘겨 조용히 버려지던 배선 실수)."""
+        import threading
+
+        calls = []
+        monkeypatch.setattr(rg, '_make_regime_ex', lambda: object())
+        monkeypatch.setattr(rg, 'update_regime',
+                             lambda ex, cc=None: calls.append(1) or RegimeState())
+
+        class _SetOnWaitEvent(threading.Event):
+            def wait(self, timeout=None):
+                self.set()
+                return True
+
+        ev = _SetOnWaitEvent()
+        rg.regime_loop(ev)          # 1회 실행 후 종료해야 함 (행 없음)
+        assert calls == [1]
+
+    def test_regime_loop_preset_event_skips_body(self, monkeypatch):
+        import threading
+
+        calls = []
+        monkeypatch.setattr(rg, '_make_regime_ex', lambda: object())
+        monkeypatch.setattr(rg, 'update_regime',
+                             lambda ex, cc=None: calls.append(1) or RegimeState())
+        ev = threading.Event()
+        ev.set()
+        rg.regime_loop(ev)
+        assert calls == []
+
     def test_uses_candle_cache_when_provided(self, monkeypatch):
         calls = []
 
