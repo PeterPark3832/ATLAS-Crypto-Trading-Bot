@@ -70,10 +70,11 @@ def calc(df: pd.DataFrame) -> dict:
     tp_cnt = int((df['reason'] == 'TP').sum())
     sl_cnt = int((df['reason'] == 'SL').sum())
 
-    cum  = df['pnl_usdt'].cumsum().values
-    peak = np.maximum.accumulate(cum)
-    dd   = peak - cum
-    mdd  = float(dd.max()) / INITIAL_CAPITAL * 100
+    # MDD: 자산 곡선의 피크 대비 % (고정 초기자본 대비는 자본 성장 시 왜곡)
+    eq   = np.concatenate([[INITIAL_CAPITAL],
+                           INITIAL_CAPITAL + df['pnl_usdt'].cumsum().values])
+    peak = np.maximum.accumulate(eq)
+    mdd  = float(((peak - eq) / np.where(peak > 0, peak, 1)).max()) * 100
 
     return dict(total=total, wins=wins, wr=wins/total*100,
                 pnl=pnl, pf=pf, avg_r=avg_r,

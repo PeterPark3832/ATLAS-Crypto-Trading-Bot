@@ -141,7 +141,7 @@ class TestCalc:
         result = wr.calc(df)
         assert result['pf'] == float('inf')
 
-    def test_drawdown_computed_relative_to_initial_capital(self, monkeypatch):
+    def test_drawdown_computed_relative_to_peak_equity(self, monkeypatch):
         monkeypatch.setattr(wr, 'INITIAL_CAPITAL', 1000.0)
         df = _df([
             {'pnl_usdt': 100.0, 'pnl_r': 1.0, 'reason': 'TP'},
@@ -149,8 +149,15 @@ class TestCalc:
             {'pnl_usdt': 20.0, 'pnl_r': 0.5, 'reason': 'TP'},
         ])
         result = wr.calc(df)
-        # peak=100, cum 이후 -50 → dd=150, mdd% = 150/1000*100
-        assert result['mdd'] == pytest.approx(15.0)
+        # 자산곡선 1000→1100→950→970, 피크 1100 → mdd = 150/1100
+        assert result['mdd'] == pytest.approx(150 / 1100 * 100)
+
+    def test_drawdown_from_start_without_new_peak(self, monkeypatch):
+        monkeypatch.setattr(wr, 'INITIAL_CAPITAL', 1000.0)
+        df = _df([{'pnl_usdt': -200.0, 'pnl_r': -1.0, 'reason': 'SL'}])
+        result = wr.calc(df)
+        # 피크 = 초기자본 1000 → mdd = 200/1000
+        assert result['mdd'] == pytest.approx(20.0)
 
 
 # ══════════════════════════════════════════════════════════════

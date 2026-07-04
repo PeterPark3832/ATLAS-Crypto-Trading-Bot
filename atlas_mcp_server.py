@@ -236,18 +236,21 @@ def check_alert_thresholds() -> str:
     gross_loss = abs(sum(t['pnl_usdt'] for t in trades if t['pnl_usdt'] < 0))
     pf         = gross_win / gross_loss if gross_loss > 0 else float('inf')
 
-    cum = 0.0
-    peak = 0.0
+    # MDD: 자산 곡선의 피크 대비 % — 고정 초기자본 대비가 아니라
+    # 실제 자산 대비여야 자본이 성장/축소해도 왜곡되지 않는다.
+    equity = INITIAL_CAPITAL
+    peak = INITIAL_CAPITAL
     max_dd_usd = 0.0
+    mdd_pct = 0.0
     for t in trades:
-        cum += t['pnl_usdt']
-        if cum > peak:
-            peak = cum
-        dd = peak - cum
+        equity += t['pnl_usdt']
+        if equity > peak:
+            peak = equity
+        dd = peak - equity
         if dd > max_dd_usd:
             max_dd_usd = dd
-
-    mdd_pct   = max_dd_usd / INITIAL_CAPITAL * 100
+        if peak > 0 and dd / peak * 100 > mdd_pct:
+            mdd_pct = dd / peak * 100
     total_pnl = sum(t['pnl_usdt'] for t in trades)
 
     alerts = []
@@ -270,7 +273,7 @@ def check_alert_thresholds() -> str:
         f"  거래수   : {total}건",
         f"  실전승률 : {wr*100:.1f}%",
         f"  PF       : {pf:.2f}  (기준 > 1.0)",
-        f"  MDD(추정): {mdd_pct:.1f}%  = ${max_dd_usd:.2f}  (경고 15% / 중단 20%)",
+        f"  MDD(피크 대비): {mdd_pct:.1f}%  = ${max_dd_usd:.2f}  (경고 15% / 중단 20%)",
         f"  누적PnL  : ${total_pnl:+.2f}",
         "",
         "[판정]",

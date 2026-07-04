@@ -344,3 +344,23 @@ class TestSpotSellLive:
         sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 90.0, 'SL')
         assert sm._load_position('S3', 'BTCUSDT') is not None
         assert _trades(_temp_db) == []
+
+
+# ══════════════════════════════════════════════════════════════
+#  진입 직렬화 (_entry_lock — 4H/1D 루프 동시 진입 TOCTOU 방지)
+# ══════════════════════════════════════════════════════════════
+
+class TestEntrySerialization:
+    def test_spot_buy_holds_entry_lock(self, _state, monkeypatch):
+        """포지션 수 한도 체크→저장 구간이 _entry_lock 안에서 실행되는지 검증."""
+        observed = []
+
+        def _fake_locked(*a, **k):
+            observed.append(sm._entry_lock.locked())
+            return True
+
+        monkeypatch.setattr(sm, '_spot_buy_locked', _fake_locked)
+        assert sm._spot_buy('S3', 'BTCUSDT', 'BTC/USDT', _base_sig(), 100.0,
+                             'TRENDING_UP') is True
+        assert observed == [True]
+        assert not sm._entry_lock.locked()   # 종료 후 해제

@@ -332,6 +332,36 @@ class TestPositionReconcileLoop:
         assert sm._load_position('S4', 'BTCUSDT') is None
         assert any('잔고 0' in m for m in _no_telegram)
 
+    def test_zero_balance_logs_manual_sold_trade(self, monkeypatch, _no_telegram):
+        """수동매도 정리 시 spot_trades에 기록을 남겨야 통계가 유실되지 않는다
+        (과거: _delete_position만 하고 거래 기록 없음 — _spot_sell 경로와 비일관)."""
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+        ex = _FakeBalanceExchange({'BTC': {'total': 0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(ev)
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1
+        assert rows[0]['reason'] == 'MANUAL_SOLD'
+        assert rows[0]['exit_price'] == pytest.approx(105.0)
+
+    def test_zero_balance_price_unavailable_logs_at_entry(self, monkeypatch, _no_telegram):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                           0.02, 'sl_tp', 0, 'TRENDING_UP')
+        ev = _OneShotEvent()
+        ex = _FakeBalanceExchange({'BTC': {'total': 0}})
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 0.0)
+        sm._position_reconcile_loop(ev)
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1
+        assert rows[0]['exit_price'] == pytest.approx(100.0)  # 진입가 폴백
+        assert rows[0]['pnl_usdt'] == pytest.approx(0.0)
+
     def test_large_mismatch_updates_db_qty(self, monkeypatch, _no_telegram):
         sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
                            0.02, 'sl_tp', 0, 'TRENDING_UP')

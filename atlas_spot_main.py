@@ -442,6 +442,9 @@ _state = {
     'daily_loss_alerted': False, # 일간 손실 한도 알림 중복 방지 (자정 리셋)
 }
 _state_lock = threading.Lock()
+# 매수 경로 직렬화: 4H/1D 두 전략 루프가 동시에 진입하면 포지션 수 한도
+# 체크→저장 사이(TOCTOU)에 SPOT_MAX_POSITIONS를 초과할 수 있다.
+_entry_lock = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -521,45 +524,55 @@ def _get_kelly_scale(strategy: str) -> float:
 def _get_ratchet_scale() -> float:
     """Drawdown Ratchet 스케일.
     회복 조건: DD 바닥 대비 +SPOT_RATCHET_RECOVER(15%) 상승 시 스케일 복원.
+    읽기-수정-쓰기(alert_tier/floor)가 잔고폴러·양쪽 전략 루프와 경합하지
+    않도록 _state_lock으로 원자화한다. 알림 전송은 락 밖에서 수행.
     """
-    equity = _state['equity']
-    peak   = _state['peak_equity']
-    if peak <= 0 or equity <= 0:
-        return 1.0
-    dd = (peak - equity) / peak
-    if dd >= SPOT_RATCHET_DD_HARD:
-        if _state['ratchet_alert_tier'] < 2:
-            _state['ratchet_alert_tier'] = 2
-            _tg(f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
-                f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
-        # 바닥(floor) 추적: ratchet_floor에 최저점 기록
-        # 최초 진입 시에도 floor를 _state에 저장해야 함 — 그렇지 않으면 다음 호출에서도
-        # get()의 기본값이 항상 "현재" equity가 되어 recover_pct가 영원히 0이 되는 버그 발생
-        if 'ratchet_floor' not in _state:
-            _state['ratchet_floor'] = equity
-        floor = _state['ratchet_floor']
-        if equity < floor:
-            _state['ratchet_floor'] = equity
-            floor = equity
-        # 바닥 대비 회복률 확인
-        recover_pct = (equity - floor) / floor if floor > 0 else 0.0
-        if recover_pct >= SPOT_RATCHET_RECOVER:
-            _state['ratchet_floor'] = equity  # 회복 기준점 리셋
-            _state['ratchet_alert_tier'] = 1
-            return 0.70   # Hard DD 회복 → 중간 단계로 복원
-        return 0.40
-    if dd >= SPOT_RATCHET_DD_THRESH:
-        if _state['ratchet_alert_tier'] < 1:
-            _state['ratchet_alert_tier'] = 1
-            _tg(f'⚠️ [경고] 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
-                f'(-{dd*100:.1f}%) — 리스크 스케일 70%로 축소')
-        _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
-        return 0.70
-    if _state['ratchet_alert_tier'] > 0:
-        _state['ratchet_alert_tier'] = 0
-        _tg(f'✅ [회복] 드로다운 해소: 현재 ${equity:,.2f} (피크 대비 -{dd*100:.1f}%) — 리스크 스케일 정상 복원')
-    _state.pop('ratchet_floor', None)
-    return 1.0
+    msg = None
+    with _state_lock:
+        equity = _state['equity']
+        peak   = _state['peak_equity']
+        if peak <= 0 or equity <= 0:
+            return 1.0
+        dd = (peak - equity) / peak
+        if dd >= SPOT_RATCHET_DD_HARD:
+            if _state['ratchet_alert_tier'] < 2:
+                _state['ratchet_alert_tier'] = 2
+                msg = (f'🔴 [위험] 하드 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                       f'(-{dd*100:.1f}%) — 리스크 스케일 40%로 축소')
+            # 바닥(floor) 추적: ratchet_floor에 최저점 기록
+            # 최초 진입 시에도 floor를 _state에 저장해야 함 — 그렇지 않으면 다음 호출에서도
+            # get()의 기본값이 항상 "현재" equity가 되어 recover_pct가 영원히 0이 되는 버그 발생
+            if 'ratchet_floor' not in _state:
+                _state['ratchet_floor'] = equity
+            floor = _state['ratchet_floor']
+            if equity < floor:
+                _state['ratchet_floor'] = equity
+                floor = equity
+            # 바닥 대비 회복률 확인
+            recover_pct = (equity - floor) / floor if floor > 0 else 0.0
+            if recover_pct >= SPOT_RATCHET_RECOVER:
+                _state['ratchet_floor'] = equity  # 회복 기준점 리셋
+                _state['ratchet_alert_tier'] = 1
+                scale = 0.70   # Hard DD 회복 → 중간 단계로 복원
+            else:
+                scale = 0.40
+        elif dd >= SPOT_RATCHET_DD_THRESH:
+            if _state['ratchet_alert_tier'] < 1:
+                _state['ratchet_alert_tier'] = 1
+                msg = (f'⚠️ [경고] 드로다운 진입: 피크 ${peak:,.2f} → 현재 ${equity:,.2f} '
+                       f'(-{dd*100:.1f}%) — 리스크 스케일 70%로 축소')
+            _state.pop('ratchet_floor', None)  # 소프트 DD 구간 — floor 초기화
+            scale = 0.70
+        else:
+            if _state['ratchet_alert_tier'] > 0:
+                _state['ratchet_alert_tier'] = 0
+                msg = (f'✅ [회복] 드로다운 해소: 현재 ${equity:,.2f} '
+                       f'(피크 대비 -{dd*100:.1f}%) — 리스크 스케일 정상 복원')
+            _state.pop('ratchet_floor', None)
+            scale = 1.0
+    if msg:
+        _tg(msg)
+    return scale
 
 
 def _get_spot_funding(sym: str) -> float:
@@ -603,7 +616,14 @@ def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
 
 def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
               sig: dict, price: float, regime: str) -> bool:
-    """현물 매수 실행."""
+    """현물 매수 실행. 4H/1D 두 전략 루프가 동시에 진입해도 포지션 수
+    한도 체크→저장이 원자적이 되도록 _entry_lock으로 직렬화한다."""
+    with _entry_lock:
+        return _spot_buy_locked(strategy, symbol, ccxt_sym, sig, price, regime)
+
+
+def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
+                     sig: dict, price: float, regime: str) -> bool:
     if _state['paused']:
         log.info(f'[{strategy}] {symbol} 매수 차단 (일시정지)')
         return False
@@ -1241,6 +1261,27 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                     _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
                                        pos.get('sl_order_id') or '')
                     _delete_position(strategy, sym)
+                    # 거래 기록 — _spot_sell의 수동매도 경로와 동일하게 통계 보존
+                    # (체결가 불명이므로 현재가로 추정, 조회 불가 시 진입가)
+                    try:
+                        est_price = _get_price(sym.replace('USDT', '/USDT'))
+                        entry_price = float(pos['entry_price'])
+                        if est_price <= 0:
+                            est_price = entry_price
+                        sl_d   = abs(entry_price - float(pos['sl']))
+                        pnl_u  = (est_price - entry_price) * db_qty
+                        pnl_p  = (est_price - entry_price) / entry_price if entry_price > 0 else 0
+                        pnl_r  = pnl_u / (sl_d * db_qty) if sl_d > 0 and db_qty > 0 else 0
+                        hold_h = (datetime.now(timezone.utc) -
+                                  datetime.fromisoformat(pos['entry_ts'])).total_seconds() / 3600
+                        net = _log_trade(strategy, sym, entry_price, est_price, db_qty,
+                                         float(pos['cost_usdt']), pnl_u, pnl_p, pnl_r,
+                                         round(hold_h, 2), 'MANUAL_SOLD',
+                                         pos.get('regime', ''), pos['entry_ts'])
+                        with _state_lock:
+                            _state['day_pnl'] += net
+                    except Exception as _le:
+                        log.warning(f'[검증] {sym} 수동매도 거래기록 실패(무시): {_le}')
                 elif actual < db_qty * 0.90:
                     # 10% 이상 괴리 — DB 수량 실제값으로 업데이트
                     log.warning(f'[검증] {sym} DB {db_qty:.6f} vs 실제 {actual:.6f} '
@@ -1314,11 +1355,13 @@ def _handle_tg_cmd(cmd: str) -> None:
         _tg(f'[Spot] 총자산: ${_state["equity"]:,.2f} (USDT: ${_state["usdt_balance"]:,.2f})')
 
     elif '/pause' in cmd:
-        _state['paused'] = True
+        with _state_lock:
+            _state['paused'] = True
         _tg('[Spot] 신규 진입 일시정지')
 
     elif '/resume' in cmd:
-        _state['paused'] = False
+        with _state_lock:
+            _state['paused'] = False
         _tg('[Spot] 신규 진입 재개')
 
     elif '/stop' in cmd:
