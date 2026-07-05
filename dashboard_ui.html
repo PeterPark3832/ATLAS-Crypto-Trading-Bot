@@ -157,6 +157,7 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
   padding:4px 9px;border-radius:20px;font-size:10px;font-weight:600;color:var(--tx);
   white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;
   border:1px solid var(--bd2)}
+.rb-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 
 /* ── 봇 상태 브리핑 ── */
 .briefing{display:flex;gap:13px;align-items:flex-start;
@@ -1153,9 +1154,10 @@ function render(d){
   renderRegimeBadge(d.regime);
   renderBriefing(d.briefing);
   renderStreakBadge(d.streak);
-  renderHero(m,d.actual_balance,d.initial_capital||134,d.eq_curve||[]);
-  renderStatCards(m,d.actual_balance,d.initial_capital||134);
-  renderEqChart(d.eq_curve||[]);
+  const initCap=d.initial_capital||1000;   // 서버 기본값과 일치 (항상 응답에 포함됨)
+  renderHero(m,d.actual_balance,initCap,d.eq_curve||[]);
+  renderStatCards(m,d.actual_balance,initCap);
+  renderEqChart(d.eq_curve||[],initCap);
   renderDailyChart(d.daily||[]);
   renderModChart(d.module_stats||[]);
   renderModuleTable(d.module_stats||[]);
@@ -1207,15 +1209,17 @@ function renderAlerts(alerts){
 
 // ── Regime badge ──────────────────────────────────────────────
 const RC={
-  TRENDING_UP:['#2EC88A','🟢 TRENDING UP'],
-  TRENDING_DOWN:['#F05A6E','🔴 TRENDING DOWN'],
-  RANGING:['#F5C518','🟡 RANGING'],
-  WEAK_TREND:['#5B8AF0','🔵 WEAK TREND'],
-  CRISIS:['#9B7FE8','🟣 CRISIS'],
+  TRENDING_UP:['--up','TRENDING UP'],
+  TRENDING_DOWN:['--dn','TRENDING DOWN'],
+  RANGING:['--warn','RANGING'],
+  WEAK_TREND:['--info','WEAK TREND'],
+  CRISIS:['--crisis','CRISIS'],
 };
 function renderRegimeBadge(r){
-  const [c,l]=RC[r]||['#636366',`⚪ ${_esc(r)}`];
-  const html=`<span class="regime-badge" style="background:${c}22;color:${c}">${l}</span>`;
+  const e=RC[r];
+  const c=e?cssVar(e[0]):'#71757E';
+  const l=e?e[1]:_esc(r);
+  const html=`<span class="regime-badge" style="background:${c}1A;color:${c};border-color:${c}40"><span class="rb-dot" style="background:${c}"></span>${l}</span>`;
   ['regime-badge-wrap','regime-badge-wrap-mobile'].forEach(id=>{
     const el=document.getElementById(id);
     if(el)el.innerHTML=html;
@@ -1256,8 +1260,8 @@ function renderStreakBadge(s){
   const el=document.getElementById('streak-badge-wrap');
   if(!el)return;
   if(!s||s.kind==='none'||s.count===0){el.innerHTML='';return;}
-  const[icon,c]=s.kind==='win'?['🔥','#2EC88A']:['❄️','#F05A6E'];
-  el.innerHTML=`<span class="streak-badge" style="background:${c}18;color:${c};border-color:${c}33">${icon} ${s.count}${s.kind==='win'?'연승':'연패'}</span>`;
+  const c=cssVar(s.kind==='win'?'--up':'--dn');
+  el.innerHTML=`<span class="streak-badge" style="background:${c}18;color:${c};border-color:${c}33">${s.count}${s.kind==='win'?'연승':'연패'}</span>`;
 }
 
 // ── Hero card ─────────────────────────────────────────────────
@@ -1355,86 +1359,112 @@ function countUpFmt(elId,end,fmt){
   requestAnimationFrame(frame);
 }
 
-// ── Charts (dark theme) ───────────────────────────────────────
-const DARK={
-  plugins:{legend:{display:false},
-    tooltip:{backgroundColor:'rgba(18,18,24,.95)',titleColor:'rgba(255,255,255,.45)',bodyColor:'rgba(255,255,255,.88)',
-      borderColor:'rgba(255,255,255,.12)',borderWidth:1,padding:12,cornerRadius:12,displayColors:false,
-      titleFont:{size:11,family:'Inter,system-ui,sans-serif'},
-      bodyFont:{size:13,family:'Inter,system-ui,sans-serif',weight:'600'}}},
-  scales:{x:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.25)',font:{size:10,family:'Inter,system-ui,sans-serif'},maxTicksLimit:8}},
-          y:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.25)',font:{size:10,family:'Inter,system-ui,sans-serif'}}}},
-  responsive:true,maintainAspectRatio:false,animation:{duration:700,easing:'easeInOutQuart'}
-};
+// ── Charts — 공통 테마 팩토리 (색은 cssVar 단일 출처) ──────────
+const CH=()=>({up:cssVar('--up'),dn:cssVar('--dn'),acc:cssVar('--acc'),info:cssVar('--info'),
+  grid:'rgba(232,234,237,.05)',tick:'rgba(232,234,237,.30)',tipBg:cssVar('--sf3')});
+function chartOpts(){
+  const c=CH(),f={size:10,family:'Inter,system-ui,sans-serif'};
+  return{
+    responsive:true,maintainAspectRatio:false,
+    animation:{duration:400,easing:'easeOutQuart'},
+    plugins:{legend:{display:false},
+      tooltip:{backgroundColor:c.tipBg,titleColor:'rgba(232,234,237,.45)',bodyColor:'rgba(232,234,237,.9)',
+        borderColor:'rgba(255,255,255,.10)',borderWidth:1,padding:10,cornerRadius:8,displayColors:false,
+        titleFont:{size:11,family:f.family},
+        bodyFont:{size:12,family:f.family,weight:'600'},callbacks:{}}},
+    scales:{x:{grid:{display:false},ticks:{color:c.tick,font:f,maxTicksLimit:8}},
+            y:{grid:{color:c.grid},ticks:{color:c.tick,font:f}}}};
+}
+function fillGrad(ctx,hex,h,top=0.14){
+  const a=Math.round(top*255).toString(16).padStart(2,'0');
+  const g=ctx.createLinearGradient(0,0,0,h);
+  g.addColorStop(0,hex+a);g.addColorStop(1,hex+'00');
+  return g;
+}
 
-function renderEqChart(data){
-  const ctx=document.getElementById('eq-chart').getContext('2d');
+function renderEqChart(data,initialCap){
+  const el=document.getElementById('eq-chart');
+  const ctx=el.getContext('2d');
   if(eqChart)eqChart.destroy();
   if(!data||!data.length)return;
+  const c=CH();
   const vals=data.map(d=>d.eq);
-  const color=vals[vals.length-1]>=134?'#2EC88A':'#F05A6E';
+  const color=vals[vals.length-1]>=initialCap?c.up:c.dn;
   const labels=data.map(d=>{if(!d.ts)return'';const dt=new Date(d.ts);return`${dt.getMonth()+1}/${dt.getDate()}`;});
-  const h=document.getElementById('eq-chart').closest('.chart-fill')?.clientHeight||300;
-  const grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,color+'28');grad.addColorStop(1,color+'00');
-  eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{data:vals,borderColor:color,borderWidth:2,
-    fill:true,backgroundColor:grad,
-    pointRadius:data.map(d=>d.reason==='TP'||d.reason==='SL'?4:0),
-    pointBackgroundColor:data.map(d=>d.reason==='TP'?'#2EC88A':d.reason==='SL'?'#F05A6E':color),
-    pointHoverRadius:5,tension:0.35}]},
-    options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{
-      title:items=>labels[items[0].dataIndex],
-      label:ctx=>{const pt=data[ctx.dataIndex];return[`잔고: $${ctx.parsed.y.toFixed(2)}`,pt.reason?`${pt.reason}: ${pt.pnl>=0?'+':'-'}$${Math.abs(pt.pnl).toFixed(2)}`:null].filter(Boolean);}
-    }}},scales:{...DARK.scales,y:{...DARK.scales.y,ticks:{...DARK.scales.y.ticks,callback:v=>`$${v.toFixed(0)}`}}}}});
+  const h=el.closest('.chart-fill')?.clientHeight||300;
+  const o=chartOpts();
+  o.plugins.tooltip.filter=i=>i.datasetIndex===0;
+  o.plugins.tooltip.callbacks={
+    title:items=>labels[items[0].dataIndex],
+    label:x=>{const pt=data[x.dataIndex];return[`잔고: $${x.parsed.y.toFixed(2)}`,pt.reason?`${pt.reason}: ${pt.pnl>=0?'+':'-'}$${Math.abs(pt.pnl).toFixed(2)}`:null].filter(Boolean);}
+  };
+  o.scales.y.ticks.callback=v=>`$${v.toFixed(0)}`;
+  eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[
+    {data:vals,borderColor:color,borderWidth:2,fill:true,backgroundColor:fillGrad(ctx,color,h),
+     pointRadius:data.map(d=>d.reason==='TP'||d.reason==='SL'?3:0),
+     pointBackgroundColor:data.map(d=>d.reason==='TP'?c.up:d.reason==='SL'?c.dn:color),
+     pointHoverRadius:5,tension:0.35},
+    {data:Array(vals.length).fill(initialCap),borderColor:'rgba(232,234,237,.18)',
+     borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false}
+  ]},options:o});
 }
 
 function renderDailyChart(data){
   const ctx=document.getElementById('daily-chart').getContext('2d');
   if(dailyChart)dailyChart.destroy();
   if(!data||!data.length)return;
+  const c=CH();
+  const o=chartOpts();
+  o.plugins.tooltip.callbacks={label:x=>`${x.parsed.y>=0?'+':''}$${x.parsed.y.toFixed(2)}`};
   dailyChart=new Chart(ctx,{type:'bar',data:{labels:data.map(d=>d.date),datasets:[{data:data.map(d=>d.pnl),
-    backgroundColor:data.map(d=>d.pnl>=0?'rgba(46,200,138,.65)':'rgba(240,90,110,.65)'),borderRadius:4,borderSkipped:false}]},
-    options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{label:c=>`${c.parsed.y>=0?'+':''}$${c.parsed.y.toFixed(2)}`}}}}});
+    backgroundColor:data.map(d=>d.pnl>=0?c.up+'8C':c.dn+'8C'),borderRadius:3,borderSkipped:false}]},options:o});
 }
 
 function renderModChart(stats){
   const ctx=document.getElementById('mod-chart').getContext('2d');
   if(modChart)modChart.destroy();
   if(!stats||!stats.length)return;
+  const c=CH();
+  const o=chartOpts();
+  o.indexAxis='y';
+  o.plugins.tooltip.callbacks={label:x=>`${x.parsed.x>=0?'+':''}$${x.parsed.x.toFixed(2)}`};
   modChart=new Chart(ctx,{type:'bar',data:{labels:stats.map(s=>s.module),datasets:[{data:stats.map(s=>s.pnl),
-    backgroundColor:stats.map(s=>s.pnl>=0?'rgba(46,200,138,.65)':'rgba(240,90,110,.65)'),borderRadius:4,borderSkipped:false}]},
-    options:{...DARK,indexAxis:'y',plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{label:c=>`${c.parsed.x>=0?'+':''}$${c.parsed.x.toFixed(2)}`}}}}});
+    backgroundColor:stats.map(s=>s.pnl>=0?c.up+'8C':c.dn+'8C'),borderRadius:3,borderSkipped:false}]},options:o});
 }
 
 function renderWRChart(data){
   const ctx=document.getElementById('wr-chart').getContext('2d');
   if(wrChart)wrChart.destroy();
   if(!data||data.length<2)return;
+  const c=CH();
   const vals=data.map(d=>d.wr);
-  const grad=ctx.createLinearGradient(0,0,0,200);
-  grad.addColorStop(0,'rgba(91,138,240,.22)');grad.addColorStop(1,'rgba(91,138,240,0)');
-  wrChart=new Chart(ctx,{type:'line',data:{labels:data.map((_,i)=>i+1),datasets:[
-    {data:vals,borderColor:'#5B8AF0',borderWidth:2,fill:true,backgroundColor:grad,pointRadius:0,pointHoverRadius:5,tension:0.4},
-    {data:Array(vals.length).fill(33.3),borderColor:'rgba(240,90,110,.35)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
-    {data:Array(vals.length).fill(40),borderColor:'rgba(46,200,138,.35)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
-  ]},options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{
+  const o=chartOpts();
+  o.plugins.tooltip.filter=i=>i.datasetIndex===0;
+  o.plugins.tooltip.callbacks={
     title:items=>`거래 #${items[0].dataIndex+1}`,
-    label:ctx=>ctx.datasetIndex===0?`승률 ${ctx.parsed.y.toFixed(1)}%`:null,
-    filter:item=>item.datasetIndex===0
-  }}},scales:{...DARK.scales,y:{...DARK.scales.y,min:0,max:100,ticks:{...DARK.scales.y.ticks,callback:v=>`${v}%`}}}}});
+    label:x=>x.datasetIndex===0?`승률 ${x.parsed.y.toFixed(1)}%`:null
+  };
+  o.scales.y.min=0;o.scales.y.max=100;
+  o.scales.y.ticks.callback=v=>`${v}%`;
+  wrChart=new Chart(ctx,{type:'line',data:{labels:data.map((_,i)=>i+1),datasets:[
+    {data:vals,borderColor:c.info,borderWidth:2,fill:true,backgroundColor:fillGrad(ctx,c.info,200),pointRadius:0,pointHoverRadius:5,tension:0.4},
+    {data:Array(vals.length).fill(33.3),borderColor:c.dn+'40',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
+    {data:Array(vals.length).fill(40),borderColor:c.up+'40',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
+  ]},options:o});
 }
 
 function renderDDChart(data){
   const ctx=document.getElementById('dd-chart').getContext('2d');
   if(ddChart)ddChart.destroy();
   if(!data||data.length<2)return;
+  const c=CH();
   const labels=data.map(d=>{if(!d.ts)return'';const dt=new Date(d.ts);return`${dt.getMonth()+1}/${dt.getDate()}`;});
-  const grad=ctx.createLinearGradient(0,0,0,200);
-  grad.addColorStop(0,'rgba(240,90,110,.28)');grad.addColorStop(1,'rgba(240,90,110,0)');
-  ddChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{data:data.map(d=>d.dd),borderColor:'#F05A6E',borderWidth:1.5,
-    fill:true,backgroundColor:grad,pointRadius:0,tension:0.35}]},
-    options:{...DARK,plugins:{...DARK.plugins,tooltip:{...DARK.plugins.tooltip,callbacks:{label:c=>`낙폭 ${c.parsed.y.toFixed(2)}%`}}},
-      scales:{...DARK.scales,y:{...DARK.scales.y,reverse:true,min:0,ticks:{...DARK.scales.y.ticks,callback:v=>`${v.toFixed(0)}%`}}}}});
+  const o=chartOpts();
+  o.plugins.tooltip.callbacks={label:x=>`낙폭 ${x.parsed.y.toFixed(2)}%`};
+  o.scales.y.reverse=true;o.scales.y.min=0;
+  o.scales.y.ticks.callback=v=>`${v.toFixed(0)}%`;
+  ddChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{data:data.map(d=>d.dd),borderColor:c.dn,borderWidth:1.5,
+    fill:true,backgroundColor:fillGrad(ctx,c.dn,200),pointRadius:0,tension:0.35}]},options:o});
 }
 
 // ── Module table ──────────────────────────────────────────────
@@ -1533,8 +1563,8 @@ function renderMonthlyHeatmap(data){
   const el=document.getElementById('monthly-heatmap');
   if(!data||!data.length){el.innerHTML='<div class="empty">데이터 없음</div>';return;}
   el.innerHTML=data.map(m=>{
-    const c=m.pnl>=0?'var(--green)':'var(--red)';
-    const bg=m.pnl>=0?'rgba(46,200,138,.08)':'rgba(240,90,110,.08)';
+    const hex=cssVar(m.pnl>=0?'--up':'--dn');
+    const c=hex,bg=hex+'14';
     return`<div class="hm-cell" style="background:${bg}">
       <div class="hm-month">${_esc(m.month)}</div>
       <div class="hm-pnl" style="color:${c}">${m.pnl>=0?'+':'-'}$${Math.abs(m.pnl).toFixed(1)}</div>
@@ -1674,10 +1704,6 @@ async function loadLogs(){
   }catch(e){const el=document.getElementById('log-viewer');if(el)el.textContent=`오류: ${e.message}`;}
 }
 
-// ── Spinner CSS (inline) ──────────────────────────────────────
-const _style=document.createElement('style');
-_style.textContent='.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.15);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite}';
-document.head.appendChild(_style);
 </script>
 </body>
 </html>
