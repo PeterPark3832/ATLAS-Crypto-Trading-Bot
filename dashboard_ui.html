@@ -70,7 +70,11 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
   z-index:199}
 .sidebar-hdr{display:flex;align-items:center;justify-content:space-between;padding:22px 18px 16px}
-.logo-mark{font-size:18px;font-weight:700;letter-spacing:.02em;color:var(--tx)}
+.logo-mark{font-size:18px;font-weight:700;letter-spacing:.02em;color:var(--tx);
+  display:flex;align-items:center;gap:8px}
+.logo-dot{width:8px;height:8px;border-radius:2px;background:var(--acc);
+  display:inline-block;flex-shrink:0;transform:rotate(45deg)}
+.topbar-logo .logo-dot{margin-right:7px;width:7px;height:7px}
 .logo-sub{font-size:10px;font-weight:500;letter-spacing:1.2px;text-transform:uppercase;
   color:var(--tx3);-webkit-text-fill-color:var(--tx3);margin-top:1px}
 .btn-close-sb{color:var(--tx3);font-size:18px;padding:4px 8px;display:none;transition:color .15s}
@@ -580,6 +584,18 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .tab-content{display:none}
 .tab-content.active{display:block;animation:fadeUp .22s ease-out both}
 
+/* ── 로딩 스켈레톤 (첫 데이터 도착 전) ── */
+#app.is-loading :is(.stat-val,.hero-value,.hero-meta-val,.section-badge,.risk-val,#hero-change){
+  color:transparent!important;border-radius:var(--rxs);min-width:3ch;
+  background:linear-gradient(90deg,var(--sf2) 25%,var(--sf3) 50%,var(--sf2) 75%);
+  background-size:200% 100%;animation:shimmer 1.4s ease infinite;
+  user-select:none;pointer-events:none}
+#app.is-loading .chart-fill::after,#app.is-loading .chart-wrap::after{
+  content:'';position:absolute;inset:0;border-radius:var(--rsm);
+  background:linear-gradient(90deg,var(--sf2) 25%,var(--sf3) 50%,var(--sf2) 75%);
+  background-size:200% 100%;animation:shimmer 1.4s ease infinite}
+@keyframes shimmer{to{background-position:-200% 0}}
+
 /* JS compat */
 .kpi-row,.kpi,.kpi-val,.kpi-sub,.kpi-label,.kpi-accent,.mdd-bar-wrap,.mdd-bar-fill{display:none}
 #tab-pos-cnt{font-size:10px;opacity:.5}
@@ -606,7 +622,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-hdr">
       <div>
-        <div class="logo-mark">🌐<span class="logo-text"> ATLAS</span></div>
+        <div class="logo-mark"><span class="logo-dot"></span><span class="logo-text">ATLAS</span></div>
         <div class="logo-sub">SPOT BOT</div>
       </div>
       <button class="btn-close-sb" onclick="closeSidebar()">✕</button>
@@ -655,7 +671,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
     <header class="topbar">
       <div class="topbar-left">
         <button class="btn-hamburger" onclick="openSidebar()">☰</button>
-        <div class="topbar-logo">🌐 ATLAS</div>
+        <div class="topbar-logo"><span class="logo-dot"></span>ATLAS</div>
       </div>
       <div class="topbar-right">
         <div id="regime-badge-wrap-mobile"></div>
@@ -1061,7 +1077,9 @@ async function doLogin(){
     TOKEN=(await res.json()).token;
     localStorage.setItem('atlas_token',TOKEN);
     document.getElementById('login-overlay').style.display='none';
-    document.getElementById('app').style.display='block';
+    const app=document.getElementById('app');
+    app.style.display='block';
+    app.classList.add('is-loading');
     loadDashboard();
   }catch(e){err.textContent='서버 연결 오류';}
 }
@@ -1069,7 +1087,9 @@ function logout(){localStorage.removeItem('atlas_token');location.reload();}
 window.onload=()=>{
   if(TOKEN){
     document.getElementById('login-overlay').style.display='none';
-    document.getElementById('app').style.display='block';
+    const app=document.getElementById('app');
+    app.style.display='block';
+    app.classList.add('is-loading');   // 첫 데이터 도착 전 스켈레톤
     loadDashboard();
   }
 };
@@ -1146,6 +1166,14 @@ function setPeriod(btn){
 
 // ── Render ────────────────────────────────────────────────────
 function render(d){
+  try{ _render(d); }
+  finally{
+    // 일부 렌더 실패(예: Chart.js CDN 미로드)에도 스켈레톤은 반드시 해제
+    document.getElementById('app').classList.remove('is-loading');
+    _isFirstLoad=false;
+  }
+}
+function _render(d){
   const m=d.metrics;
   if(document.getElementById('updated-at'))
     document.getElementById('updated-at').textContent=d.updated_at?d.updated_at.replace(' UTC',''):'—';
@@ -1170,7 +1198,6 @@ function render(d){
   renderMonthlyHeatmap(d.monthly_pnl||[]);
   updateControlPanel(d.bot_alive,d.log_time);
   allTrades=d.recent||[];
-  _isFirstLoad=false;
 }
 
 // ── Bot status ────────────────────────────────────────────────
@@ -1286,6 +1313,7 @@ function renderHero(m,actualBal,initialCap,eqCurve){
 }
 
 function renderHeroChart(data){
+  if(typeof Chart==='undefined')return;
   const canvas=document.getElementById('hero-chart');
   if(!canvas||!data||data.length<2)return;
   if(heroChart)heroChart.destroy();
@@ -1383,6 +1411,7 @@ function fillGrad(ctx,hex,h,top=0.14){
 }
 
 function renderEqChart(data,initialCap){
+  if(typeof Chart==='undefined')return;
   const el=document.getElementById('eq-chart');
   const ctx=el.getContext('2d');
   if(eqChart)eqChart.destroy();
@@ -1401,8 +1430,9 @@ function renderEqChart(data,initialCap){
   o.scales.y.ticks.callback=v=>`$${v.toFixed(0)}`;
   eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[
     {data:vals,borderColor:color,borderWidth:2,fill:true,backgroundColor:fillGrad(ctx,color,h),
-     pointRadius:data.map(d=>d.reason==='TP'||d.reason==='SL'?3:0),
+     pointRadius:data.map(d=>d.reason==='TP'||d.reason==='SL'?2.5:0),
      pointBackgroundColor:data.map(d=>d.reason==='TP'?c.up:d.reason==='SL'?c.dn:color),
+     pointBorderColor:cssVar('--sf'),pointBorderWidth:1.5,
      pointHoverRadius:5,tension:0.35},
     {data:Array(vals.length).fill(initialCap),borderColor:'rgba(232,234,237,.18)',
      borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false}
@@ -1410,6 +1440,7 @@ function renderEqChart(data,initialCap){
 }
 
 function renderDailyChart(data){
+  if(typeof Chart==='undefined')return;
   const ctx=document.getElementById('daily-chart').getContext('2d');
   if(dailyChart)dailyChart.destroy();
   if(!data||!data.length)return;
@@ -1421,6 +1452,7 @@ function renderDailyChart(data){
 }
 
 function renderModChart(stats){
+  if(typeof Chart==='undefined')return;
   const ctx=document.getElementById('mod-chart').getContext('2d');
   if(modChart)modChart.destroy();
   if(!stats||!stats.length)return;
@@ -1433,6 +1465,7 @@ function renderModChart(stats){
 }
 
 function renderWRChart(data){
+  if(typeof Chart==='undefined')return;
   const ctx=document.getElementById('wr-chart').getContext('2d');
   if(wrChart)wrChart.destroy();
   if(!data||data.length<2)return;
@@ -1454,6 +1487,7 @@ function renderWRChart(data){
 }
 
 function renderDDChart(data){
+  if(typeof Chart==='undefined')return;
   const ctx=document.getElementById('dd-chart').getContext('2d');
   if(ddChart)ddChart.destroy();
   if(!data||data.length<2)return;
