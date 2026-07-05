@@ -132,34 +132,31 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 /* ── Hero ── */
 .hero-section{display:grid;grid-template-columns:1.7fr 1fr;gap:14px;margin-bottom:22px}
 .hero-card{
-  background:linear-gradient(145deg,#0A3B6A 0%,#181852 50%,#2C1B4A 100%);
+  background:var(--sf);
   border-radius:var(--r);padding:22px;position:relative;overflow:hidden;min-height:196px;
-  border:1px solid rgba(255,255,255,.11);
-  box-shadow:0 12px 48px rgba(10,59,106,.45),inset 0 1px 0 rgba(255,255,255,.12)}
-.hero-card::before{content:'';position:absolute;top:-50px;right:-50px;
-  width:240px;height:240px;border-radius:50%;
-  background:radial-gradient(ellipse at center,rgba(10,132,255,.22),transparent 65%);pointer-events:none}
-.hero-card::after{content:'';position:absolute;bottom:-70px;left:10px;
-  width:180px;height:180px;border-radius:50%;
-  background:radial-gradient(ellipse at center,rgba(191,90,242,.18),transparent 65%);pointer-events:none}
+  border:1px solid var(--bd)}
+.hero-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,var(--acc),transparent 60%);pointer-events:none}
 .hero-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px;gap:8px;min-width:0}
-.hero-top-left{min-width:0;flex:1;position:relative;z-index:1}
-.hero-label{font-size:11px;color:rgba(255,255,255,.58);
-  text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;font-weight:500}
-.hero-value{font-size:38px;font-weight:700;letter-spacing:-1.5px;color:#fff;line-height:1.05;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-.hero-change{font-size:12px;color:rgba(255,255,255,.72);margin-top:6px;font-weight:500;
+.hero-top-left{min-width:0;flex:1}
+.hero-label{font-size:10px;color:var(--tx3);
+  text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;font-weight:600}
+.hero-value{font-size:42px;font-weight:600;letter-spacing:-.03em;color:var(--tx);line-height:1.05;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.hero-chart-wrap{height:60px;margin:12px -4px 0;position:relative;z-index:1}
-.hero-metas{display:flex;gap:14px;margin-top:12px;flex-wrap:nowrap;overflow:hidden;position:relative;z-index:1}
-.hero-meta-item{font-size:10px;color:rgba(255,255,255,.52);flex-shrink:0;font-weight:500}
-.hero-meta-val{font-size:12px;font-weight:600;color:#fff;white-space:nowrap;margin-top:1px}
-.hero-badges{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;position:relative;z-index:1}
+.hero-change{font-size:12px;color:var(--tx2);margin-top:6px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hero-change.up{color:var(--up)}
+.hero-change.dn{color:var(--dn)}
+.hero-chart-wrap{height:60px;margin:12px -4px 0;position:relative}
+.hero-metas{display:flex;gap:14px;margin-top:12px;flex-wrap:nowrap;overflow:hidden}
+.hero-meta-item{font-size:10px;color:var(--tx3);flex-shrink:0;font-weight:500}
+.hero-meta-val{font-size:12px;font-weight:600;color:var(--tx);white-space:nowrap;margin-top:1px}
+.hero-badges{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
 .regime-badge{display:inline-flex;align-items:center;gap:4px;
   background:var(--sf2);
-  padding:4px 9px;border-radius:20px;font-size:10px;font-weight:600;color:#fff;
+  padding:4px 9px;border-radius:20px;font-size:10px;font-weight:600;color:var(--tx);
   white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;
-  border:1px solid rgba(255,255,255,.16)}
+  border:1px solid var(--bd2)}
 
 /* ── 봇 상태 브리핑 ── */
 .briefing{display:flex;gap:13px;align-items:flex-start;
@@ -1049,6 +1046,9 @@ let allTrades=[];
 let logFilter='ALL',logInterval=null,posRefreshInterval=null;
 let _isFirstLoad=true;
 
+// CSS 변수 → JS 단일 브리지 (차트/뱃지 색의 유일한 출처 — hex로 정의돼 있어 알파 접미 결합 가능)
+const cssVar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
 // ── Auth ──────────────────────────────────────────────────────
 async function doLogin(){
   const pw=document.getElementById('pw-input').value;
@@ -1270,7 +1270,7 @@ function renderHero(m,actualBal,initialCap,eqCurve){
   if(ev) countUpFmt('hero-value',equity,v=>`$${v.toFixed(2)}`);
   if(ec){
     ec.textContent=`${m.total_pnl>=0?'+':'-'}$${Math.abs(m.total_pnl).toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`;
-    ec.style.color=m.total_pnl>=0?'rgba(255,255,255,.9)':'rgba(255,160,160,.9)';
+    ec.className='hero-change '+(m.total_pnl>=0?'up':'dn');
   }
   // mini stats
   const setH=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
@@ -1287,12 +1287,13 @@ function renderHeroChart(data){
   if(heroChart)heroChart.destroy();
   const ctx=canvas.getContext('2d');
   const vals=data.map(d=>d.eq);
+  const acc=cssVar('--acc');
   const grad=ctx.createLinearGradient(0,0,0,70);
-  grad.addColorStop(0,'rgba(255,255,255,.25)');
-  grad.addColorStop(1,'rgba(255,255,255,0)');
+  grad.addColorStop(0,acc+'1F');
+  grad.addColorStop(1,acc+'00');
   heroChart=new Chart(ctx,{type:'line',data:{
     labels:vals.map((_,i)=>i),
-    datasets:[{data:vals,borderColor:'rgba(255,255,255,.8)',borderWidth:2,
+    datasets:[{data:vals,borderColor:acc,borderWidth:1.5,
       fill:true,backgroundColor:grad,pointRadius:0,tension:0.4}]
   },options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},
     plugins:{legend:{display:false},tooltip:{enabled:false}},
