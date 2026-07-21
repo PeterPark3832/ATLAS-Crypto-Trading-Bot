@@ -1,0 +1,33 @@
+# ATLAS Spot Web Dashboard — systemd 유닛
+# =======================================
+# 설치:
+#   sudo cp deploy/atlas-dash.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-dash
+#
+# 배경(2026-07-19 장애):
+#   대시보드를 screen 세션으로 띄워 두면 서버 재부팅 시 사라진다. 실제로 재부팅
+#   후 구버전 프로젝트의 crontab @reboot이 8080을 선점해, 디스크에는 최신 UI가
+#   있는데도 옛 화면이 서빙되는 상태가 이틀간 지속됐다. systemd로 등록해 재부팅
+#   후에도 항상 이 유닛이 8080을 잡도록 한다.
+#
+# 주의: 8080을 쓰는 다른 자동기동(crontab @reboot, 다른 유닛)이 없어야 한다.
+#       Restart=always — 대시보드는 조회 전용이라 항상 살아 있는 편이 안전하다.
+
+[Unit]
+Description=ATLAS Spot Web Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/atlas_spot
+ExecStart=/usr/local/bin/uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/root/atlas_spot/logs/dashboard.log
+StandardError=append:/root/atlas_spot/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

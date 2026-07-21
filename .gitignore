@@ -15,3 +15,6 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# ── 운영 스크립트 (SSH 자격증명 포함 — 커밋 금지) ──────────────
+ATLAS-backtest/
