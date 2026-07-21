@@ -105,6 +105,19 @@ SPOT_MAX_SL_PCT        = 0.20    # SL 거리 상한 20% (초과 시 포지션이
 # 거래소 측 스탑 주문 (봇 다운 중에도 SL 집행 — 소프트웨어 SL은 백업)
 SPOT_EXCHANGE_STOP     = True    # STOP_LOSS_LIMIT 주문 사용 여부
 SPOT_STOP_LIMIT_GAP    = 0.005   # 지정가 = 트리거가 × (1 - 0.5%) — 급락 시 미체결 방지 버퍼
+SPOT_EXCHANGE_OCO      = True    # SL+TP를 OCO로 함께 등록 (동적 TP 전략 S5는 자동 제외)
+
+# ─────────────────────────────────────────────────────────────
+# 리스크 사이징 자기교정 (2026-07 매매 로직 점검)
+# ─────────────────────────────────────────────────────────────
+SPOT_KELLY_FRACTION    = 0.5     # half-Kelly — raw Kelly는 승률 추정오차에 과베팅
+                                 # (표본 10건 수준에서 분산이 커 기하성장·파산확률 모두 악화)
+SPOT_EQUITY_PER_SLOT   = 20.0    # 동시 포지션 1개당 최소 자본 $20
+                                 # (소액 계좌에서 포지션 과분할 → NOTIONAL 턱걸이 + 수수료 드래그 방지)
+SPOT_HEALTH_MIN_TRADES = 20      # 전략 건강도 판정 최소 표본 (미만이면 개입 없음)
+SPOT_HEALTH_PF_SOFT    = 1.0     # 실계좌 net PF < 1.0 → 해당 전략 리스크 50% 감봉
+SPOT_HEALTH_SOFT_SCALE = 0.5
+SPOT_HEALTH_PF_HARD    = 0.7     # 실계좌 net PF < 0.7 → 해당 전략 신규 진입 차단
 
 # Kelly / Ratchet
 SPOT_KELLY_MIN_TRADES  = 10      # 최소 거래수 (20→10: Kelly 조기 활성화)
