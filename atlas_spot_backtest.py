@@ -44,7 +44,7 @@ from atlas_spot_config import (
     BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
     SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
-    SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
+    SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
@@ -529,7 +529,8 @@ def backtest_strategy(
             if wins_r and losses_r:
                 wr = len(wins_r) / len(recent)
                 b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
-                kelly_raw = wr - (1 - wr) / b if b > 0 else 0.0
+                # half-Kelly (라이브 _get_kelly_scale과 패리티 유지)
+                kelly_raw = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
                 # 조건부 상한: WR>55% AND PF>1.5 시 KELLY_SCALE_MAX(2.0), 아니면 1.50
                 gross_w = sum(abs(r) for r in wins_r)
                 gross_l = sum(abs(r) for r in losses_r)

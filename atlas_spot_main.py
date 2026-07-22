@@ -59,7 +59,9 @@ from atlas_spot_config import (
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
-    SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP,
+    SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
+    SPOT_KELLY_FRACTION, SPOT_EQUITY_PER_SLOT,
+    SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_SOFT_SCALE, SPOT_HEALTH_PF_HARD,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
@@ -245,6 +247,7 @@ def init_spot_db():
             entry_ts     TEXT NOT NULL,
             regime       TEXT DEFAULT '',
             sl_order_id  TEXT DEFAULT '',
+            tp_order_id  TEXT DEFAULT '',
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -272,11 +275,14 @@ def init_spot_db():
             value TEXT
         );
         """)
-        # 마이그레이션: 기존 DB에 sl_order_id 컬럼이 없으면 추가
+        # 마이그레이션: 기존 DB에 주문 ID 컬럼이 없으면 추가
         cols = [r[1] for r in conn.execute('PRAGMA table_info(spot_positions)').fetchall()]
         if 'sl_order_id' not in cols:
             conn.execute("ALTER TABLE spot_positions ADD COLUMN sl_order_id TEXT DEFAULT ''")
             log.info('[DB] spot_positions.sl_order_id 컬럼 추가 (마이그레이션)')
+        if 'tp_order_id' not in cols:
+            conn.execute("ALTER TABLE spot_positions ADD COLUMN tp_order_id TEXT DEFAULT ''")
+            log.info('[DB] spot_positions.tp_order_id 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -344,11 +350,12 @@ def _delete_position(strategy: str, symbol: str):
         )
 
 
-def _update_position_order_id(strategy: str, symbol: str, order_id: str):
+def _update_position_order_id(strategy: str, symbol: str, order_id: str,
+                              tp_order_id: str = ''):
     with _db_lock, _db_conn() as conn:
         conn.execute(
-            'UPDATE spot_positions SET sl_order_id=? WHERE strategy=? AND symbol=?',
-            (order_id, strategy, symbol)
+            'UPDATE spot_positions SET sl_order_id=?, tp_order_id=? WHERE strategy=? AND symbol=?',
+            (order_id, tp_order_id, strategy, symbol)
         )
 
 
@@ -378,6 +385,67 @@ def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
         log.warning(f'[{strategy}] {symbol} 스탑주문 등록 실패(소프트웨어 SL로 폴백): {e}')
         _tg(f'⚠️ [{strategy}] {symbol} 거래소 스탑주문 실패 — 소프트웨어 SL만 작동: {e}')
         return ''
+
+
+def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
+                             qty: float, sl_price: float,
+                             tp_price: float = 0.0) -> tuple:
+    """거래소 보호 주문 등록: (sl_order_id, tp_order_id) 반환.
+    tp_price > 0이면 OCO(SL+TP 연동, 한쪽 체결 시 반대쪽 자동취소) 시도,
+    실패·미해당 시 STOP_LOSS_LIMIT 단독으로 폴백. 최종 실패는 ('','') —
+    소프트웨어 SL/TP가 커버한다."""
+    if not SPOT_EXCHANGE_STOP:
+        return '', ''
+    limit_price = sl_price * (1 - SPOT_STOP_LIMIT_GAP)
+    if qty * limit_price < SPOT_MIN_ORDER_USDT:
+        log.info(f'[{strategy}] {symbol} 보호주문 생략: NOTIONAL 미달 '
+                 f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
+        return '', ''
+    if SPOT_EXCHANGE_OCO and tp_price and tp_price > 0:
+        try:
+            ex = _get_ex()
+
+            def _p(v):
+                try:
+                    return ex.price_to_precision(ccxt_sym, v)
+                except Exception:
+                    return f'{v:.8f}'.rstrip('0').rstrip('.')
+
+            def _a(v):
+                try:
+                    return ex.amount_to_precision(ccxt_sym, v)
+                except Exception:
+                    return f'{v:.8f}'.rstrip('0').rstrip('.')
+
+            # Binance Spot OCO (POST /api/v3/orderList/oco) — SELL:
+            # above = TP 지정가(LIMIT_MAKER), below = SL(STOP_LOSS_LIMIT)
+            res = ex.privatePostOrderListOco({
+                'symbol': ccxt_sym.replace('/', ''),
+                'side': 'SELL',
+                'quantity': _a(qty),
+                'aboveType': 'LIMIT_MAKER',
+                'abovePrice': _p(tp_price),
+                'belowType': 'STOP_LOSS_LIMIT',
+                'belowStopPrice': _p(sl_price),
+                'belowPrice': _p(limit_price),
+                'belowTimeInForce': 'GTC',
+            })
+            sl_id = tp_id = ''
+            for o in (res.get('orderReports') or res.get('orders') or []):
+                otype = str(o.get('type', ''))
+                oid = str(o.get('orderId', '') or '')
+                if 'STOP' in otype:
+                    sl_id = oid
+                elif otype in ('LIMIT_MAKER', 'LIMIT'):
+                    tp_id = oid
+            if sl_id:
+                log.info(f'[{strategy}] {symbol} OCO 등록: SL#{sl_id}@{sl_price:,.4f} '
+                         f'/ TP#{tp_id}@{tp_price:,.4f}')
+                return sl_id, tp_id
+            log.warning(f'[{strategy}] {symbol} OCO 응답에서 주문ID 파싱 실패 — 스탑 단독 폴백')
+        except Exception as e:
+            log.warning(f'[{strategy}] {symbol} OCO 등록 실패(스탑 단독 폴백): {e}')
+    return _place_stop_loss_order(strategy, symbol, ccxt_sym, qty, sl_price), ''
 
 
 def _cancel_stop_order(strategy: str, symbol: str, ccxt_sym: str, order_id: str) -> None:
@@ -536,7 +604,8 @@ def _get_spot_equity() -> tuple[float, float]:
 
 
 def _get_kelly_scale(strategy: str) -> float:
-    """Kelly 스케일 계산 (최근 거래 기반, 조건부 상한 2.00)."""
+    """Kelly 스케일 계산 (최근 거래 기반, half-Kelly, 조건부 상한 2.00).
+    raw Kelly는 승률 추정오차에 과베팅하므로 SPOT_KELLY_FRACTION(0.5)을 곱한다."""
     with _db_lock, _db_conn() as conn:
         rows = conn.execute(
             'SELECT pnl_r FROM spot_trades WHERE strategy=? ORDER BY id DESC LIMIT 200',
@@ -553,7 +622,7 @@ def _get_kelly_scale(strategy: str) -> float:
     avg_w = float(np.mean(wins))
     avg_l = abs(float(np.mean(losses)))
     b     = avg_w / avg_l if avg_l > 0 else 1.0
-    kelly = (wr - (1 - wr) / b) if b > 0 else 0.0
+    kelly = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
     # Profit Factor 계산 (조건부 Kelly 상한 활성화)
     gross_w = sum(abs(r) for r in wins)
     gross_l = sum(abs(r) for r in losses)
@@ -617,6 +686,31 @@ def _get_ratchet_scale() -> float:
     return scale
 
 
+def _get_strategy_health_scale(strategy: str) -> float:
+    """실계좌 net 성과 기반 자기교정 스케일.
+    최근 200건 중 해당 전략 표본이 SPOT_HEALTH_MIN_TRADES 이상일 때:
+      net PF < SPOT_HEALTH_PF_HARD(0.7) → 0.0 (신규 진입 차단)
+      net PF < SPOT_HEALTH_PF_SOFT(1.0) → SPOT_HEALTH_SOFT_SCALE(0.5) 감봉
+    표본 부족 시 개입하지 않는다(1.0)."""
+    with _db_lock, _db_conn() as conn:
+        rows = conn.execute(
+            'SELECT pnl_usdt - COALESCE(fee_usdt, 0) AS net FROM spot_trades '
+            'WHERE strategy=? ORDER BY id DESC LIMIT 200',
+            (strategy,)
+        ).fetchall()
+    if len(rows) < SPOT_HEALTH_MIN_TRADES:
+        return 1.0
+    nets = [r['net'] for r in rows]
+    gross_w = sum(n for n in nets if n > 0)
+    gross_l = abs(sum(n for n in nets if n < 0))
+    pf = gross_w / gross_l if gross_l > 0 else float('inf')
+    if pf < SPOT_HEALTH_PF_HARD:
+        return 0.0
+    if pf < SPOT_HEALTH_PF_SOFT:
+        return SPOT_HEALTH_SOFT_SCALE
+    return 1.0
+
+
 def _get_spot_funding(sym: str) -> float:
     """Binance 선물 펀딩비 조회 (현물 추세추종 진입 필터용). 실패 시 0.0 반환."""
     try:
@@ -673,17 +767,33 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     if SPOT_KILL_SWITCH.exists():
         return False
 
-    # 포지션 수 제한
+    equity = _state['equity']
+
+    # 포지션 수 제한 — 자본 연동: 슬롯당 최소 $SPOT_EQUITY_PER_SLOT
+    # (소액 계좌에서 과분할 → NOTIONAL 턱걸이 + 수수료 드래그 방지)
+    max_pos = min(SPOT_MAX_POSITIONS,
+                  max(1, int(equity // SPOT_EQUITY_PER_SLOT)))
     all_pos = _load_all_positions()
-    if len(all_pos) >= SPOT_MAX_POSITIONS:
-        log.info(f'[{strategy}] {symbol} 매수 차단 (최대 포지션 {SPOT_MAX_POSITIONS}개)')
+    if len(all_pos) >= max_pos:
+        log.info(f'[{strategy}] {symbol} 매수 차단 (최대 포지션 {max_pos}개 — 자본 연동)')
         return False
 
     # 중복 포지션 방지
     if _load_position(strategy, symbol):
         return False
 
-    equity   = _state['equity']
+    # 전략 건강도 자기교정: 실계좌 net PF 기준 감봉/차단
+    health = _get_strategy_health_scale(strategy)
+    if health <= 0:
+        log.warning(f'[{strategy}] {symbol} 매수 차단: 실계좌 net PF < '
+                    f'{SPOT_HEALTH_PF_HARD} (표본 {SPOT_HEALTH_MIN_TRADES}건+)')
+        if not _state.get(f'health_blocked_{strategy}'):
+            _state[f'health_blocked_{strategy}'] = True
+            _tg(f'⛔ [{strategy}] 실계좌 net PF < {SPOT_HEALTH_PF_HARD} — '
+                f'신규 진입 자동 차단 (성과 회복 시 자동 해제)')
+        return False
+    _state.pop(f'health_blocked_{strategy}', None)
+
     kelly    = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
     if regime == REGIME_WEAK_TREND:
@@ -709,7 +819,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         log.info(f'[{strategy}] {symbol} 매수 차단: SL거리 {_sl_pct*100:.1f}% > 상한 {SPOT_MAX_SL_PCT*100:.0f}%')
         return False
 
-    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale
+    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale * health
     risk_usd   = equity * adj_risk
     qty        = risk_usd / sl_dist
     cost_usdt  = qty * entry_price
@@ -773,11 +883,14 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
     )
 
-    # 거래소 측 스탑 주문 등록 (봇 다운 중에도 SL 집행 — 실패 시 소프트웨어 SL 폴백)
+    # 거래소 측 보호 주문 등록 (봇 다운 중에도 SL/TP 집행 — 실패 시 소프트웨어 폴백)
+    # S5는 TP(BB 상단)가 매 봉 갱신되는 동적 목표라 거래소 TP 제외 (스탑 단독)
     if not _state['dry_run']:
-        stop_id = _place_stop_loss_order(strategy, symbol, ccxt_sym, qty, sl_final)
-        if stop_id:
-            _update_position_order_id(strategy, symbol, stop_id)
+        tp_for_oco = 0.0 if strategy == 'S5' else float(tp_final or 0)
+        sl_id, tp_id = _place_protective_orders(strategy, symbol, ccxt_sym,
+                                                qty, sl_final, tp_for_oco)
+        if sl_id or tp_id:
+            _update_position_order_id(strategy, symbol, sl_id, tp_id)
 
     msg = (f'✅ [{strategy}] {symbol} 매수\n'
            f'   체결가: {fill_price:,.4f} | SL: {sl_final:,.4f}\n'
@@ -802,9 +915,10 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     exit_price = price
 
     if not _state['dry_run']:
-        # 거래소 스탑 주문 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
+        # 거래소 보호 주문(SL/TP) 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
         # 시장가 매도가 실패하고, 아래 사전잔고 확인이 수동매도로 오판한다.
         _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
         # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
         try:
             _base_asset = ccxt_sym.split('/')[0]
@@ -909,21 +1023,31 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
 
 def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
                              pos: dict) -> bool:
-    """거래소 스탑 주문 상태 처리.
-    체결(closed) → 거래 기록 + 포지션 삭제 후 True 반환 (관리 종료).
-    취소/거부/만료 → 재등록 시도(실패 시 소프트웨어 SL 폴백) 후 False.
-    조회 실패/미체결 → False (평소 관리 계속).
+    """거래소 보호 주문(SL/TP 레그) 상태 처리.
+    어느 레그든 체결(closed) → 거래 기록 + 포지션 삭제 후 True (관리 종료).
+    취소/거부/만료 감지(OCO는 한 레그 취소 시 전체 사멸) → 잔여 레그 정리 후
+    보호 주문 재등록 시도. 조회 실패/미체결 → False (평소 관리 계속).
     """
-    order_id = pos.get('sl_order_id') or ''
-    order = _fetch_stop_order(ccxt_sym, order_id)
-    if order is None:
+    legs = [(pos.get('sl_order_id') or '', 'SL'),
+            (pos.get('tp_order_id') or '', 'TP')]
+    fetched = []
+    for oid, reason in legs:
+        if not oid:
+            continue
+        order = _fetch_stop_order(ccxt_sym, oid)
+        if order is not None:
+            fetched.append((oid, reason, order))
+    if not fetched:
         return False
 
-    status = str(order.get('status', '') or '').lower()
-    if status == 'closed':
+    # 1) 체결 레그 우선 처리
+    for oid, reason, order in fetched:
+        if str(order.get('status', '') or '').lower() != 'closed':
+            continue
         entry_price = float(pos['entry_price'])
         qty         = float(order.get('filled') or pos['qty_tokens'])
-        exit_price  = float(order.get('average') or order.get('price') or pos['sl'])
+        fallback_px = float(pos['sl']) if reason == 'SL' else float(pos.get('tp') or pos['sl'])
+        exit_price  = float(order.get('average') or order.get('price') or fallback_px)
         sl_dist     = abs(entry_price - float(pos['sl']))
         pnl_usdt    = (exit_price - entry_price) * qty
         pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
@@ -934,22 +1058,34 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
         _delete_position(strategy, symbol)
         net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty,
                              float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
-                             hold_hours, 'SL', pos.get('regime', ''), entry_ts)
+                             hold_hours, reason, pos.get('regime', ''), entry_ts)
         with _state_lock:
             _state['day_pnl'] += net_pnl
-        msg = (f'❌ [{strategy}] {symbol} 청산 (SL — 거래소 스탑 체결)\n'
+        # 반대 레그 정리 (OCO는 자동취소되지만 스탑 단독+소프트웨어 병행 대비)
+        for other_id, _r in legs:
+            if other_id and other_id != oid:
+                _cancel_stop_order(strategy, symbol, ccxt_sym, other_id)
+        emoji = '✅' if pnl_usdt > 0 else '❌'
+        msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason} — 거래소 주문 체결)\n'
                f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
                f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)')
         log.info(msg)
         _tg(msg)
         return True
 
-    if status in ('canceled', 'cancelled', 'rejected', 'expired'):
-        # 봇 외부에서 취소된 경우 등 — 재등록 시도, 실패 시 소프트웨어 SL 폴백
-        log.warning(f'[{strategy}] {symbol} 스탑주문 {status} 감지 — 재등록 시도')
-        new_id = _place_stop_loss_order(strategy, symbol, ccxt_sym,
-                                        float(pos['qty_tokens']), float(pos['sl']))
-        _update_position_order_id(strategy, symbol, new_id)
+    # 2) 취소/거부/만료 감지 → 잔여 레그 정리 후 재무장 (실패 시 소프트웨어 폴백)
+    dead = [r for oid, r, order in fetched
+            if str(order.get('status', '') or '').lower()
+            in ('canceled', 'cancelled', 'rejected', 'expired')]
+    if dead:
+        log.warning(f'[{strategy}] {symbol} 보호주문 {dead} 취소/만료 감지 — 재등록 시도')
+        for oid, _r, _order in fetched:
+            _cancel_stop_order(strategy, symbol, ccxt_sym, oid)
+        tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
+        new_sl, new_tp = _place_protective_orders(strategy, symbol, ccxt_sym,
+                                                  float(pos['qty_tokens']),
+                                                  float(pos['sl']), tp_for_oco)
+        _update_position_order_id(strategy, symbol, new_sl, new_tp)
     return False
 
 
@@ -959,8 +1095,8 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
     if pos is None:
         return
 
-    # 거래소 스탑 주문 상태 확인 (체결됐으면 여기서 거래 기록 후 종료)
-    if not _state['dry_run'] and (pos.get('sl_order_id') or ''):
+    # 거래소 보호 주문(SL/TP) 상태 확인 (체결됐으면 여기서 거래 기록 후 종료)
+    if not _state['dry_run'] and (pos.get('sl_order_id') or pos.get('tp_order_id')):
         if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
             return
         pos = _load_position(strategy, symbol)   # 재무장 시 sl_order_id 갱신 반영
@@ -1299,9 +1435,11 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                     # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
                     _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
-                    # 고아 스탑 주문 방지: 남아있으면 취소 (이미 체결/취소면 무시됨)
+                    # 고아 보호 주문 방지: 남아있으면 취소 (이미 체결/취소면 무시됨)
                     _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
                                        pos.get('sl_order_id') or '')
+                    _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
+                                       pos.get('tp_order_id') or '')
                     _delete_position(strategy, sym)
                     # 거래 기록 — _spot_sell의 수동매도 경로와 동일하게 통계 보존
                     # (체결가 불명이므로 현재가로 추정, 조회 불가 시 진입가)
