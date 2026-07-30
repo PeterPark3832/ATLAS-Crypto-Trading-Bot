@@ -1,0 +1,32 @@
+# ATLAS Spot — 파라미터 재최적화 (제안 전용, oneshot)
+# =====================================================
+# 타이머 없음. 월간 리포트(atlas-wfo-report.service)가 OOS 미달 전략을
+# 발견했을 때 --no-block 으로 트리거하거나, 수동으로 실행한다:
+#   sudo systemctl start atlas-wfo-reopt.service
+#   (또는) python3 reoptimize.py --strategies S4
+#
+# ★ 안전 ★ reoptimize.py 는 config·봇을 변경하지 않는다. 결과는 텔레그램 +
+#   results/reopt_proposal_*.json 제안뿐이며, 반영은 사람이 수동으로 한다.
+#
+# 그리드 서치라 리포트보다 CPU 를 더 오래 쓴다 → 리소스 격리를 더 조인다.
+# 리포트 잡이 끝난 뒤(별도 cgroup) 순차 실행되므로 메모리 피크가 겹치지 않는다.
+
+[Unit]
+Description=ATLAS Spot Parameter Re-optimization (proposal only)
+After=network-online.target atlas-wfo-report.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/atlas_spot
+ExecStart=/usr/bin/python3 -u reoptimize.py
+Environment=PYTHONUNBUFFERED=1
+# ── 리소스 격리 (리포트보다 타이트) ──
+MemoryMax=420M
+MemorySwapMax=600M
+CPUQuota=50%
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=7200
+StandardOutput=append:/root/atlas_spot/logs/wfo_reopt.log
+StandardError=append:/root/atlas_spot/logs/wfo_reopt.log

@@ -1,0 +1,44 @@
+# ATLAS Spot — 월간 Walk-Forward OOS 리포트 (oneshot)
+# =====================================================
+# 설치:
+#   sudo cp deploy/atlas-wfo-report.service deploy/atlas-wfo-report.timer \
+#           deploy/atlas-wfo-reopt.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-wfo-report.timer
+#
+# 수동 1회 실행: sudo systemctl start atlas-wfo-report.service
+#
+# ★ 메모리 격리 (중요) ★
+#   이 서버는 RAM 951MB / vCPU 1개이고 라이브 봇이 상시 ~700MB 를 쓴다.
+#   WF 백테스트는 유니버스 전 심볼의 OHLCV(5년치)를 동시에 적재하므로,
+#   MemoryMax 로 이 잡을 별도 cgroup 에 가둔다. 잡이 상한을 넘으면 커널이
+#   "라이브 봇"이 아니라 "이 잡"을 죽인다 (봇 보호). CPUQuota·Nice·ionice 로
+#   봇의 실매매 지연을 최소화한다.
+#
+# 주의: 최초 실행은 data/ 캐시가 비어 있어 바이낸스에서 5년치를 받는다 —
+#       타이머로 무인 활성화하기 전, 반드시 수동 1회 실행해 MemoryMax 안에
+#       들어오는지 확인할 것 (README / 운영 노트 참조).
+
+[Unit]
+Description=ATLAS Spot Monthly Walk-Forward OOS Report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/atlas_spot
+ExecStart=/usr/bin/python3 -u monthly_wfo_report.py
+Environment=PYTHONUNBUFFERED=1
+# OOS 미달 전략 발견 시 재최적화 제안 잡을 순차 트리거하도록 허용
+Environment=WFO_AUTO_REOPT=1
+# ── 리소스 격리 ──
+MemoryMax=420M
+MemorySwapMax=600M
+CPUQuota=60%
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3600
+StandardOutput=append:/root/atlas_spot/logs/wfo_report.log
+StandardError=append:/root/atlas_spot/logs/wfo_report.log
+
+# oneshot 은 [Install] 없이 타이머로만 기동한다.
