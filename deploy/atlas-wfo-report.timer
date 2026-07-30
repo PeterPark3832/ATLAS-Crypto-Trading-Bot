@@ -1,0 +1,15 @@
+# ATLAS Spot — 월간 WFO 리포트 타이머
+# ====================================
+# 매월 1일 03:00 UTC (= 한국시간 12:00, 거래 한산 시간대) 실행.
+# Persistent=true: 서버가 그 시각에 꺼져 있었으면 부팅 후 놓친 실행을 보충한다.
+
+[Unit]
+Description=ATLAS Spot Monthly WFO Report Timer
+
+[Timer]
+OnCalendar=*-*-01 03:00:00
+Persistent=true
+Unit=atlas-wfo-report.service
+
+[Install]
+WantedBy=timers.target
