@@ -1428,10 +1428,14 @@ function renderEqChart(data,initialCap){
     label:x=>{const pt=data[x.dataIndex];return[`잔고: $${x.parsed.y.toFixed(2)}`,pt.reason?`${pt.reason}: ${pt.pnl>=0?'+':'-'}$${Math.abs(pt.pnl).toFixed(2)}`:null].filter(Boolean);}
   };
   o.scales.y.ticks.callback=v=>`$${v.toFixed(0)}`;
+  // 거래가 많아지면 TP/SL 마커가 선을 덮어 곡선이 읽히지 않는다.
+  // 임계치를 넘으면 마커를 접는다 — 스칼라 pointRadius라 Chart.js의
+  // 포인트별 스타일 해석(느린 경로)도 함께 꺼진다.
+  const dense=data.length>150;
   eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[
     {data:vals,borderColor:color,borderWidth:2,fill:true,backgroundColor:fillGrad(ctx,color,h),
-     pointRadius:data.map(d=>d.reason==='TP'||d.reason==='SL'?2.5:0),
-     pointBackgroundColor:data.map(d=>d.reason==='TP'?c.up:d.reason==='SL'?c.dn:color),
+     pointRadius:dense?0:data.map(d=>d.reason==='TP'||d.reason==='SL'?2.5:0),
+     pointBackgroundColor:dense?color:data.map(d=>d.reason==='TP'?c.up:d.reason==='SL'?c.dn:color),
      pointBorderColor:cssVar('--sf'),pointBorderWidth:1.5,
      pointHoverRadius:5,tension:0.35},
     {data:Array(vals.length).fill(initialCap),borderColor:'rgba(232,234,237,.18)',
