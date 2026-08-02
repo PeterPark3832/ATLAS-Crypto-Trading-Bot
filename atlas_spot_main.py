@@ -148,14 +148,48 @@ _last_known_price: dict = {}   # {ccxt_sym: (price, timestamp)}
 _PRICE_CACHE_TTL = 120         # 캐시 신뢰 최대 2분
 
 
+# 폴링 패스 내 시세 공유 캐시.
+# 기존에는 (심볼 × 전략)마다 fetch_ticker를 따로 쳐서 50심볼·4전략이면
+# 분당 200회였다. 레이트리밋보다 문제는 **지연**이었다: 순차 HTTP 왕복이
+# 패스당 수십 초라 SL 체크 실주기가 60초가 아니라 85초까지 늘어났다.
+_price_cache: dict = {}          # {ccxt_sym: (price, ts)}
+_PRICE_FRESH_TTL = 25            # 한 패스 안에서 재사용할 신선도(초)
+
+
+def _prefetch_prices(ccxt_syms: list) -> int:
+    """전 심볼 시세를 배치 1회로 채운다. 반환: 채운 심볼 수.
+    (/api/v3/ticker/price 다중조회 = weight 4 — 개별 조회 대비 100배 절약)"""
+    syms = sorted(set(s for s in ccxt_syms if s))
+    if not syms:
+        return 0
+    now = time.time()
+    try:
+        prices = _get_ex().fetch_last_prices(syms)
+        n = 0
+        for sym, row in (prices or {}).items():
+            px = float((row or {}).get('price') or 0)
+            if px > 0:
+                _price_cache[sym] = (px, now)
+                _last_known_price[sym] = (px, now)
+                n += 1
+        return n
+    except Exception as e:
+        log.warning(f'배치 시세 조회 실패(개별 조회로 폴백): {e}')
+        return 0
+
+
 def _get_price(ccxt_sym: str) -> float:
-    """현재가 조회. 실패 시 최대 2분간 캐시 사용, 이후 0.0 반환."""
+    """현재가 조회. 배치 프리페치 캐시 → 개별 조회 → 최대 2분 캐시 폴백."""
+    hit = _price_cache.get(ccxt_sym)
+    if hit and (time.time() - hit[1]) < _PRICE_FRESH_TTL:
+        return hit[0]
     for attempt in range(3):
         try:
             ticker = _get_ex().fetch_ticker(ccxt_sym)
             price = float(ticker['last'] or ticker['close'] or 0)
             if price > 0:
                 _last_known_price[ccxt_sym] = (price, time.time())
+                _price_cache[ccxt_sym] = (price, time.time())
                 return price
         except Exception as e:
             if attempt < 2:
@@ -175,13 +209,38 @@ def _get_price(ccxt_sym: str) -> float:
 # ══════════════════════════════════════════════════════════════
 
 class CandleCache:
-    """TTL 기반 캔들 캐시 (API 부하 절감)."""
+    """TTL 기반 캔들 캐시 (API 부하 절감).
+
+    24시간 상시 구동이라 정리가 없으면 계속 자란다: 유니버스가
+    UNIVERSE_REFRESH_HOURS마다 갈리는데 빠진 심볼의 캔들(1D 600봉 ≈ 155KB,
+    4H 300봉 ≈ 77KB)이 그대로 남기 때문. 만료 엔트리를 주기적으로 버려
+    현재 유니버스 크기에서 고정시킨다.
+    """
 
     def __init__(self, ttl: int = SPOT_CANDLE_CACHE_TTL):
         self._cache: dict = {}
         self._locks: dict = {}
         self._meta_lock = threading.Lock()
         self._ttl = ttl
+        self._last_sweep = time.time()
+        self._sweep_every = max(ttl * 2, 600)
+
+    def _sweep(self) -> int:
+        """TTL이 한참 지난 엔트리 제거. 반환: 제거 개수."""
+        now = time.time()
+        if now - self._last_sweep < self._sweep_every:
+            return 0
+        stale_after = self._ttl * 3          # 여유를 두고 확실히 죽은 것만
+        with self._meta_lock:
+            self._last_sweep = now
+            dead = [k for k, (_, ts) in self._cache.items()
+                    if now - ts > stale_after]
+            for k in dead:
+                self._cache.pop(k, None)
+                self._locks.pop(k, None)
+        if dead:
+            log.info(f'[캐시] 만료 캔들 {len(dead)}건 정리 (잔여 {len(self._cache)}건)')
+        return len(dead)
 
     def _get_lock(self, key: str) -> threading.Lock:
         with self._meta_lock:
@@ -190,6 +249,7 @@ class CandleCache:
             return self._locks[key]
 
     def get(self, ex, ccxt_sym: str, timeframe: str, limit: int) -> list:
+        self._sweep()
         key = f'{ccxt_sym}_{timeframe}'
         lock = self._get_lock(key)
         with lock:
@@ -280,6 +340,16 @@ def init_spot_db():
             key   TEXT PRIMARY KEY,
             value TEXT
         );
+
+        -- 인덱스: 거래가 쌓일수록(5만 건 기준 3~4ms) 느려지는 쿼리용.
+        -- 대시보드 기간 필터, S5 SL 쿨다운, 동봉 재진입 중복체크가 대상.
+        -- (Kelly/건강도는 rowid 역방향 + LIMIT이라 인덱스가 불필요)
+        CREATE INDEX IF NOT EXISTS ix_trades_exit
+            ON spot_trades(exit_ts);
+        CREATE INDEX IF NOT EXISTS ix_trades_strat_sym
+            ON spot_trades(strategy, symbol, entry_ts);
+        CREATE INDEX IF NOT EXISTS ix_trades_reason
+            ON spot_trades(strategy, symbol, reason, exit_ts);
         """)
         # 마이그레이션: 기존 DB에 주문 ID 컬럼이 없으면 추가
         cols = [r[1] for r in conn.execute('PRAGMA table_info(spot_positions)').fetchall()]
@@ -1355,6 +1425,16 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
             time.sleep(10)
             continue
 
+        # 패스 시작 시 전 심볼 시세를 배치 1회로 확보.
+        # 보유 포지션 심볼은 유니버스에서 빠졌더라도 SL/TP 판정에 필요하다.
+        _pass_syms = [s.replace('USDT', '/USDT') for s in universe]
+        try:
+            _pass_syms += [p['symbol'].replace('USDT', '/USDT')
+                           for p in _load_all_positions()]
+        except Exception:
+            pass
+        _prefetch_prices(_pass_syms)
+
         for symbol in universe:
             ccxt_sym = symbol.replace('USDT', '/USDT')
             ex = _get_ex()
@@ -1391,16 +1471,25 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
 
                     # 재시작 보호: last_bar는 메모리라 재시작 시 초기화됨
                     # DB에서 이번 봉 이후 진입 기록 확인 → 동봉 재진입 방지
+                    # 인덱스 사용을 위한 sargable 프리필터.
+                    # datetime(entry_ts)로 컬럼을 감싸면 인덱스 범위 탐색이
+                    # 불가능해 (strategy,symbol) 그룹 전체를 훑는다. 저장 형식이
+                    # 다른 레거시 행이 있어도 잘라내지 않도록 2일 여유를 둔 문자열
+                    # 하한을 함께 주고, 정확한 판정은 기존 datetime() 조건이 한다.
+                    _cut_iso = datetime.fromtimestamp(
+                        cur_ts - 172800, tz=timezone.utc).isoformat()
                     with _db_lock, _db_conn() as _rc:
                         _dupe = _rc.execute(
                             "SELECT 1 FROM spot_positions "
-                            "WHERE strategy=? AND symbol=? "
+                            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
                             "AND datetime(entry_ts) >= datetime(?, 'unixepoch') "
-                            "UNION SELECT 1 FROM spot_trades "
-                            "WHERE strategy=? AND symbol=? "
+                            # UNION ALL: 존재 여부만 보므로 중복 제거가 불필요하다.
+                            # UNION은 임시 b-tree를 만들어 LIMIT 1 조기 종료를 막는다.
+                            "UNION ALL SELECT 1 FROM spot_trades "
+                            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
                             "AND datetime(entry_ts) >= datetime(?, 'unixepoch') LIMIT 1",
-                            (strategy_id, symbol, cur_ts,
-                             strategy_id, symbol, cur_ts)
+                            (strategy_id, symbol, _cut_iso, cur_ts,
+                             strategy_id, symbol, _cut_iso, cur_ts)
                         ).fetchone()
                     if _dupe:
                         log.debug(f'[{strategy_id}] {symbol} 재시작 보호: 이번 봉 이미 처리됨')

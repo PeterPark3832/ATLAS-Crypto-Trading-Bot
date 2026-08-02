@@ -320,6 +320,77 @@ class TestHealthAutoRelease:
 
 
 # ══════════════════════════════════════════════════════════════
+#  ⑧ 배치 시세 프리페치 (SL 체크 지연 / 레이트리밋)
+# ══════════════════════════════════════════════════════════════
+
+class _PriceEx:
+    def __init__(self, fail_batch=False):
+        self.ticker_calls = 0
+        self.batch_calls = 0
+        self.fail_batch = fail_batch
+
+    def fetch_last_prices(self, syms):
+        self.batch_calls += 1
+        if self.fail_batch:
+            raise Exception('endpoint unavailable')
+        return {s: {'price': 100.0 + i} for i, s in enumerate(syms)}
+
+    def fetch_ticker(self, sym):
+        self.ticker_calls += 1
+        return {'last': 999.0, 'close': 999.0}
+
+
+@pytest.fixture
+def _price_env(monkeypatch):
+    monkeypatch.setattr(sm, '_price_cache', {})
+    monkeypatch.setattr(sm, '_last_known_price', {})
+    ex = _PriceEx()
+    monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+    return ex
+
+
+class TestPricePrefetch:
+    def test_batch_replaces_per_symbol_calls(self, _price_env):
+        """심볼×전략마다 개별 조회하던 것을 배치 1회로 대체.
+        기존엔 50심볼×4전략 = 200회/분이라 패스가 수십 초 걸렸고,
+        그만큼 SL 체크 실주기가 60초보다 길어졌다."""
+        syms = [f'S{i}/USDT' for i in range(50)]
+        assert sm._prefetch_prices(syms) == 50
+        for s in syms:
+            for _ in range(4):          # 4개 전략이 같은 심볼을 본다
+                assert sm._get_price(s) > 0
+        assert _price_env.batch_calls == 1
+        assert _price_env.ticker_calls == 0, '캐시가 있으면 개별 조회는 0회'
+
+    def test_falls_back_to_individual_when_batch_fails(self, monkeypatch):
+        monkeypatch.setattr(sm, '_price_cache', {})
+        monkeypatch.setattr(sm, '_last_known_price', {})
+        ex = _PriceEx(fail_batch=True)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._prefetch_prices(['BTC/USDT']) == 0
+        assert sm._get_price('BTC/USDT') == 999.0     # 개별 조회로 폴백
+        assert ex.ticker_calls == 1
+
+    def test_stale_cache_triggers_refetch(self, _price_env, monkeypatch):
+        sm._prefetch_prices(['BTC/USDT'])
+        assert sm._get_price('BTC/USDT') == 100.0
+        # 신선도 만료 → 개별 조회 경로
+        sm._price_cache['BTC/USDT'] = (100.0, 0.0)
+        assert sm._get_price('BTC/USDT') == 999.0
+        assert _price_env.ticker_calls == 1
+
+    def test_empty_and_duplicate_symbols(self, _price_env):
+        assert sm._prefetch_prices([]) == 0
+        assert sm._prefetch_prices(['BTC/USDT', 'BTC/USDT', '']) == 1
+
+    def test_prefetch_failure_is_non_fatal(self, monkeypatch):
+        monkeypatch.setattr(sm, '_price_cache', {})
+        ex = _PriceEx(fail_batch=True)
+        monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+        assert sm._prefetch_prices(['BTC/USDT']) == 0   # 예외가 새어나오면 안 됨
+
+
+# ══════════════════════════════════════════════════════════════
 #  ⑦ 포지션 저장 실패 시 알림 + 보호 시도
 # ══════════════════════════════════════════════════════════════
 

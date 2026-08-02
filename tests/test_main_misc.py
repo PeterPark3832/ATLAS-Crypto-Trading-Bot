@@ -51,6 +51,9 @@ def _no_kill_switch(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _clear_price_cache(monkeypatch):
     monkeypatch.setattr(sm, '_last_known_price', {})
+    # 패스 내 시세 공유 캐시도 테스트마다 비운다 — 비우지 않으면 앞 테스트의
+    # 가격이 남아 개별 조회 경로가 아예 실행되지 않는다.
+    monkeypatch.setattr(sm, '_price_cache', {})
 
 
 @pytest.fixture(autouse=True)
