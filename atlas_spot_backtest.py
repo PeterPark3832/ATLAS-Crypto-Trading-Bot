@@ -45,6 +45,9 @@ from atlas_spot_config import (
     SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
+    SPOT_MAX_SL_PCT, SPOT_MAX_COST_PER_R,
+    SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_PF_HARD,
+    SPOT_HEALTH_SOFT_SCALE,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
@@ -519,6 +522,28 @@ def backtest_strategy(
             diag['invalid_sl'] += 1
             continue
 
+        # ── 라이브 진입 필터 패리티 ─────────────────────────────
+        # 라이브에만 있고 백테스트에 없으면 성과가 구조적으로 과대평가된다.
+        #
+        # ※ 남아있는 한계 — **포트폴리오 제약은 모델링하지 못한다.**
+        #   이 함수는 (전략 × 심볼) 단위로 독립 실행되므로 동시 포지션 수
+        #   상한(SPOT_MAX_POSITIONS), 슬롯당 최소 자본(SPOT_EQUITY_PER_SLOT),
+        #   USDT 예비금(SPOT_RESERVE_PCT), 전략 간 자본 경합을 반영할 수 없다.
+        #   즉 백테스트는 여전히 라이브보다 **낙관적**이며, 특히 신호가 몰리는
+        #   구간에서 라이브는 일부 진입을 포기한다. 결과를 상한선으로 읽을 것.
+        sl_pct = sl_dist / entry_price
+        if sl_pct > SPOT_MAX_SL_PCT:
+            diag['sl_too_wide'] = diag.get('sl_too_wide', 0) + 1
+            continue
+        # 비용 대비 엣지: 왕복비용이 1R을 얼마나 잠식하는지
+        # (라이브 `_cost_edge_ok`와 동일한 부등식. 스프레드는 백테스트에
+        #  호가 데이터가 없어 슬리피지 모델로 근사한다)
+        cost_rate  = BT_SPOT_FEE * 2 + slip * 2
+        cost_per_r = cost_rate / sl_pct
+        if cost_per_r > SPOT_MAX_COST_PER_R:
+            diag['cost_exceeds_edge'] = diag.get('cost_exceeds_edge', 0) + 1
+            continue
+
         # 포지션 크기 계산 (스팟: 레버리지 없음)
         # Kelly 스케일링 (SPOT_KELLY_MIN_TRADES 건 이후부터 적용)
         kelly_scale = 1.0
@@ -526,6 +551,10 @@ def backtest_strategy(
             recent = trades[-200:]
             wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
             losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
+            if not wins_r:
+                # 전패 구간 — 라이브와 동일하게 최소 스케일로 (기존에는 1.0을
+                # 유지해 연패 중에도 정상 사이즈로 베팅하는 낙관 편향이 있었다)
+                kelly_scale = SPOT_KELLY_SCALE_MIN
             if wins_r and losses_r:
                 wr = len(wins_r) / len(recent)
                 b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
@@ -538,7 +567,26 @@ def backtest_strategy(
                 k_max = SPOT_KELLY_SCALE_MAX if (wr >= SPOT_KELLY_WR_THRESH and
                                                   pf >= SPOT_KELLY_PF_THRESH) else 1.50
                 kelly_scale = max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
-        adj_risk_pct = risk_pct * regime_scale * kelly_scale
+        # 전략 건강도 자기교정 (라이브 `_get_strategy_health_scale` 패리티)
+        # 최근 실적의 net PF가 나쁘면 감봉/차단된다. 이걸 빼면 백테스트는
+        # 라이브가 실제로는 걸러냈을 구간까지 정상 사이즈로 거래한 셈이 된다.
+        health_scale = 1.0
+        if len(trades) >= SPOT_HEALTH_MIN_TRADES:
+            _recent_h = trades[-200:]
+            # 손익 기여도 = R배수 × 그 거래의 리스크 비중 (자본 대비 비율).
+            # 라이브는 USD net PF를 쓰지만 백테스트에는 거래별 USD 손익이
+            # 없으므로 비율로 근사한다 — 판정 자체의 패리티가 목적이다.
+            _nets = [t.pnl_r * t.risk_pct for t in _recent_h]
+            _gw = sum(n for n in _nets if n > 0)
+            _gl = abs(sum(n for n in _nets if n < 0))
+            _pf = _gw / _gl if _gl > 0 else float('inf')
+            if _pf < SPOT_HEALTH_PF_HARD:
+                diag['health_blocked'] = diag.get('health_blocked', 0) + 1
+                continue
+            if _pf < SPOT_HEALTH_PF_SOFT:
+                health_scale = SPOT_HEALTH_SOFT_SCALE
+
+        adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
         cost_usdt    = qty * entry_price

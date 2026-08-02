@@ -151,7 +151,10 @@ class TestEquityLinkedSlots:
 # ══════════════════════════════════════════════════════════════
 
 class _FakeOcoExchange:
+    STEP = 1e-05     # BTC/USDT 수량 최소단위
+
     def __init__(self):
+        self.buy_result = None      # None이면 기본(수수료 없음) 응답
         self.calls = []
         self.oco_result = {'orderReports': [
             {'orderId': 111, 'type': 'STOP_LOSS_LIMIT'},
@@ -180,8 +183,18 @@ class _FakeOcoExchange:
             raise r
         return r or {'status': 'open'}
 
+    def amount_to_precision(self, ccxt_sym, qty):
+        """바이낸스와 동일하게 내림(TRUNCATE)."""
+        import math
+        return f'{math.floor(float(qty) / self.STEP) * self.STEP:.8f}'
+
+    def price_to_precision(self, ccxt_sym, px):
+        return f'{float(px):.2f}'
+
     def create_market_buy_order(self, ccxt_sym, qty):
         self.calls.append(('buy', ccxt_sym, qty))
+        if self.buy_result is not None:
+            return self.buy_result
         return {'average': None, 'price': None, 'filled': qty}
 
     def create_market_sell_order(self, ccxt_sym, qty):
@@ -251,6 +264,12 @@ class TestPlaceProtectiveOrders:
 
 
 class TestTpLegFillDetection:
+    """거래소 보호주문 경로는 실거래 전용(_manage_position이 dry-run을 가드)."""
+
+    @pytest.fixture(autouse=True)
+    def _live(self, _state):
+        _state['dry_run'] = False
+
     def test_tp_fill_logs_tp_trade(self, _state, _oco_ex, _temp_db):
         _save_pos(sl_id='111', tp_id='222')
         _oco_ex.fetch_results['111'] = {'status': 'canceled'}   # OCO 반대 레그 자동취소
@@ -299,6 +318,71 @@ class TestTpLegFillDetection:
         kinds = [c[0] for c in _oco_ex.calls]
         assert '111' in cancels and '222' in cancels
         assert kinds.index('cancel') < kinds.index('sell')
+
+
+# ══════════════════════════════════════════════════════════════
+#  ⑤ 기초자산 수수료 차감 — 실수령 수량 (거래소 보호주문 -2010 방지)
+# ══════════════════════════════════════════════════════════════
+
+class TestNetFilledQty:
+    def test_ccxt_parsed_fee_in_base_asset(self):
+        order = {'filled': 0.001, 'fee': {'currency': 'BTC', 'cost': 0.000001}}
+        assert sm._net_filled_qty(order, 'BTC/USDT', 0.001) == pytest.approx(0.000999)
+
+    def test_fees_list_form(self):
+        order = {'filled': 2.0, 'fees': [{'currency': 'ETH', 'cost': 0.002}]}
+        assert sm._net_filled_qty(order, 'ETH/USDT', 2.0) == pytest.approx(1.998)
+
+    def test_raw_fills_fallback(self):
+        """ccxt 파싱이 비었을 때 원시 응답 fills에서 커미션 추출."""
+        order = {'filled': 0.001, 'info': {'fills': [
+            {'commission': '0.00000050', 'commissionAsset': 'BTC'},
+            {'commission': '0.00000050', 'commissionAsset': 'BTC'},
+        ]}}
+        assert sm._net_filled_qty(order, 'BTC/USDT', 0.001) == pytest.approx(0.000999)
+
+    def test_bnb_fee_leaves_qty_intact(self):
+        """BNB로 수수료를 내면 기초자산 차감이 없어 체결량 그대로."""
+        order = {'filled': 0.001, 'fee': {'currency': 'BNB', 'cost': 0.0004}}
+        assert sm._net_filled_qty(order, 'BTC/USDT', 0.001) == pytest.approx(0.001)
+
+    def test_missing_fee_data_falls_back_to_filled(self):
+        assert sm._net_filled_qty({'filled': 0.5}, 'BTC/USDT', 0.7) == pytest.approx(0.5)
+
+    def test_missing_filled_falls_back_to_requested(self):
+        assert sm._net_filled_qty({}, 'BTC/USDT', 0.7) == pytest.approx(0.7)
+
+    def test_never_negative(self):
+        order = {'filled': 0.001, 'fee': {'currency': 'BTC', 'cost': 0.005}}
+        assert sm._net_filled_qty(order, 'BTC/USDT', 0.001) == 0.0
+
+    def test_buy_stores_net_qty_in_position(self, _state, _oco_ex):
+        """매수 후 포지션 수량은 '팔 수 있는' 실수령량이어야 한다."""
+        _state['dry_run'] = False
+        _oco_ex.buy_result = {'average': 100.0, 'price': 100.0, 'filled': 1.0,
+                              'fee': {'currency': 'BTC', 'cost': 0.001}}
+        assert sm._spot_buy('S3', 'BTCUSDT', 'BTC/USDT', _base_sig(), 100.0, 'TRENDING_UP')
+        pos = sm._load_position('S3', 'BTCUSDT')
+        assert pos['qty_tokens'] == pytest.approx(0.999)
+
+    def test_protective_order_qty_never_exceeds_holdings(self, _oco_ex):
+        """보호주문 수량은 정밀도 내림 후에도 보유량을 넘지 않는다."""
+        holdings = 0.000999
+        sm._place_protective_orders('S3', 'BTCUSDT', 'BTC/USDT', holdings, 95_000.0, 110_000.0)
+        kind, params = _oco_ex.calls[0]
+        assert kind == 'oco'
+        assert float(params['quantity']) <= holdings
+
+    def test_stop_only_qty_truncated(self, _oco_ex):
+        sm._place_stop_loss_order('S3', 'BTCUSDT', 'BTC/USDT', 0.000999, 95_000.0)
+        call = [c for c in _oco_ex.calls if c[0] == 'create_order'][0]
+        assert call[4] <= 0.000999      # 요청 수량 인자
+
+    def test_zero_qty_skips_order(self, _oco_ex):
+        """정밀도 내림으로 0이 되면 주문을 내지 않는다."""
+        assert sm._place_protective_orders('S3', 'BTCUSDT', 'BTC/USDT',
+                                           1e-9, 95_000.0, 110_000.0) == ('', '')
+        assert _oco_ex.calls == []
 
 
 # ══════════════════════════════════════════════════════════════

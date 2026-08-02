@@ -116,10 +116,17 @@ class TestGetKellyScale:
             _insert_trade(0.5)
         assert sm._get_kelly_scale('S3') == 1.0
 
-    def test_no_wins_returns_one(self):
+    def test_no_wins_returns_min_scale(self):
+        """전패 구간은 최소 스케일. 1.0을 주면 표본부족(0.30)보다 크게
+        베팅하는 역전이 생긴다 — 연패 중인 전략이 최대로 베팅하는 꼴."""
         for _ in range(sm.SPOT_KELLY_MIN_TRADES):
             _insert_trade(-0.5)
-        assert sm._get_kelly_scale('S3') == 1.0
+        assert sm._get_kelly_scale('S3') == sm.SPOT_KELLY_SCALE_MIN
+
+    def test_losing_streak_never_exceeds_small_sample_scale(self):
+        for _ in range(15):
+            _insert_trade(-0.4)
+        assert sm._get_kelly_scale('S3') <= sm.SPOT_KELLY_SCALE_MIN
 
     def test_high_winrate_and_pf_allows_higher_cap(self):
         """승률>=55%, PF>=1.5 충족 → 상한 2.00까지 허용."""
