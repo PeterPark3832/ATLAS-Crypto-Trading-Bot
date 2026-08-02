@@ -718,6 +718,63 @@ def _tg_flush() -> None:
 #  리스크 관리
 # ══════════════════════════════════════════════════════════════
 
+def _persist_risk_state() -> None:
+    """드로다운 래칫·일간 손실 한도의 기준점을 DB에 보존.
+
+    메모리에만 두면 프로세스 재시작(systemd Restart=on-failure 포함)마다
+    peak_equity가 현재 자산으로 리셋돼 낙폭이 0으로 보이고, 래칫이
+    0.40에서 1.0으로 풀린다 — 하락장에서 재시작이 반복될수록 리스크 축소
+    장치가 매번 무효화되는, 정확히 최악의 방향으로 틀리는 오류였다.
+    """
+    try:
+        with _state_lock:
+            peak = _state['peak_equity']
+            day_pnl = _state['day_pnl']
+            day_eq = _state['day_start_eq']
+            alerted = _state['daily_loss_alerted']
+        _cfg_set('peak_equity', f'{peak:.8f}')
+        _cfg_set('day_pnl', f'{day_pnl:.8f}')
+        _cfg_set('day_start_eq', f'{day_eq:.8f}')
+        _cfg_set('day_date', datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+        _cfg_set('daily_loss_alerted', '1' if alerted else '0')
+    except Exception as e:
+        log.warning(f'[상태보존] 실패(무시): {e}')
+
+
+def _restore_risk_state(total: float) -> None:
+    """기동 시 보존된 리스크 기준점 복원. 실패해도 현재 자산 기준으로 진행."""
+    try:
+        saved_peak = float(_cfg_get('peak_equity', '0') or 0)
+    except (TypeError, ValueError):
+        saved_peak = 0.0
+    with _state_lock:
+        # 피크는 '역대 최고'라야 낙폭이 의미를 갖는다 — 큰 쪽을 취한다.
+        _state['peak_equity'] = max(saved_peak, total)
+    if saved_peak > total:
+        dd = (saved_peak - total) / saved_peak * 100
+        log.info(f'[복원] 피크 자산 ${saved_peak:,.2f} 복원 — 현재 낙폭 {dd:.1f}% '
+                 f'(리셋했다면 래칫이 잘못 풀렸을 상황)')
+
+    # 일간 손실 한도: 같은 UTC 날짜에 재시작한 경우에만 이어받는다.
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    if _cfg_get('day_date', '') == today:
+        try:
+            with _state_lock:
+                _state['day_pnl'] = float(_cfg_get('day_pnl', '0') or 0)
+                _state['day_start_eq'] = float(_cfg_get('day_start_eq', '0') or 0) or total
+                _state['daily_loss_alerted'] = _cfg_get('daily_loss_alerted', '0') == '1'
+            log.info(f'[복원] 당일 PnL ${_state["day_pnl"]:+.2f} '
+                     f'(기준자산 ${_state["day_start_eq"]:,.2f}) 이어받음')
+        except (TypeError, ValueError) as e:
+            log.warning(f'[복원] 일간 상태 파싱 실패 — 새로 시작: {e}')
+            with _state_lock:
+                _state['day_start_eq'] = total
+    else:
+        with _state_lock:
+            _state['day_start_eq'] = total
+    _persist_risk_state()
+
+
 def _get_spot_equity() -> tuple[float, float]:
     """총자산 = USDT + 보유 코인 현재가. Returns: (total_equity, usdt_balance)."""
     try:
@@ -1014,6 +1071,11 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     else:
         try:
             order = _get_ex().create_market_buy_order(ccxt_sym, qty)
+            # 지출분을 즉시 반영. 잔고폴러는 60초 주기라, 한 패스에서 연속
+            # 매수하면 모두 '매수 전' 잔고를 보고 통과해 USDT 예비금(10%)이
+            # 무너진다. 폴러가 다음 주기에 실제 값으로 덮어쓴다.
+            with _state_lock:
+                _state['usdt_balance'] = max(0.0, _state['usdt_balance'] - cost_usdt)
             fill_price = float(order.get('average') or order.get('price') or entry_price)
             # 실수령 수량 = 체결량 - 기초자산 수수료.
             # gross(체결량)로 매도 주문을 걸면 보유량 초과로 -2010이 나
@@ -1602,6 +1664,9 @@ def _balance_poller(stop_event: threading.Event) -> None:
                 _state['usdt_balance'] = usdt
                 if total > _state['peak_equity']:
                     _state['peak_equity'] = total
+            # 60초마다 보존 — 피크와 당일 PnL 모두 최대 60초 이내 최신 상태로
+            # 남으므로, 급작스러운 종료에도 리스크 기준점을 거의 잃지 않는다.
+            _persist_risk_state()
             log.debug(f'[잔고] 총자산 ${total:,.2f} (USDT ${usdt:,.2f})')
         except Exception as e:
             log.warning(f'[잔고폴러] 오류: {e}')
@@ -1628,6 +1693,7 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
             _state['day_pnl']      = 0.0
             _state['day_start_eq'] = equity
             _state['daily_loss_alerted'] = False
+        _persist_risk_state()   # 리셋 직후 재시작해도 새 기준점이 유지되도록
 
         # 일간 브리핑
         with _db_lock, _db_conn() as conn:
@@ -1830,9 +1896,10 @@ def main():
     with _state_lock:
         _state['equity']       = total
         _state['usdt_balance'] = usdt
-        _state['peak_equity']  = total
-        _state['day_start_eq'] = total
-    log.info(f'[초기] 총자산 ${total:,.2f} (USDT ${usdt:,.2f})')
+    # 피크 자산·일간 손실 기준점은 재시작에도 보존돼야 한다 (아래 함수 주석 참조)
+    _restore_risk_state(total)
+    log.info(f'[초기] 총자산 ${total:,.2f} (USDT ${usdt:,.2f}) '
+             f'| 피크 ${_state["peak_equity"]:,.2f}')
 
     # 유니버스 초기 로드
     ex = _get_ex()

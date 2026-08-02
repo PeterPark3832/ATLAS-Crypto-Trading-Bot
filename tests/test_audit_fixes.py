@@ -320,6 +320,71 @@ class TestHealthAutoRelease:
 
 
 # ══════════════════════════════════════════════════════════════
+#  ⑨ 리스크 기준점 재시작 보존 (드로다운 래칫 / 일간 손실 한도)
+# ══════════════════════════════════════════════════════════════
+
+class TestRiskStatePersistence:
+    def test_peak_survives_restart(self, _state):
+        """감사 #6: 피크가 메모리 전용이라 재시작하면 현재자산으로 리셋됐다.
+        하락장에서 재시작이 반복될수록 래칫이 매번 풀리는 최악의 방향 오류."""
+        _state['peak_equity'] = 10_000.0
+        _state['equity'] = 9_100.0
+        sm._persist_risk_state()
+
+        # 재시작 시뮬레이션 — 메모리 상태 초기화
+        _state['peak_equity'] = 0.0
+        sm._restore_risk_state(9_100.0)
+
+        assert _state['peak_equity'] == 10_000.0
+        _state['equity'] = 9_100.0
+        assert sm._get_ratchet_scale() < 1.0, '낙폭이 인식돼 래칫이 걸려야 한다'
+
+    def test_peak_uses_higher_of_saved_and_current(self, _state):
+        _state['peak_equity'] = 5_000.0
+        sm._persist_risk_state()
+        sm._restore_risk_state(12_000.0)      # 그 사이 자산이 더 커진 경우
+        assert _state['peak_equity'] == 12_000.0
+
+    def test_same_day_pnl_resumes(self, _state):
+        _state['day_pnl'] = -35.0
+        _state['day_start_eq'] = 1_000.0
+        _state['daily_loss_alerted'] = True
+        sm._persist_risk_state()
+
+        _state['day_pnl'] = 0.0
+        _state['daily_loss_alerted'] = False
+        sm._restore_risk_state(965.0)
+
+        assert _state['day_pnl'] == -35.0, '같은 날 재시작은 당일 손실을 이어받아야 한다'
+        assert _state['day_start_eq'] == 1_000.0
+        assert _state['daily_loss_alerted'] is True
+
+    def test_new_day_starts_fresh(self, _state):
+        _state['day_pnl'] = -35.0
+        _state['day_start_eq'] = 1_000.0
+        sm._persist_risk_state()
+        sm._cfg_set('day_date', '2000-01-01')      # 날짜가 바뀐 상황
+
+        _state['day_pnl'] = 0.0
+        sm._restore_risk_state(965.0)
+        assert _state['day_pnl'] == 0.0
+        assert _state['day_start_eq'] == 965.0
+
+    def test_restore_is_safe_without_saved_state(self, _state):
+        sm._restore_risk_state(500.0)
+        assert _state['peak_equity'] == 500.0
+        assert _state['day_start_eq'] == 500.0
+
+    def test_corrupt_values_do_not_crash(self, _state):
+        sm._cfg_set('peak_equity', 'not-a-number')
+        sm._cfg_set('day_date', datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+        sm._cfg_set('day_start_eq', 'broken')
+        sm._restore_risk_state(700.0)
+        assert _state['peak_equity'] == 700.0
+        assert _state['day_start_eq'] == 700.0
+
+
+# ══════════════════════════════════════════════════════════════
 #  ⑧ 배치 시세 프리페치 (SL 체크 지연 / 레이트리밋)
 # ══════════════════════════════════════════════════════════════
 
@@ -347,6 +412,35 @@ def _price_env(monkeypatch):
     ex = _PriceEx()
     monkeypatch.setattr(sm, '_get_ex', lambda: ex)
     return ex
+
+
+class TestBuyingPowerReserve:
+    def test_consecutive_buys_respect_usdt_reserve(self, _state, monkeypatch):
+        """감사 #9: 잔고폴러가 60초 주기라 한 패스의 연속 매수가 모두
+        '매수 전' 잔고를 보고 통과 → USDT 예비금(10%)이 무너졌다."""
+        monkeypatch.setattr(sm, '_get_kelly_scale', lambda s: 1.0)
+        monkeypatch.setattr(sm, '_get_ratchet_scale', lambda: 1.0)
+        monkeypatch.setattr(sm, '_place_protective_orders', lambda *a, **k: ('', ''))
+
+        class _BuyEx:
+            def create_market_buy_order(self, cs, q):
+                return {'average': 100.0, 'filled': q}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _BuyEx())
+
+        _state['equity'] = 1_000.0
+        _state['usdt_balance'] = 1_000.0
+        reserve = 1_000.0 * sm.SPOT_RESERVE_PCT
+
+        sig = {'sl': 95.0, 'tp': 110.0, 'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 10}
+        spent = 0.0
+        for i in range(12):
+            before = _state['usdt_balance']
+            if sm._spot_buy('S3', f'SYM{i}USDT', f'SYM{i}/USDT', sig, 100.0, 'TRENDING_UP'):
+                spent += before - _state['usdt_balance']
+
+        assert _state['usdt_balance'] >= reserve - 1e-6, (
+            f'예비금 ${reserve:.0f}이 남아야 하는데 ${_state["usdt_balance"]:.2f}')
+        assert spent > 0, '최소 1건은 체결됐어야 검증이 유의미하다'
 
 
 class TestPricePrefetch:
