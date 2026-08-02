@@ -197,8 +197,9 @@ class TestSpotBuyBlocking:
 
 class TestSpotBuySizing:
     def test_alloc_cap_limits_cost(self, _state):
-        """SL이 매우 좁으면 리스크 기준 수량이 커지므로 배분 한도(15%)로 캡 됨."""
-        sig = _base_sig(sl_pct=0.01)  # SL 거리 1%
+        """SL이 좁으면 리스크 기준 수량이 커지므로 배분 한도(15%)로 캡 됨.
+        (SL 1%는 이제 비용 가드가 먼저 막으므로 3%로 검증 — 아래 별도 테스트 참조)"""
+        sig = _base_sig(sl_pct=0.03)
         ok = sm._spot_buy('S3', 'BTCUSDT', 'BTC/USDT', sig, 100.0, 'TRENDING_UP')
         assert ok is True
         pos = sm._load_position('S3', 'BTCUSDT')

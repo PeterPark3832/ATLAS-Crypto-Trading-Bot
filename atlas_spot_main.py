@@ -59,6 +59,8 @@ from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
+    SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
+    SPOT_EDGE_MIN_TRADES,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
@@ -317,6 +319,7 @@ def init_spot_db():
             regime       TEXT DEFAULT '',
             sl_order_id  TEXT DEFAULT '',
             tp_order_id  TEXT DEFAULT '',
+            entry_slip_pct REAL DEFAULT 0,
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -337,7 +340,8 @@ def init_spot_db():
             exit_ts     TEXT,
             regime      TEXT,
             fee_usdt    REAL DEFAULT 0,
-            dry_run     INTEGER DEFAULT 0
+            dry_run     INTEGER DEFAULT 0,
+            slip_pct    REAL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS spot_config (
@@ -367,6 +371,13 @@ def init_spot_db():
         if 'dry_run' not in tcols:
             conn.execute('ALTER TABLE spot_trades ADD COLUMN dry_run INTEGER DEFAULT 0')
             log.info('[DB] spot_trades.dry_run 컬럼 추가 (마이그레이션)')
+        if 'slip_pct' not in tcols:
+            conn.execute('ALTER TABLE spot_trades ADD COLUMN slip_pct REAL DEFAULT 0')
+            log.info('[DB] spot_trades.slip_pct 컬럼 추가 (마이그레이션)')
+        pcols = [r[1] for r in conn.execute('PRAGMA table_info(spot_positions)').fetchall()]
+        if 'entry_slip_pct' not in pcols:
+            conn.execute('ALTER TABLE spot_positions ADD COLUMN entry_slip_pct REAL DEFAULT 0')
+            log.info('[DB] spot_positions.entry_slip_pct 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -383,16 +394,18 @@ def _cfg_set(key: str, value: str):
 
 def _save_position(strategy: str, symbol: str, entry_price: float, sl: float,
                    tp: float, qty: float, cost: float, risk_pct: float,
-                   exit_type: str, max_hold: int, regime: str):
+                   exit_type: str, max_hold: int, regime: str,
+                   entry_slip_pct: float = 0.0):
     with _db_lock, _db_conn() as conn:
         conn.execute("""
         INSERT OR REPLACE INTO spot_positions
         (strategy, symbol, entry_price, sl, tp, qty_tokens, cost_usdt,
-         risk_pct, exit_type, max_hold_bars, bars_held, peak_price, entry_ts, regime)
-        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)
+         risk_pct, exit_type, max_hold_bars, bars_held, peak_price, entry_ts, regime,
+         entry_slip_pct)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
         """, (strategy, symbol, entry_price, sl, tp, qty, cost,
               risk_pct, exit_type, max_hold, entry_price,
-              datetime.now(timezone.utc).isoformat(), regime))
+              datetime.now(timezone.utc).isoformat(), regime, entry_slip_pct))
 
 
 def _load_position(strategy: str, symbol: str) -> Optional[dict]:
@@ -665,7 +678,7 @@ def _fetch_stop_order(ccxt_sym: str, order_id: str) -> Optional[dict]:
 def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float,
                qty: float, cost: float, pnl_usdt: float, pnl_pct: float,
                pnl_r: float, hold_hours: float, reason: str, regime: str,
-               entry_ts: str) -> float:
+               entry_ts: str, slip_pct: float = 0.0) -> float:
     """거래 기록 저장. 반환값: 수수료 차감 net PnL (day_pnl 등 리스크 로직용).
     pnl_usdt/pnl_r 컬럼은 백테스트와의 비교 일관성을 위해 gross로 유지하고,
     수수료는 fee_usdt(매수+매도 왕복)에 별도 기록한다."""
@@ -679,13 +692,13 @@ def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float
         INSERT INTO spot_trades
         (strategy, symbol, entry_price, exit_price, qty_tokens, cost_usdt,
          pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, entry_ts, exit_ts, regime,
-         fee_usdt, dry_run)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         fee_usdt, dry_run, slip_pct)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (strategy, symbol, entry_price, exit_price, qty, cost,
               round(pnl_usdt, 4), round(pnl_pct, 4), round(pnl_r, 4),
               round(hold_hours, 2), reason,
               entry_ts, datetime.now(timezone.utc).isoformat(),
-              regime, round(fee, 4), is_dry))
+              regime, round(fee, 4), is_dry, round(slip_pct, 6)))
     return pnl_usdt - fee
 
 
@@ -1056,6 +1069,67 @@ def _get_momentum_rank_pct(sym: str) -> float:
     return ref.index(sym) / len(ref)
 
 
+def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
+    """(왕복 비용률, 스프레드율) 추정.
+
+    시장가 왕복은 수수료 2회 + 스프레드 1회분(매수는 ask, 매도는 bid)
+    + 호가 이탈 슬리피지 2회를 지불한다. 호가 조회 실패 시 보수적 기본값.
+    """
+    spread = SPOT_DEFAULT_SPREAD_PCT
+    try:
+        t = _get_ex().fetch_ticker(ccxt_sym)
+        bid = float(t.get('bid') or 0)
+        ask = float(t.get('ask') or 0)
+        if bid > 0 and ask > bid:
+            spread = (ask - bid) / ((ask + bid) / 2)
+    except Exception as e:
+        log.debug(f'[{ccxt_sym}] 호가 조회 실패 — 기본 스프레드 사용: {e}')
+    cost = BT_SPOT_FEE * 2 + spread + SPOT_ASSUMED_SLIP_PCT * 2
+    return cost, spread
+
+
+def _get_realized_avg_r(strategy: str) -> tuple[float, int, float]:
+    """(실현 avg_r, 표본수, 표준오차).
+    pnl_r은 수수료 차감 전(gross)이라 비용률과 직접 비교할 수 있다."""
+    with _db_lock, _db_conn() as conn:
+        rows = conn.execute(
+            'SELECT pnl_r FROM spot_trades WHERE strategy=? AND COALESCE(dry_run,0)=0 '
+            'ORDER BY id DESC LIMIT 200', (strategy,)
+        ).fetchall()
+    if not rows:
+        return 0.0, 0, 0.0
+    vals = [float(r['pnl_r'] or 0) for r in rows]
+    n = len(vals)
+    stderr = float(np.std(vals, ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+    return float(np.mean(vals)), n, stderr
+
+
+def _cost_edge_ok(strategy: str, symbol: str, ccxt_sym: str,
+                  sl_dist: float, entry_price: float) -> tuple[bool, str]:
+    """비용이 1R을 얼마나 잠식하는지 확인.
+
+    포지션 명목가 = 리스크금액 / SL거리% 이므로 왕복비용은
+    리스크금액 × (비용률 / SL거리%)가 된다. 이 값이 전략의 실현 avg_r을
+    넘으면 그 거래는 구조적으로 마이너스 기대값이다 — 승률과 무관하게.
+    """
+    if entry_price <= 0 or sl_dist <= 0:
+        return True, ''
+    sl_dist_pct = sl_dist / entry_price
+    cost_rate, spread = _estimate_round_trip_cost(ccxt_sym)
+    cost_per_r = cost_rate / sl_dist_pct
+    if cost_per_r > SPOT_MAX_COST_PER_R:
+        return False, (f'비용이 1R의 {cost_per_r*100:.0f}% 잠식 '
+                       f'(SL {sl_dist_pct*100:.2f}%, 스프레드 {spread*100:.3f}%) '
+                       f'> 한도 {SPOT_MAX_COST_PER_R*100:.0f}%')
+    avg_r, n, stderr = _get_realized_avg_r(strategy)
+    # 표본 노이즈로 멀쩡한 전략을 막지 않도록, **낙관적 상단(avg_r+1SE)조차**
+    # 비용을 못 넘을 때만 차단한다. 20건 남짓의 avg_r 추정은 분산이 크다.
+    if n >= SPOT_EDGE_MIN_TRADES and (avg_r + stderr) <= cost_per_r:
+        return False, (f'실현 avg_r {avg_r:+.3f}±{stderr:.3f}(n={n})의 낙관치도 '
+                       f'비용 {cost_per_r:.3f}R을 못 넘음 — 마이너스 기대값')
+    return True, ''
+
+
 def _check_buying_power(cost_usdt: float) -> tuple[bool, str]:
     """USDT 잔고 충분 여부 확인."""
     equity = _state['equity']
@@ -1144,6 +1218,13 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         log.info(f'[{strategy}] {symbol} 매수 차단: SL거리 {_sl_pct*100:.1f}% > 상한 {SPOT_MAX_SL_PCT*100:.0f}%')
         return False
 
+    # 비용 대비 엣지: SL이 좁을수록 명목가가 커져 왕복비용이 R을 잠식한다.
+    # 승률이 아무리 좋아도 비용이 avg_r을 넘으면 그 거래는 마이너스 기대값이다.
+    _cost_ok, _cost_why = _cost_edge_ok(strategy, symbol, ccxt_sym, sl_dist, entry_price)
+    if not _cost_ok:
+        log.info(f'[{strategy}] {symbol} 매수 차단(비용): {_cost_why}')
+        return False
+
     adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale * health
     risk_usd   = equity * adj_risk
     qty        = risk_usd / sl_dist
@@ -1214,11 +1295,18 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     # 완전 무보호 포지션이 된다(소프트웨어 SL·거래소 SL·reconcile 모두 DB
     # 포지션을 기준으로 동작). 1회 재시도 후에도 실패하면 거래소 스탑이라도
     # 걸고 운영자에게 즉시 알린다 — 조용히 삼키면 안 되는 상황.
+    # 체결 슬리피지 계측: 신호가 대비 실제 체결가. 매수는 비싸게 사면 손해(양수).
+    # 계측이 없으면 실행 비용이 엣지를 갉아먹는지 알 방법이 없다.
+    entry_slip = (fill_price - entry_price) / entry_price if entry_price > 0 else 0.0
+    if abs(entry_slip) > 0.002:
+        log.warning(f'[{strategy}] {symbol} 진입 슬리피지 {entry_slip*100:+.3f}% '
+                    f'(신호 {entry_price:,.4f} → 체결 {fill_price:,.4f})')
     try:
         _save_position(
             strategy, symbol, fill_price, sl_final, tp_final,
             qty, cost_usdt, adj_risk,
-            sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
+            sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime,
+            entry_slip
         )
     except Exception as e_save:
         log.error(f'[{strategy}] {symbol} 포지션 저장 실패 — 재시도: {e_save}')
@@ -1226,7 +1314,8 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
             _save_position(
                 strategy, symbol, fill_price, sl_final, tp_final,
                 qty, cost_usdt, adj_risk,
-                sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
+                sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime,
+                entry_slip
             )
         except Exception as e_save2:
             log.critical(f'[{strategy}] {symbol} 포지션 저장 2회 실패 — 무보호 포지션 발생: {e_save2}')
@@ -1381,8 +1470,12 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     hold_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
 
     _delete_position(strategy, symbol)
+    # 왕복 슬리피지 = 진입(비싸게 삼) + 청산(싸게 팜). 둘 다 양수면 손실.
+    _exit_slip = (price - exit_price) / price if price > 0 else 0.0
+    _slip_total = float(pos.get('entry_slip_pct') or 0.0) + _exit_slip
     net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
-                         pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts)
+                         pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts,
+                         _slip_total)
 
     with _state_lock:
         _state['day_pnl'] += net_pnl
