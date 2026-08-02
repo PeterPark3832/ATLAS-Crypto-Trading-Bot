@@ -67,6 +67,34 @@ GRIDS: dict[str, dict[str, list]] = {
 }
 
 MIN_TRADES = 20   # IS/OOS 최소 거래 수 — 표본 부족 조합 배제 (과최적화 방지)
+PLATEAU_MIN_RATIO = 0.5   # 이웃 평균 IS 점수 / 최적 점수의 하한.
+                          # 이보다 낮으면 '고립된 피크'로 보고 제안하지 않는다.
+
+
+def _neighbors(combo: dict, grid: dict) -> list[dict]:
+    """각 축에서 한 칸씩 움직인 이웃 조합."""
+    out = []
+    for k, v in combo.items():
+        vals = grid[k]
+        try:
+            i = vals.index(v)
+        except ValueError:
+            continue
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(vals):
+                n = dict(combo)
+                n[k] = vals[j]
+                out.append(n)
+    return out
+
+
+def _is_score(m: dict) -> float:
+    """IS 점수 (PF × Sharpe). 표본 미달이면 0."""
+    if m.get('total_trades', 0) < MIN_TRADES:
+        return 0.0
+    pf = min(m.get('profit_factor', 0.0), 5.0)   # 999 같은 발산값 절단
+    sh = m.get('sharpe', 0.0)
+    return pf * sh if pf > 0 and sh > 0 else 0.0
 
 
 def tg(msg: str) -> None:
@@ -168,6 +196,21 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
                 'reason': f'IS 최소 거래({MIN_TRADES}) 만족 조합 없음',
                 'baseline': {'is': base_is, 'oos': base_oos}}
 
+    # ── 고원(plateau) 확인: 이웃 파라미터도 함께 좋은가 ──
+    # 한 점만 튀는 설정은 거의 항상 과거 노이즈에 맞춰진 것이다. IS 최고점을
+    # 그대로 믿으면 그 노이즈를 실계좌에 반영하게 되므로, 이웃의 IS 점수가
+    # 크게 낮으면 '고립된 피크'로 보고 제안하지 않는다. (OOS는 여전히 미열람)
+    peak_score = _is_score(best['is'])
+    neigh_scores = []
+    for n in _neighbors(best['combo'], grid):
+        with override_params(n):
+            neigh_scores.append(_is_score(
+                run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END)))
+    plateau = (sum(neigh_scores) / len(neigh_scores)) if neigh_scores else 0.0
+    isolated = bool(peak_score > 0 and plateau < peak_score * PLATEAU_MIN_RATIO)
+    print(f'  [{sid}] IS 최고점 {peak_score:.2f} / 이웃평균 {plateau:.2f}'
+          + ('  ← 고립된 피크(과최적화 의심)' if isolated else ''))
+
     # ── 선택된 IS-최적 조합을 OOS 로 검증 ──
     with override_params(best['combo']):
         cand_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end)
@@ -178,15 +221,22 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
     pass_oos  = (cand_pf >= WF_OOS_MIN_PF
                  and cand_oos.get('sharpe', 0) >= WF_OOS_MIN_SHARPE
                  and cand_oos.get('total_trades', 0) >= MIN_TRADES)
-    accepted  = bool(improved and pass_oos and best['combo'] != cur)
+    accepted  = bool(improved and pass_oos and best['combo'] != cur and not isolated)
 
     reason = ''
     if best['combo'] == cur:
         reason = '현재값이 이미 IS-최적'
+    elif isolated:
+        reason = (f'고립된 피크 — 이웃 IS 점수가 최고점의 '
+                  f'{plateau / peak_score * 100:.0f}%뿐 (과최적화 의심)')
     elif not pass_oos:
         reason = f'IS-최적 조합이 OOS 기준 미달 (PF {cand_pf:.2f})'
     elif not improved:
         reason = f'OOS 개선 없음 (현재 {base_pf:.2f} ≥ 후보 {cand_pf:.2f})'
+
+    # IS→OOS 열화율: 탐색 구간에서만 좋았던 것인지 판별하는 핵심 지표
+    is_sh = best['is'].get('sharpe', 0)
+    degrade = round((1 - cand_oos.get('sharpe', 0) / is_sh) * 100, 1) if is_sh > 0 else None
 
     return {
         'sid': sid, 'name': STRATEGY_NAMES.get(sid, sid),
@@ -195,6 +245,12 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
         'baseline': {'is': base_is, 'oos': base_oos},
         'candidate': {'is': best['is'], 'oos': cand_oos},
         'n_combos': len(combos),
+        # 과최적화 진단 — 제안을 사람이 검토할 때 반드시 함께 봐야 하는 값들
+        'evaluated': len(combos) + len(neigh_scores),
+        'peak_is_score': round(peak_score, 3),
+        'plateau_is_score': round(plateau, 3),
+        'isolated_peak': isolated,
+        'is_oos_degrade_pct': degrade,
     }
 
 
@@ -216,10 +272,21 @@ def format_proposal(props: list[dict], now: datetime) -> str:
             f"    {k} = {p['current'][k]}  →  {v}"
             for k, v in p['proposed'].items() if p['current'][k] != v
         )
+        # 과최적화 진단을 제안과 **같은 화면에** 둔다. 따로 두면 안 본다.
+        deg = p.get('is_oos_degrade_pct')
+        diag = (f"  진단: 평가 {p.get('evaluated', '?')}개 조합 중 최고 "
+                f"(우연으로도 부풀려짐)\n"
+                f"        이웃평균/최고점 {p.get('plateau_is_score', 0):.2f}/"
+                f"{p.get('peak_is_score', 0):.2f}")
+        if deg is not None:
+            diag += f" · IS→OOS 열화 {deg:+.0f}%"
+            if deg > 50:
+                diag += ' ⚠️'
         blocks.append(
             f"✅ [{p['sid']}] {p['name']}\n"
             f"  OOS PF {b_oos.get('profit_factor', 0):.2f} → {c_oos.get('profit_factor', 0):.2f}"
             f"  · Sharpe {b_oos.get('sharpe', 0):.2f} → {c_oos.get('sharpe', 0):.2f}\n"
+            f"{diag}\n"
             f"  변경 제안 (atlas_spot_config.py):\n{diff}"
         )
     tail = (
