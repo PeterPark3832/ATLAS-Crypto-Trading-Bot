@@ -62,6 +62,7 @@ from atlas_spot_config import (
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
     SPOT_KELLY_FRACTION, SPOT_EQUITY_PER_SLOT,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_SOFT_SCALE, SPOT_HEALTH_PF_HARD,
+    SPOT_HEALTH_WINDOW_DAYS,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
@@ -398,6 +399,36 @@ def _sellable_qty(ccxt_sym: str, qty: float) -> float:
         return qty
 
 
+def _cancel_orphan_sell_orders(strategy: str, symbol: str, ccxt_sym: str,
+                               base_asset: str, current_free: float) -> float:
+    """해당 심볼의 미체결 매도 주문을 모두 취소하고 갱신된 free 잔고를 반환.
+
+    DB에 ID가 남지 않은 '고아' 보호주문(OCO 등록 후 저장 직전 프로세스 종료,
+    응답 파싱 실패 등)이 수량을 잠그면 free=0이 된다. 이를 수동매도로 오판해
+    살아있는 포지션을 삭제하는 것을 막기 위해, 판정 전에 잠금을 해제한다.
+    실패해도 호출측 판정을 바꾸지 않도록 원래 값을 그대로 돌려준다.
+    """
+    try:
+        ex = _get_ex()
+        open_orders = ex.fetch_open_orders(ccxt_sym) or []
+        sells = [o for o in open_orders
+                 if str(o.get('side', '')).lower() == 'sell']
+        if not sells:
+            return current_free
+        log.warning(f'[{strategy}] {symbol} free=0이지만 미체결 매도주문 '
+                    f'{len(sells)}건 발견 — 고아 주문으로 보고 취소 후 재확인')
+        for o in sells:
+            _cancel_stop_order(strategy, symbol, ccxt_sym, str(o.get('id', '') or ''))
+        refreshed = float((ex.fetch_balance()['free'] or {}).get(base_asset, 0) or 0)
+        if refreshed > 0:
+            _tg(f'ℹ️ [{strategy}] {symbol} 고아 보호주문 {len(sells)}건 취소 '
+                f'→ 잔고 {refreshed:.6f} 회수 (허위 수동매도 처리 방지)')
+        return refreshed
+    except Exception as e:
+        log.warning(f'[{strategy}] {symbol} 고아주문 확인 실패(무시): {e}')
+        return current_free
+
+
 def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
                            qty: float, sl_price: float) -> str:
     """거래소에 STOP_LOSS_LIMIT 매도 주문 등록. 실패 시 '' 반환(소프트웨어 SL 폴백)."""
@@ -653,7 +684,13 @@ def _get_kelly_scale(strategy: str) -> float:
     pnl_r  = [r['pnl_r'] for r in rows]
     wins   = [r for r in pnl_r if r > 0]
     losses = [r for r in pnl_r if r <= 0]
-    if not wins or not losses:
+    if not wins:
+        # 전패 구간 — Kelly는 정의되지 않는다. 이때 1.0(정상 사이즈)을 주면
+        # 표본 부족(0.30)보다 오히려 크게 베팅하는 역전이 생긴다.
+        # 최악의 증거이므로 최소 스케일로 내린다.
+        return SPOT_KELLY_SCALE_MIN
+    if not losses:
+        # 전승 — b를 계산할 수 없다. 표본이 편향됐을 뿐이므로 상향하지 않고 중립 유지.
         return 1.0
     wr    = len(wins) / len(pnl_r)
     avg_w = float(np.mean(wins))
@@ -725,15 +762,25 @@ def _get_ratchet_scale() -> float:
 
 def _get_strategy_health_scale(strategy: str) -> float:
     """실계좌 net 성과 기반 자기교정 스케일.
-    최근 200건 중 해당 전략 표본이 SPOT_HEALTH_MIN_TRADES 이상일 때:
+    최근 SPOT_HEALTH_WINDOW_DAYS일 내 해당 전략 표본이
+    SPOT_HEALTH_MIN_TRADES 이상일 때:
       net PF < SPOT_HEALTH_PF_HARD(0.7) → 0.0 (신규 진입 차단)
       net PF < SPOT_HEALTH_PF_SOFT(1.0) → SPOT_HEALTH_SOFT_SCALE(0.5) 감봉
-    표본 부족 시 개입하지 않는다(1.0)."""
+    표본 부족 시 개입하지 않는다(1.0).
+
+    **시간 창이 필수인 이유**: 차단된 전략은 신규 거래를 만들지 못해
+    표본이 그대로 굳는다. 전체 이력을 보면 PF가 영원히 갱신되지 않아
+    '성과 회복 시 자동 해제'가 원리적으로 불가능해진다(영구 차단).
+    창을 두면 불량 구간이 지나가면서 표본이 최소치 아래로 떨어져
+    자동으로 재진입 기회를 얻는다.
+    """
+    since = (datetime.now(timezone.utc)
+             - timedelta(days=SPOT_HEALTH_WINDOW_DAYS)).isoformat()
     with _db_lock, _db_conn() as conn:
         rows = conn.execute(
             'SELECT pnl_usdt - COALESCE(fee_usdt, 0) AS net FROM spot_trades '
-            'WHERE strategy=? ORDER BY id DESC LIMIT 200',
-            (strategy,)
+            'WHERE strategy=? AND exit_ts >= ? ORDER BY id DESC LIMIT 200',
+            (strategy, since)
         ).fetchall()
     if len(rows) < SPOT_HEALTH_MIN_TRADES:
         return 1.0
@@ -917,11 +964,39 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     else:
         tp_final = tp
 
-    _save_position(
-        strategy, symbol, fill_price, sl_final, tp_final,
-        qty, cost_usdt, adj_risk,
-        sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
-    )
+    # 체결은 끝났으므로 여기서 실패하면 '거래소엔 코인이 있는데 봇은 모르는'
+    # 완전 무보호 포지션이 된다(소프트웨어 SL·거래소 SL·reconcile 모두 DB
+    # 포지션을 기준으로 동작). 1회 재시도 후에도 실패하면 거래소 스탑이라도
+    # 걸고 운영자에게 즉시 알린다 — 조용히 삼키면 안 되는 상황.
+    try:
+        _save_position(
+            strategy, symbol, fill_price, sl_final, tp_final,
+            qty, cost_usdt, adj_risk,
+            sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
+        )
+    except Exception as e_save:
+        log.error(f'[{strategy}] {symbol} 포지션 저장 실패 — 재시도: {e_save}')
+        try:
+            _save_position(
+                strategy, symbol, fill_price, sl_final, tp_final,
+                qty, cost_usdt, adj_risk,
+                sig.get('exit_type', 'sl_tp'), sig.get('max_hold', 0), regime
+            )
+        except Exception as e_save2:
+            log.critical(f'[{strategy}] {symbol} 포지션 저장 2회 실패 — 무보호 포지션 발생: {e_save2}')
+            emergency_sl = ''
+            if not _state['dry_run']:
+                try:
+                    emergency_sl = _place_stop_loss_order(strategy, symbol, ccxt_sym,
+                                                          qty, sl_final)
+                except Exception:
+                    pass
+            _tg(f'🚨 [{strategy}] {symbol} **포지션 DB 저장 실패** — 봇이 추적하지 못하는 '
+                f'보유분이 생겼습니다. 수동 확인 필요.\n'
+                f'   수량 {qty:.6f} @ {fill_price:,.4f} / SL {sl_final:,.4f}\n'
+                f'   거래소 스탑: {emergency_sl or "등록 실패 — 보호 없음"}\n'
+                f'   오류: {e_save2}')
+            return False
 
     # 거래소 측 보호 주문 등록 (봇 다운 중에도 SL/TP 집행 — 실패 시 소프트웨어 폴백)
     # S5는 TP(BB 상단)가 매 봉 갱신되는 동적 목표라 거래소 TP 제외 (스탑 단독)
@@ -965,6 +1040,12 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             _pre_bal = _get_ex().fetch_balance()
             _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
             if _actual_free <= 0.0:
+                # free=0의 원인이 "수동매도"가 아니라 **미체결 매도주문이 수량을
+                # 잠근 것**일 수 있다(DB에 ID가 없는 고아 OCO/스탑 등). 이를
+                # 구분하지 않으면 살아있는 포지션을 허위 MANUAL_SOLD로 지운다.
+                _actual_free = _cancel_orphan_sell_orders(strategy, symbol, ccxt_sym,
+                                                          _base_asset, _actual_free)
+            if _actual_free <= 0.0:
                 _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
                 log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
                 _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
@@ -984,9 +1065,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 qty = _actual_free
         except Exception as _be:
             log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
+        sold_ok = False
         try:
             order = _get_ex().create_market_sell_order(ccxt_sym, qty)
             exit_price = float(order.get('average') or order.get('price') or price)
+            sold_ok = True
         except Exception as e:
             err_str = str(e).lower()
             log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
@@ -1019,6 +1102,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                             _retry_order = _get_ex().create_market_sell_order(ccxt_sym, _actual_free)
                             exit_price = float(_retry_order.get('average') or _retry_order.get('price') or price)
                             qty = _actual_free
+                            sold_ok = True   # 실제 체결됨 → 아래 공통 정산으로 내려가야 한다
                             log.info(f'[{strategy}] {symbol} 잔고재시도 성공: {_actual_free:.6f}개 @ {exit_price:.4f}')
                         except Exception as _e3:
                             log.error(f'[{strategy}] {symbol} 잔고재시도도 실패: {_e3}')
@@ -1031,7 +1115,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             elif 'notional' in err_str or '-1013' in err_str:
                 log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — 포지션 유지, 가격 회복 대기')
                 return  # DB 유지 (삭제하지 않음)
-            return
+            # 잔고 재시도로 체결된 경우에는 반환하지 않고 아래 공통 정산을 수행한다.
+            # (여기서 무조건 return하면 코인은 팔렸는데 DB 포지션·거래기록이
+            #  남지 않아, 다음 폴링에서 허위 MANUAL_SOLD로 잘못 기록됐다.)
+            if not sold_ok:
+                return
 
     sl_dist   = abs(entry_price - sl)
     pnl_usdt  = (exit_price - entry_price) * qty
@@ -1071,10 +1159,13 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
     legs = [(pos.get('sl_order_id') or '', 'SL'),
             (pos.get('tp_order_id') or '', 'TP')]
     fetched = []
+    unverified = []          # 조회 실패 — 거래소에 살아있는지 알 수 없는 레그
     for oid, reason in legs:
         if not oid:
             continue
         order = _fetch_stop_order(ccxt_sym, oid)
+        if order is None:
+            unverified.append(oid)
         if order is not None:
             fetched.append((oid, reason, order))
     if not fetched:
@@ -1118,6 +1209,14 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
             if str(order.get('status', '') or '').lower()
             in ('canceled', 'cancelled', 'rejected', 'expired')]
     if dead:
+        if unverified:
+            # 조회 실패한 레그는 거래소에 살아있을 수 있다. 이 상태에서 재무장하면
+            # ① 살아있는 레그가 수량을 잠가 새 주문이 -2010으로 실패하고
+            # ② DB ID를 덮어써 그 레그를 영영 추적할 수 없게 된다(고아 주문).
+            # 다음 사이클에 다시 시도한다 — 그 사이는 소프트웨어 SL이 커버.
+            log.warning(f'[{strategy}] {symbol} 보호주문 {dead} 취소 감지했으나 '
+                        f'조회 실패 레그({unverified}) 존재 — 재무장 보류')
+            return False
         log.warning(f'[{strategy}] {symbol} 보호주문 {dead} 취소/만료 감지 — 재등록 시도')
         for oid, _r, _order in fetched:
             _cancel_stop_order(strategy, symbol, ccxt_sym, oid)
@@ -1458,6 +1557,11 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
         stop_event.wait(600)
         if stop_event.is_set():
             break
+        # dry-run은 실제 주문을 내지 않으므로 거래소 잔고가 항상 0이다.
+        # 가드가 없으면 모든 가상 포지션이 10분 내 '수동매도'로 삭제되고,
+        # 허위 MANUAL_SOLD 기록이 같은 DB에 쌓여 실거래 Kelly/건강도까지 오염된다.
+        if _state.get('dry_run'):
+            continue
         try:
             all_pos = _load_all_positions()
             if not all_pos:

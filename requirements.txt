@@ -1,13 +1,21 @@
-ccxt>=4.2.0
-pandas>=2.0.0
-numpy>=1.24.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-pytest>=7.0.0
+# ATLAS 현물 봇 의존성
+#
+# 상한(<)을 두는 이유: 실계좌를 다루는 봇이라 서버에서 재설치할 때
+# 메이저 버전이 조용히 올라가 거래 로직이 깨지는 것을 막아야 한다.
+# (무핀 상태에서 pandas 2.x → 3.x 메이저 점프가 그대로 설치된 사례 있음)
+# 상한을 올릴 때는 반드시 `pytest tests/` 전체를 통과시킨 뒤 갱신할 것.
+# 하한은 필요한 최소 기능, 상한은 검증된 다음 메이저 경계.
+
+ccxt>=4.2.0,<5.0.0
+pandas>=2.0.0,<4.0.0
+numpy>=1.24.0,<3.0.0
+requests>=2.31.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+pytest>=7.0.0,<10.0.0
 # MCP 서버
-fastmcp>=2.0.0
-paramiko>=3.0.0
+fastmcp>=2.0.0,<4.0.0
+paramiko>=3.0.0,<6.0.0
 # 웹 대시보드 (FastAPI)
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9
+fastapi>=0.110.0,<1.0.0
+uvicorn[standard]>=0.29.0,<1.0.0
+python-multipart>=0.0.9,<1.0.0

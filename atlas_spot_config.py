@@ -115,6 +115,9 @@ SPOT_KELLY_FRACTION    = 0.5     # half-Kelly — raw Kelly는 승률 추정오�
 SPOT_EQUITY_PER_SLOT   = 20.0    # 동시 포지션 1개당 최소 자본 $20
                                  # (소액 계좌에서 포지션 과분할 → NOTIONAL 턱걸이 + 수수료 드래그 방지)
 SPOT_HEALTH_MIN_TRADES = 20      # 전략 건강도 판정 최소 표본 (미만이면 개입 없음)
+SPOT_HEALTH_WINDOW_DAYS = 45     # 판정 대상 기간. 차단되면 신규 거래가 없어 표본이
+                                 # 고정되므로, 시간 창이 없으면 영구 차단이 된다.
+                                 # 창이 지나면 표본이 최소치 미만이 되어 자동 해제.
 SPOT_HEALTH_PF_SOFT    = 1.0     # 실계좌 net PF < 1.0 → 해당 전략 리스크 50% 감봉
 SPOT_HEALTH_SOFT_SCALE = 0.5
 SPOT_HEALTH_PF_HARD    = 0.7     # 실계좌 net PF < 0.7 → 해당 전략 신규 진입 차단
