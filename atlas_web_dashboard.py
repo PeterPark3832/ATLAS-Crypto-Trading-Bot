@@ -260,29 +260,51 @@ def _kelly_stats(df: pd.DataFrame) -> list:
                      'reliable': t >= 20})
     return sorted(rows, key=lambda x: x['trades'], reverse=True)
 
+# 곡선은 차트 폭(~600px)보다 훨씬 많은 점을 보내봐야 화면에 표현되지 않는다.
+# 5,000건이면 곡선 3종이 응답의 98%(1MB)를 차지하고 Chart.js 렌더도 그만큼 느려진다.
+MAX_CURVE_POINTS = 400
+
+
+def _downsample(rows: list, key: str, max_points: int = MAX_CURVE_POINTS) -> list:
+    """구간별 최소·최대를 남기는 다운샘플 — 피크와 저점(최대낙폭 등)이
+    깎이지 않도록 단순 n번째 추출 대신 극값을 보존한다."""
+    n = len(rows)
+    if n <= max_points:
+        return rows
+    buckets = max(1, max_points // 2)
+    size = n / buckets
+    keep = {0, n - 1}
+    for b in range(buckets):
+        lo, hi = int(b * size), min(int((b + 1) * size), n)
+        if lo >= hi:
+            continue
+        vals = [rows[i].get(key) or 0 for i in range(lo, hi)]
+        keep.add(lo + vals.index(min(vals)))
+        keep.add(lo + vals.index(max(vals)))
+    return [rows[i] for i in sorted(keep)]
+
+
+def _iso_list(series: pd.Series) -> list:
+    """타임스탬프 열 → ISO 문자열 리스트 (NaT는 None)."""
+    return [t.isoformat() if pd.notna(t) else None for t in series]
+
+
 def _rolling_wr(df: pd.DataFrame, n: int = 10) -> list:
     if df.empty or len(df) < 2: return []
-    df = df.sort_values('exit_ts')
-    wins = (df['pnl_usd'] > 0).astype(int).values
-    result = []
-    for i in range(len(wins)):
-        start = max(0, i - n + 1); window = wins[start:i + 1]
-        ts_val = df.iloc[i]['exit_ts']
-        result.append({'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
-                       'wr': round(float(window.mean()) * 100, 1), 'n': len(window)})
-    return result
+    d = df.sort_values('exit_ts')
+    wins = (d['pnl_usd'] > 0).astype(float)
+    wr   = (wins.rolling(n, min_periods=1).mean() * 100).round(1).tolist()
+    cnt  = np.minimum(np.arange(1, len(d) + 1), n).tolist()
+    ts   = _iso_list(d['exit_ts'])
+    return [{'ts': ts[i], 'wr': wr[i], 'n': cnt[i]} for i in range(len(wr))]
 
 def _dd_curve(df: pd.DataFrame) -> list:
     if df.empty: return []
-    df = df.sort_values('exit_ts').reset_index(drop=True)
-    cum = df['pnl_usd'].cumsum().values
-    dd  = (np.maximum.accumulate(cum) - cum) / INITIAL_CAPITAL * 100
-    result = []
-    for i, row in df.iterrows():
-        ts_val = row['exit_ts']
-        result.append({'ts': ts_val.isoformat() if pd.notna(ts_val) else None,
-                       'dd': round(float(dd[i]), 2)})
-    return result
+    d   = df.sort_values('exit_ts')
+    cum = d['pnl_usd'].cumsum().values
+    dd  = np.round((np.maximum.accumulate(cum) - cum) / INITIAL_CAPITAL * 100, 2)
+    ts  = _iso_list(d['exit_ts'])
+    return [{'ts': ts[i], 'dd': float(dd[i])} for i in range(len(dd))]
 
 def _monthly_pnl(df: pd.DataFrame) -> list:
     if df.empty or df['exit_ts'].isna().all(): return []
@@ -351,10 +373,37 @@ def _last_log_time() -> str:
     except Exception as e:
         log.error(f'last_log_time 실패: {e}'); return None
 
+# 로그 tail 공유 캐시 — 봇 로그는 24시간 계속 자라므로(수십~수백 MB)
+# 요청마다 전체를 읽으면 파싱 비용이 응답시간을 지배한다. 끝부분만 읽고
+# 두 파서가 같은 1회 읽기를 공유한다. (mtime+size가 같으면 재사용)
+_LOG_TAIL_BYTES = 512 * 1024
+_log_tail_cache: dict = {'key': None, 'text': ''}
+
+
+def _log_tail() -> str:
+    try:
+        if not LOG_FILE.exists():
+            return ''
+        st = LOG_FILE.stat()
+        key = (st.st_mtime, st.st_size)
+        if _log_tail_cache['key'] == key:
+            return _log_tail_cache['text']
+        with LOG_FILE.open('rb') as f:
+            if st.st_size > _LOG_TAIL_BYTES:
+                f.seek(-_LOG_TAIL_BYTES, os.SEEK_END)
+            data = f.read()
+        text = data.decode('utf-8', errors='ignore')
+        _log_tail_cache.update({'key': key, 'text': text})
+        return text
+    except Exception as e:
+        log.error(f'log_tail 실패: {e}')
+        return _log_tail_cache['text']
+
+
 def _regime_from_log() -> str:
     try:
         if not LOG_FILE.exists(): return None
-        lines = LOG_FILE.read_text(encoding='utf-8', errors='ignore').splitlines()[-300:]
+        lines = _log_tail().splitlines()[-300:]
         for line in reversed(lines):
             for regime in ['TRENDING_UP', 'TRENDING_DOWN', 'RANGING', 'WEAK_TREND', 'CRISIS']:
                 if regime in line:
@@ -372,7 +421,7 @@ def _parse_regime_metrics() -> dict:
         if not LOG_FILE.exists():
             return out
         import re
-        text = LOG_FILE.read_text(encoding='utf-8', errors='ignore')
+        text = _log_tail()
         # 가장 마지막 매치 사용 (최신 갱신)
         m_adx = list(re.finditer(r'ADX\(1D\)=([\d.]+).*?ADX\(4H\)=([\d.]+).*?ATR%=([\d.]+)', text))
         m_btc = list(re.finditer(r'BTC=([\d,]+)\s+EMA200=([\d,]+)', text))
@@ -483,7 +532,7 @@ async def auth(req: Request):
     return {'token': _try_login(body.get('password'), client_ip)}
 
 @app.get('/api/status')
-async def status(token: str):
+def status(token: str):
     _auth(token)
     return {'bot_alive': _bot_alive(), 'last_log': _last_log_time(), 'regime': _regime_from_log()}
 
@@ -555,7 +604,7 @@ async def panic(req: Request):
     return {'ok': True, 'results': results}
 
 @app.get('/api/dashboard')
-async def dashboard(token: str, period: int = 0):
+def dashboard(token: str, period: int = 0):
     _auth(token)
     df  = _trades(period if period > 0 else 9999)
     pos = _positions()
@@ -569,14 +618,16 @@ async def dashboard(token: str, period: int = 0):
     # 수익 곡선
     eq_curve = []
     if not df.empty:
-        d = df.sort_values('exit_ts').copy()
+        d = df.sort_values('exit_ts')
         net_col = 'net_pnl' if 'net_pnl' in d.columns else 'pnl_usd'
-        d['eq'] = INITIAL_CAPITAL + d[net_col].cumsum()
-        for _, r in d.iterrows():
-            eq_curve.append({'ts': r['exit_ts'].isoformat() if pd.notna(r['exit_ts']) else None,
-                             'eq': round(float(r['eq']), 2), 'reason': r['reason'],
-                             'pnl': round(float(r[net_col]), 2),
-                             'fee': round(float(r.get('fee_usd', 0)), 2)})
+        eq     = (INITIAL_CAPITAL + d[net_col].cumsum()).round(2).tolist()
+        pnl    = d[net_col].round(2).tolist()
+        fee    = (d['fee_usd'].round(2).tolist() if 'fee_usd' in d.columns
+                  else [0.0] * len(d))
+        reason = d['reason'].tolist()
+        ts     = _iso_list(d['exit_ts'])
+        eq_curve = [{'ts': ts[i], 'eq': eq[i], 'reason': reason[i],
+                     'pnl': pnl[i], 'fee': fee[i]} for i in range(len(eq))]
 
     # 일별 PnL
     daily = []
@@ -659,10 +710,12 @@ async def dashboard(token: str, period: int = 0):
         'briefing': briefing,
         'actual_balance': actual_bal,
         'bot_alive': bot_alive, 'log_time': log_time, 'alerts': alerts,
-        'eq_curve': eq_curve, 'daily': daily, 'module_stats': module_stats,
+        'eq_curve': _downsample(eq_curve, 'eq'), 'daily': daily,
+        'module_stats': module_stats,
         'sym_dir': _sym_stats(df), 'recent': recent, 'open_pos': open_pos,
         'ratchet': _ratchet_scale(m['mdd_pct']), 'kelly': _kelly_stats(df),
-        'rolling_wr': _rolling_wr(df, n=10), 'dd_curve': _dd_curve(df),
+        'rolling_wr': _downsample(_rolling_wr(df, n=10), 'wr'),
+        'dd_curve': _downsample(_dd_curve(df), 'dd'),
         'monthly_pnl': _monthly_pnl(df),
         'refresh_sec': REFRESH_SEC,
         'initial_capital': INITIAL_CAPITAL,
@@ -670,7 +723,7 @@ async def dashboard(token: str, period: int = 0):
     }
 
 @app.get('/api/logs')
-async def get_logs(token: str, lines: int = 200, filter: str = ''):
+def get_logs(token: str, lines: int = 200, filter: str = ''):
     _auth(token)
     try:
         if not LOG_FILE.exists():
@@ -687,7 +740,7 @@ async def get_logs(token: str, lines: int = 200, filter: str = ''):
         log.error(f'로그 조회 실패: {e}'); return {'lines': [], 'file': '오류'}
 
 @app.get('/api/trades/csv')
-async def trades_csv(token: str, period: int = 0):
+def trades_csv(token: str, period: int = 0):
     _auth(token)
     df = _trades(period if period > 0 else 9999)
     if df.empty:
@@ -701,7 +754,7 @@ async def trades_csv(token: str, period: int = 0):
                              headers={'Content-Disposition': f'attachment; filename={fname}'})
 
 @app.get('/api/prices')
-async def prices(token: str, symbols: str = ''):
+def prices(token: str, symbols: str = ''):
     _auth(token)
     return _fetch_prices(symbols.split(',') if symbols else [])
 

@@ -34,6 +34,7 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 import queue
 import shutil
 import sqlite3
@@ -57,6 +58,7 @@ except ImportError:
 from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
+    SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
@@ -91,11 +93,14 @@ from atlas_regime import (
 SPOT_LOG_DIR.mkdir(parents=True, exist_ok=True)
 _log_file = SPOT_LOG_DIR / f'atlas_spot_{datetime.now().strftime("%Y%m%d")}.log'
 
+# 로테이션 필수: 24시간 상시 구동이라 무제한 파일은 수백 MB까지 자란다.
+# 디스크뿐 아니라 대시보드 응답시간에도 직결된다(로그를 파싱해 레짐/지표를 뽑음).
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(threadName)s | %(message)s',
     handlers=[
-        logging.FileHandler(_log_file, encoding='utf-8'),
+        RotatingFileHandler(_log_file, maxBytes=SPOT_LOG_MAX_BYTES,
+                            backupCount=SPOT_LOG_BACKUPS, encoding='utf-8'),
         logging.StreamHandler(sys.stdout),
     ]
 )
