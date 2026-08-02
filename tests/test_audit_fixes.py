@@ -402,6 +402,60 @@ class TestRiskStatePersistence:
         assert _state['peak_equity'] == 500.0
         assert _state['day_start_eq'] == 500.0
 
+    def test_dry_run_never_writes_live_risk_state(self, _state):
+        """dry-run은 가상 매매다. 같은 DB를 쓰므로 그 손익을 남기면
+        다음 실거래 기동이 가상 결과를 이어받는다."""
+        _state.update({'dry_run': False, 'peak_equity': 1_000.0, 'day_pnl': -10.0})
+        sm._persist_risk_state()
+
+        _state.update({'dry_run': True, 'peak_equity': 99_999.0, 'day_pnl': -777.0})
+        sm._persist_risk_state()
+
+        assert float(sm._cfg_get('peak_equity')) == 1_000.0
+        assert float(sm._cfg_get('day_pnl')) == -10.0
+
+    def test_withdrawal_rebases_peak(self, _state, monkeypatch):
+        """피크를 영구 보존하면 출금도 낙폭으로 오인해 래칫이 영영 잠긴다.
+        (손실이 없는데 리스크만 0.4배로 고정)"""
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(10_000.0)      # 기준점 확립
+
+        _state['equity'] = 8_000.0                      # $2,000 출금
+        sm._rebase_peak_on_capital_flow(8_000.0)
+
+        assert _state['peak_equity'] == pytest.approx(8_000.0)
+        assert sm._get_ratchet_scale() == 1.0, '출금은 낙폭이 아니다'
+
+    def test_deposit_rebases_peak_upward(self, _state, monkeypatch):
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        _state.update({'peak_equity': 1_000.0, 'equity': 1_000.0, 'day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(1_000.0)
+        _state['equity'] = 2_000.0
+        sm._rebase_peak_on_capital_flow(2_000.0)
+        assert _state['peak_equity'] == pytest.approx(2_000.0)
+
+    def test_realized_loss_is_not_mistaken_for_withdrawal(self, _state, monkeypatch):
+        """실현 손실로 설명되는 감소는 입출금이 아니다 — 래칫이 살아야 한다."""
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(10_000.0)
+
+        _state['equity'] = 9_000.0
+        _state['day_pnl'] = -1_000.0        # 전부 실현 손실
+        sm._rebase_peak_on_capital_flow(9_000.0)
+
+        assert _state['peak_equity'] == 10_000.0, '손실은 피크를 낮추지 않는다'
+        assert sm._get_ratchet_scale() < 1.0
+
+    def test_open_positions_suppress_rebase(self, _state, monkeypatch):
+        """미실현 변동과 구분할 수 없으므로 포지션 보유 중에는 판정하지 않는다."""
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [{'symbol': 'BTCUSDT'}])
+        _state.update({'peak_equity': 10_000.0, 'equity': 5_000.0, 'day_pnl': 0.0,
+                       'last_flat_equity': 10_000.0, 'last_flat_day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(5_000.0)
+        assert _state['peak_equity'] == 10_000.0
+
     def test_corrupt_values_do_not_crash(self, _state):
         sm._cfg_set('peak_equity', 'not-a-number')
         sm._cfg_set('day_date', datetime.now(timezone.utc).strftime('%Y-%m-%d'))

@@ -58,7 +58,7 @@ except ImportError:
 from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
     SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
-    SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS,
+    SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
@@ -739,6 +739,10 @@ def _persist_risk_state() -> None:
     0.40에서 1.0으로 풀린다 — 하락장에서 재시작이 반복될수록 리스크 축소
     장치가 매번 무효화되는, 정확히 최악의 방향으로 틀리는 오류였다.
     """
+    # dry-run은 가상 매매라 그 손익을 실거래 기준점으로 남기면 안 된다.
+    # (같은 DB를 쓰므로 다음 실거래 기동이 가상 결과를 이어받게 된다)
+    if _state.get('dry_run'):
+        return
     try:
         with _state_lock:
             peak = _state['peak_equity']
@@ -786,6 +790,43 @@ def _restore_risk_state(total: float) -> None:
         with _state_lock:
             _state['day_start_eq'] = total
     _persist_risk_state()
+
+
+def _rebase_peak_on_capital_flow(total: float) -> None:
+    """입출금으로 자산이 변하면 피크를 같은 비율로 재조정.
+
+    피크를 영구 보존하면 **출금**도 낙폭으로 오인해 래칫이 영영 풀리지
+    않는다($10,000 중 $2,000 출금 → -20% 낙폭으로 보여 리스크 0.4배 고정).
+    '열린 포지션이 없을 때'만 판정하므로 미실현 손익과 혼동되지 않고,
+    실현 손익(day_pnl)으로 설명되는 변동은 제외한다.
+    """
+    try:
+        if _load_all_positions():
+            return                     # 미실현 변동과 구분 불가 → 판정하지 않음
+        with _state_lock:
+            prev = _state.get('last_flat_equity') or 0.0
+            prev_pnl = _state.get('last_flat_day_pnl') or 0.0
+            day_pnl = _state['day_pnl']
+            peak = _state['peak_equity']
+        if prev > 0:
+            unexplained = (total - prev) - (day_pnl - prev_pnl)
+            if abs(unexplained) / prev >= SPOT_CAPITAL_FLOW_PCT:
+                ratio = total / prev if prev > 0 else 1.0
+                new_peak = max(total, peak * ratio)
+                with _state_lock:
+                    _state['peak_equity'] = new_peak
+                    _state.pop('ratchet_floor', None)
+                kind = '입금' if unexplained > 0 else '출금'
+                log.info(f'[자본변동] {kind} ${abs(unexplained):,.2f} 감지 — '
+                         f'피크 ${peak:,.2f} → ${new_peak:,.2f} 재조정')
+                _tg(f'ℹ️ {kind} ${abs(unexplained):,.2f} 감지 — 드로다운 기준(피크)을 '
+                    f'${new_peak:,.2f}로 재조정했습니다. (출금을 손실로 오인해 '
+                    f'리스크가 잠기는 것을 방지)')
+        with _state_lock:
+            _state['last_flat_equity'] = total
+            _state['last_flat_day_pnl'] = day_pnl
+    except Exception as e:
+        log.warning(f'[자본변동] 판정 실패(무시): {e}')
 
 
 def _get_spot_equity() -> tuple[float, float]:
@@ -1675,6 +1716,9 @@ def _balance_poller(stop_event: threading.Event) -> None:
             with _state_lock:
                 _state['equity']       = total
                 _state['usdt_balance'] = usdt
+            # 입출금이면 피크를 재조정 (출금을 낙폭으로 오인하지 않도록)
+            _rebase_peak_on_capital_flow(total)
+            with _state_lock:
                 if total > _state['peak_equity']:
                     _state['peak_equity'] = total
             # 60초마다 보존 — 피크와 당일 PnL 모두 최대 60초 이내 최신 상태로

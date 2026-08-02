@@ -115,6 +115,10 @@ SPOT_KELLY_FRACTION    = 0.5     # half-Kelly — raw Kelly는 승률 추정오�
 SPOT_EQUITY_PER_SLOT   = 20.0    # 동시 포지션 1개당 최소 자본 $20
                                  # (소액 계좌에서 포지션 과분할 → NOTIONAL 턱걸이 + 수수료 드래그 방지)
 SPOT_HEALTH_MIN_TRADES = 20      # 전략 건강도 판정 최소 표본 (미만이면 개입 없음)
+SPOT_CAPITAL_FLOW_PCT  = 0.05    # 포지션이 없을 때 실현손익으로 설명되지 않는
+                                 # 자산 변동이 이 비율을 넘으면 입출금으로 보고
+                                 # 드로다운 기준(피크)을 재조정한다.
+
 SPOT_LOG_MAX_BYTES     = 50 * 1024 * 1024   # 로그 파일 1개 최대 50MB (로테이션)
 SPOT_LOG_BACKUPS       = 5                  # 보관 개수 → 최대 300MB에서 고정
 
