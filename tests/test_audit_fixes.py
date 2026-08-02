@@ -187,6 +187,33 @@ class TestOrphanOrderGuard:
         assert all('MANUAL_SOLD' != r['reason'] for r in rows)
         assert ('cancel', 'ORPHAN1') in _ex.calls
 
+    def test_other_strategy_protective_orders_are_preserved(self, _state, _ex, _no_telegram):
+        """같은 심볼을 두 전략이 보유할 때(S3 + S6), 한쪽의 청산 경로가
+        다른 전략의 보호주문까지 취소해 무방비로 만들면 안 된다."""
+        pos = _save_pos(strategy='S3', qty=10.0)
+        sm._save_position('S6', 'BTCUSDT', 100.0, 95.0, 110.0, 5.0, 500.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        sm._update_position_order_id('S6', 'BTCUSDT', 'S6-SL', 'S6-TP')
+        _ex.free = {'BTC': 0.0}
+        _ex.open_orders = [
+            {'id': 'ORPHAN1', 'side': 'sell'},
+            {'id': 'S6-SL', 'side': 'sell'},     # 타 전략의 살아있는 보호주문
+            {'id': 'S6-TP', 'side': 'sell'},
+        ]
+
+        def _unlock(oid, ccxt_sym):
+            _ex.calls.append(('cancel', str(oid)))
+            _ex.free = {'BTC': 10.0}
+        _ex.cancel_order = _unlock
+
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'SL')
+
+        cancelled = {c[1] for c in _ex.calls if c[0] == 'cancel'}
+        assert 'ORPHAN1' in cancelled, '고아 주문은 취소돼야 한다'
+        assert 'S6-SL' not in cancelled, 'S6의 보호주문을 취소하면 안 된다'
+        assert 'S6-TP' not in cancelled
+        assert sm._load_position('S6', 'BTCUSDT') is not None
+
     def test_genuine_manual_sale_still_detected(self, _state, _ex):
         """미체결 매도주문이 없으면(=진짜 수동매도) 기존 동작 유지."""
         pos = _save_pos(qty=10.0)

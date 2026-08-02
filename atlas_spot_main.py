@@ -485,13 +485,26 @@ def _cancel_orphan_sell_orders(strategy: str, symbol: str, ccxt_sym: str,
     """
     try:
         ex = _get_ex()
+        # 같은 심볼을 다른 전략이 동시 보유할 수 있다(예: S3 BTCUSDT + S6 BTCUSDT).
+        # 그 전략의 보호주문까지 취소하면 남의 포지션을 무방비로 만든다.
+        # DB가 알고 있는 '남의 주문 ID'는 건드리지 않는다.
+        others = set()
+        for p in _load_all_positions():
+            if p['symbol'] == symbol and p['strategy'] == strategy:
+                continue
+            for k in ('sl_order_id', 'tp_order_id'):
+                oid = str(p.get(k) or '')
+                if oid:
+                    others.add(oid)
         open_orders = ex.fetch_open_orders(ccxt_sym) or []
         sells = [o for o in open_orders
-                 if str(o.get('side', '')).lower() == 'sell']
+                 if str(o.get('side', '')).lower() == 'sell'
+                 and str(o.get('id', '') or '') not in others]
         if not sells:
             return current_free
         log.warning(f'[{strategy}] {symbol} free=0이지만 미체결 매도주문 '
-                    f'{len(sells)}건 발견 — 고아 주문으로 보고 취소 후 재확인')
+                    f'{len(sells)}건 발견 — 고아 주문으로 보고 취소 후 재확인'
+                    + (f' (타 전략 주문 {len(others)}건은 보존)' if others else ''))
         for o in sells:
             _cancel_stop_order(strategy, symbol, ccxt_sym, str(o.get('id', '') or ''))
         refreshed = float((ex.fetch_balance()['free'] or {}).get(base_asset, 0) or 0)
