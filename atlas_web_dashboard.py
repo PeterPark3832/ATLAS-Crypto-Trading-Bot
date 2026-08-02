@@ -377,20 +377,25 @@ def _last_log_time() -> str:
 # 요청마다 전체를 읽으면 파싱 비용이 응답시간을 지배한다. 끝부분만 읽고
 # 두 파서가 같은 1회 읽기를 공유한다. (mtime+size가 같으면 재사용)
 _LOG_TAIL_BYTES = 512 * 1024
+# 레짐 지표 블록(ADX/BTC/EMA200)은 regime_loop가 1시간에 한 번만 찍는다.
+# 로그가 많은 날엔 512KB 안에 안 들어올 수 있으므로, 못 찾으면 단계적으로
+# 더 읽는다(흔한 경우는 여전히 512KB로 빠르게 끝난다).
+_LOG_TAIL_MAX = 8 * 1024 * 1024
 _log_tail_cache: dict = {'key': None, 'text': ''}
 
 
-def _log_tail() -> str:
+def _log_tail(min_bytes: int = _LOG_TAIL_BYTES) -> str:
     try:
         if not LOG_FILE.exists():
             return ''
         st = LOG_FILE.stat()
-        key = (st.st_mtime, st.st_size)
+        key = (st.st_mtime, st.st_size, min_bytes)
         if _log_tail_cache['key'] == key:
             return _log_tail_cache['text']
+        want = min(min_bytes, _LOG_TAIL_MAX)
         with LOG_FILE.open('rb') as f:
-            if st.st_size > _LOG_TAIL_BYTES:
-                f.seek(-_LOG_TAIL_BYTES, os.SEEK_END)
+            if st.st_size > want:
+                f.seek(-want, os.SEEK_END)
             data = f.read()
         text = data.decode('utf-8', errors='ignore')
         _log_tail_cache.update({'key': key, 'text': text})
@@ -421,10 +426,19 @@ def _parse_regime_metrics() -> dict:
         if not LOG_FILE.exists():
             return out
         import re
-        text = _log_tail()
-        # 가장 마지막 매치 사용 (최신 갱신)
-        m_adx = list(re.finditer(r'ADX\(1D\)=([\d.]+).*?ADX\(4H\)=([\d.]+).*?ATR%=([\d.]+)', text))
-        m_btc = list(re.finditer(r'BTC=([\d,]+)\s+EMA200=([\d,]+)', text))
+        rx_adx = re.compile(r'ADX\(1D\)=([\d.]+).*?ADX\(4H\)=([\d.]+).*?ATR%=([\d.]+)')
+        rx_btc = re.compile(r'BTC=([\d,]+)\s+EMA200=([\d,]+)')
+        # 지표 블록은 1시간에 한 번만 찍히므로 기본 tail에 없을 수 있다.
+        # 못 찾으면 읽는 범위를 넓혀 재시도한다(대부분 첫 시도에서 끝난다).
+        m_adx = m_btc = []
+        for want in (_LOG_TAIL_BYTES, _LOG_TAIL_BYTES * 8, _LOG_TAIL_MAX):
+            text = _log_tail(want)
+            m_adx = list(rx_adx.finditer(text))
+            m_btc = list(rx_btc.finditer(text))
+            if m_adx and m_btc:
+                break
+            if len(text) < want:      # 파일 전체를 이미 읽음 — 더 읽어도 소용없다
+                break
         if m_adx:
             g = m_adx[-1]
             out['adx_1d']  = float(g.group(1))

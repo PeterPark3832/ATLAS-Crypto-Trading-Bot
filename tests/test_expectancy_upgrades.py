@@ -264,6 +264,12 @@ class TestPlaceProtectiveOrders:
 
 
 class TestTpLegFillDetection:
+    """거래소 보호주문 경로는 실거래 전용(_manage_position이 dry-run을 가드)."""
+
+    @pytest.fixture(autouse=True)
+    def _live(self, _state):
+        _state['dry_run'] = False
+
     def test_tp_fill_logs_tp_trade(self, _state, _oco_ex, _temp_db):
         _save_pos(sl_id='111', tp_id='222')
         _oco_ex.fetch_results['111'] = {'status': 'canceled'}   # OCO 반대 레그 자동취소

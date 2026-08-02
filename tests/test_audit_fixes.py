@@ -187,19 +187,30 @@ class TestOrphanOrderGuard:
         assert all('MANUAL_SOLD' != r['reason'] for r in rows)
         assert ('cancel', 'ORPHAN1') in _ex.calls
 
-    def test_other_strategy_protective_orders_are_preserved(self, _state, _ex, _no_telegram):
-        """같은 심볼을 두 전략이 보유할 때(S3 + S6), 한쪽의 청산 경로가
-        다른 전략의 보호주문까지 취소해 무방비로 만들면 안 된다."""
+    def test_sweep_skipped_when_another_strategy_holds_same_symbol(
+            self, _state, _ex, _no_telegram):
+        """같은 심볼을 두 전략이 보유하면 DB에 없는 주문의 소유자를 알 수 없다.
+        (타 전략의 OCO도 ID 파싱에 실패하면 똑같이 DB에 안 남는다)
+        잘못 취소하면 남의 포지션을 무방비로 만들고 그 코인까지 팔게 되므로
+        스윕 자체를 건너뛰어야 한다."""
         pos = _save_pos(strategy='S3', qty=10.0)
         sm._save_position('S6', 'BTCUSDT', 100.0, 95.0, 110.0, 5.0, 500.0,
                           0.02, 'sl_tp', 0, 'TRENDING_UP')
-        sm._update_position_order_id('S6', 'BTCUSDT', 'S6-SL', 'S6-TP')
         _ex.free = {'BTC': 0.0}
-        _ex.open_orders = [
-            {'id': 'ORPHAN1', 'side': 'sell'},
-            {'id': 'S6-SL', 'side': 'sell'},     # 타 전략의 살아있는 보호주문
-            {'id': 'S6-TP', 'side': 'sell'},
-        ]
+        _ex.open_orders = [{'id': 'UNKNOWN-OCO-SL', 'side': 'sell'}]
+
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'SL')
+
+        cancelled = {c[1] for c in _ex.calls if c[0] == 'cancel'}
+        assert 'UNKNOWN-OCO-SL' not in cancelled, '귀속 불가 주문을 건드리면 안 된다'
+        assert sm._load_position('S6', 'BTCUSDT') is not None
+        assert _ex.sold == [], '남의 코인을 팔면 안 된다'
+
+    def test_sweep_runs_when_symbol_is_exclusive(self, _state, _ex, _no_telegram):
+        """단독 보유 심볼이면 고아 주문을 정리한다."""
+        pos = _save_pos(strategy='S3', qty=10.0)
+        _ex.free = {'BTC': 0.0}
+        _ex.open_orders = [{'id': 'ORPHAN1', 'side': 'sell'}]
 
         def _unlock(oid, ccxt_sym):
             _ex.calls.append(('cancel', str(oid)))
@@ -207,12 +218,9 @@ class TestOrphanOrderGuard:
         _ex.cancel_order = _unlock
 
         sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'SL')
-
         cancelled = {c[1] for c in _ex.calls if c[0] == 'cancel'}
-        assert 'ORPHAN1' in cancelled, '고아 주문은 취소돼야 한다'
-        assert 'S6-SL' not in cancelled, 'S6의 보호주문을 취소하면 안 된다'
-        assert 'S6-TP' not in cancelled
-        assert sm._load_position('S6', 'BTCUSDT') is not None
+        assert 'ORPHAN1' in cancelled
+        assert _trades()[0]['reason'] == 'SL'
 
     def test_genuine_manual_sale_still_detected(self, _state, _ex):
         """미체결 매도주문이 없으면(=진짜 수동매도) 기존 동작 유지."""
@@ -441,12 +449,43 @@ class TestRiskStatePersistence:
         _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(10_000.0)
 
+        for _ in range(10):                 # 실현 손실 $1,000 (거래기록으로 남는다)
+            _insert(-1.0, pnl_usdt=-100.0)
         _state['equity'] = 9_000.0
-        _state['day_pnl'] = -1_000.0        # 전부 실현 손실
         sm._rebase_peak_on_capital_flow(9_000.0)
 
         assert _state['peak_equity'] == 10_000.0, '손실은 피크를 낮추지 않는다'
         assert sm._get_ratchet_scale() < 1.0
+
+    def test_multi_day_losses_not_mistaken_for_withdrawal(self, _state, monkeypatch):
+        """day_pnl은 자정마다 0으로 리셋된다. 그것을 기준으로 삼으면 며칠에
+        걸친 실현손실이 통째로 '출금'으로 오인돼 래칫이 스스로 풀린다."""
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(10_000.0)
+
+        for d in (20, 14, 7):               # 여러 날에 걸친 손실
+            for _ in range(5):
+                _insert(-1.0, pnl_usdt=-100.0, days_ago=d)
+        _state['equity'] = 8_500.0
+        _state['day_pnl'] = 0.0             # 자정 리셋 후 상태
+        sm._rebase_peak_on_capital_flow(8_500.0)
+
+        assert _state['peak_equity'] == 10_000.0, '누적 실현손실은 출금이 아니다'
+        assert sm._get_ratchet_scale() < 1.0, '래칫이 유지돼야 한다'
+
+    def test_dry_run_trades_excluded_from_capital_flow(self, _state, monkeypatch):
+        """가상 거래는 실제 자산을 움직이지 않으므로 실현손익 집계에서 빠져야 한다."""
+        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        _state.update({'peak_equity': 1_000.0, 'equity': 1_000.0, 'day_pnl': 0.0})
+        sm._rebase_peak_on_capital_flow(1_000.0)
+        with sm._db_lock, sm._db_conn() as conn:
+            conn.execute("INSERT INTO spot_trades (strategy,symbol,pnl_usdt,fee_usdt,"
+                         "reason,entry_ts,exit_ts,dry_run) VALUES ('S3','BTCUSDT',"
+                         "-500.0,0,'SL','2099-01-01','2099-01-01',1)")
+        _state['equity'] = 500.0            # 실제로는 출금
+        sm._rebase_peak_on_capital_flow(500.0)
+        assert _state['peak_equity'] == pytest.approx(500.0)
 
     def test_open_positions_suppress_rebase(self, _state, monkeypatch):
         """미실현 변동과 구분할 수 없으므로 포지션 보유 중에는 판정하지 않는다."""

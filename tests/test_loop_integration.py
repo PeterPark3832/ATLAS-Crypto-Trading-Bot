@@ -176,7 +176,10 @@ class TestCandleCacheEviction:
             cache._locks[f'OLD{i}/USDT_1d'] = threading.Lock()
         removed = cache._sweep()
         assert removed == 30
-        assert cache._cache == {} and cache._locks == {}
+        assert cache._cache == {}
+        # 락 객체는 남긴다 — 임계구역에 있는 스레드의 락을 버리면
+        # 뒤이어 들어온 스레드가 새 락을 만들어 상호배제가 깨진다.
+        assert len(cache._locks) == 30
 
     def test_fresh_entries_survive(self, env):
         cache = sm.CandleCache(ttl=300)
