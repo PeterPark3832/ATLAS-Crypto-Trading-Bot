@@ -5,6 +5,7 @@
 state/
 logs/
 results/
+data/          # 백테스트 OHLCV CSV 캐시 (WFO 리포트가 생성)
 __pycache__/
 *.pyc
 *.pyo
