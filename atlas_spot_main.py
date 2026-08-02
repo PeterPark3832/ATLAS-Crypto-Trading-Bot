@@ -363,13 +363,49 @@ def _update_position_order_id(strategy: str, symbol: str, order_id: str,
 #  거래소 측 스탑 주문 (봇 다운 중에도 SL 집행 — 소프트웨어 SL은 백업)
 # ══════════════════════════════════════════════════════════════
 
+def _net_filled_qty(order: dict, ccxt_sym: str, requested: float) -> float:
+    """매수 주문의 **실수령 수량** — 기초자산으로 차감된 수수료를 뺀 값.
+
+    바이낸스 현물 매수는 수수료를 기초자산에서 뗀다(BNB 결제 시 제외).
+    즉 executedQty(=filled)를 그대로 매도하려 하면 보유량을 초과해
+    -2010 insufficient balance로 거절된다 — 거래소 측 SL/TP가 등록되지
+    않아 봇 다운 시 무방비가 되는 원인이므로 반드시 순수량을 써야 한다.
+    """
+    filled = float(order.get('filled') or requested or 0.0)
+    if filled <= 0:
+        return 0.0
+    base = ccxt_sym.split('/')[0].upper()
+    fee_base = 0.0
+    fees = list(order.get('fees') or [])
+    if not fees and order.get('fee'):
+        fees = [order['fee']]
+    for f in fees:
+        if f and str(f.get('currency') or '').upper() == base:
+            fee_base += abs(float(f.get('cost') or 0.0))
+    if fee_base <= 0:
+        # ccxt 파싱이 비었을 때를 대비해 원시 응답의 fills를 직접 확인
+        for fill in ((order.get('info') or {}).get('fills') or []):
+            if str(fill.get('commissionAsset') or '').upper() == base:
+                fee_base += abs(float(fill.get('commission') or 0.0))
+    return max(filled - fee_base, 0.0)
+
+
+def _sellable_qty(ccxt_sym: str, qty: float) -> float:
+    """거래소 수량 정밀도로 **내림** 적용 — 보유량 초과 주문 방지."""
+    try:
+        return float(_get_ex().amount_to_precision(ccxt_sym, qty))
+    except Exception:
+        return qty
+
+
 def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
                            qty: float, sl_price: float) -> str:
     """거래소에 STOP_LOSS_LIMIT 매도 주문 등록. 실패 시 '' 반환(소프트웨어 SL 폴백)."""
     if not SPOT_EXCHANGE_STOP:
         return ''
+    qty = _sellable_qty(ccxt_sym, qty)
     limit_price = sl_price * (1 - SPOT_STOP_LIMIT_GAP)
-    if qty * limit_price < SPOT_MIN_ORDER_USDT:
+    if qty <= 0 or qty * limit_price < SPOT_MIN_ORDER_USDT:
         log.info(f'[{strategy}] {symbol} 스탑주문 생략: NOTIONAL 미달 '
                  f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
         return ''
@@ -396,8 +432,9 @@ def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
     소프트웨어 SL/TP가 커버한다."""
     if not SPOT_EXCHANGE_STOP:
         return '', ''
+    qty = _sellable_qty(ccxt_sym, qty)
     limit_price = sl_price * (1 - SPOT_STOP_LIMIT_GAP)
-    if qty * limit_price < SPOT_MIN_ORDER_USDT:
+    if qty <= 0 or qty * limit_price < SPOT_MIN_ORDER_USDT:
         log.info(f'[{strategy}] {symbol} 보호주문 생략: NOTIONAL 미달 '
                  f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
         return '', ''
@@ -856,11 +893,14 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         try:
             order = _get_ex().create_market_buy_order(ccxt_sym, qty)
             fill_price = float(order.get('average') or order.get('price') or entry_price)
-            # 실제 체결량 사용 (수수료가 base asset에서 차감될 경우 요청량보다 적을 수 있음)
-            filled_qty = float(order.get('filled') or qty)
-            if 0 < filled_qty < qty * 0.999:
-                log.info(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {filled_qty:.6f} (실체결량 기준)')
-                qty = filled_qty
+            # 실수령 수량 = 체결량 - 기초자산 수수료.
+            # gross(체결량)로 매도 주문을 걸면 보유량 초과로 -2010이 나
+            # 거래소 SL/TP 등록이 통째로 실패한다(→ 봇 다운 시 무방비).
+            net_qty = _net_filled_qty(order, ccxt_sym, qty)
+            if 0 < net_qty < qty:
+                log.info(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {net_qty:.6f} '
+                         f'(실수령량 = 체결량 - 기초자산 수수료)')
+                qty = net_qty
         except Exception as e:
             log.error(f'[{strategy}] {symbol} 매수 주문 실패: {e}')
             _tg(f'⚠️ [{strategy}] {symbol} 매수 실패: {e}')
