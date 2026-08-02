@@ -177,6 +177,40 @@ class TestSizingParity:
 #  남아있는 한계 (문서화)
 # ══════════════════════════════════════════════════════════════
 
+class TestDashboardSchemaCompat:
+    def test_optional_column_falls_back_on_old_db(self, tmp_path, monkeypatch):
+        """대시보드는 DB를 읽기 전용으로 열어 마이그레이션을 못 한다.
+        봇이 아직 새 컬럼을 안 만든 DB에서도 쿼리가 깨지면 안 된다."""
+        import sqlite3
+        import atlas_web_dashboard as wd
+
+        db = tmp_path / 'old.db'
+        con = sqlite3.connect(str(db))
+        con.executescript("""
+            CREATE TABLE spot_trades (id INTEGER PRIMARY KEY, strategy TEXT,
+              symbol TEXT, entry_price REAL, exit_price REAL, qty_tokens REAL,
+              cost_usdt REAL, pnl_usdt REAL, pnl_pct REAL, pnl_r REAL,
+              hold_hours REAL, reason TEXT, entry_ts TEXT, exit_ts TEXT,
+              regime TEXT, fee_usdt REAL DEFAULT 0);
+            INSERT INTO spot_trades (strategy,symbol,entry_price,exit_price,
+              qty_tokens,cost_usdt,pnl_usdt,pnl_pct,pnl_r,hold_hours,reason,
+              entry_ts,exit_ts,regime,fee_usdt)
+            VALUES ('S3','BTCUSDT',100,110,1,100,10,10,2,5,'TP',
+              '2026-07-01T00:00:00+00:00','2026-07-02T00:00:00+00:00','TRENDING_UP',0.2);
+        """)
+        con.commit(); con.close()
+
+        monkeypatch.setattr(wd, 'DB_FILE', db)
+        monkeypatch.setattr(wd, '_col_cache', {})
+        assert wd._opt_col('spot_trades', 'slip_pct') == '0'
+
+        df = wd._trades()
+        assert len(df) == 1
+        assert float(df['slip_pct'].iloc[0]) == 0.0
+        m = wd._metrics(df)
+        assert m['total_slip'] == 0.0 and m['cost_drag_pct'] >= 0
+
+
 class TestKnownGaps:
     def test_portfolio_constraints_are_documented_as_missing(self):
         """백테스트는 (전략×심볼) 단위라 포트폴리오 제약을 모델링할 수 없다.

@@ -181,6 +181,26 @@ def _q(sql: str, params=()) -> pd.DataFrame:
         log.error(f'DB 쿼리 실패: {e}')
         return pd.DataFrame()
 
+_col_cache: dict = {}
+
+
+def _opt_col(table: str, col: str, default: str = '0') -> str:
+    """컬럼이 있으면 COALESCE(col,0), 없으면 상수를 반환.
+
+    대시보드는 DB를 읽기 전용으로 열기 때문에 마이그레이션을 할 수 없다.
+    봇이 아직 새 컬럼을 추가하지 않은 상태(대시보드 먼저 기동 등)에서도
+    쿼리가 깨지지 않아야 한다.
+    """
+    key = (table, col)
+    if key not in _col_cache:
+        try:
+            df = _q(f'PRAGMA table_info({table})')
+            _col_cache[key] = col in set(df['name']) if not df.empty else False
+        except Exception:
+            _col_cache[key] = False
+    return f'COALESCE({col}, {default})' if _col_cache[key] else default
+
+
 def _trades(days: int = 9999) -> pd.DataFrame:
     w = '' if days >= 9999 else f"WHERE exit_ts >= datetime('now','-{days} days')"
     df = _q(f"""SELECT strategy, symbol,
@@ -190,7 +210,8 @@ def _trades(days: int = 9999) -> pd.DataFrame:
                        pnl_pct, pnl_r,
                        hold_hours, reason, regime,
                        entry_ts, exit_ts,
-                       COALESCE(fee_usdt, 0) AS fee_usd
+                       COALESCE(fee_usdt, 0) AS fee_usd,
+                       {_opt_col('spot_trades', 'slip_pct')} AS slip_pct
                 FROM spot_trades {w} ORDER BY exit_ts ASC""")
     if not df.empty:
         df['direction'] = 'LONG'
@@ -198,6 +219,10 @@ def _trades(days: int = 9999) -> pd.DataFrame:
         df['exit_ts']   = pd.to_datetime(df['exit_ts'],  utc=True, errors='coerce')
         df['entry_ts']  = pd.to_datetime(df['entry_ts'], utc=True, errors='coerce')
         df['net_pnl']   = df['pnl_usd'] - df['fee_usd']
+        # 슬리피지 비용(USD) = 왕복 슬리피지율 × 명목가.
+        # 수수료와 달리 net_pnl에는 이미 체결가로 반영돼 있으므로 중복 차감하지
+        # 않고, "실행 비용이 얼마였는지" 보여주기 위한 표시용으로만 집계한다.
+        df['slip_usd'] = df['slip_pct'] * df['cost_usdt']
     return df
 
 def _positions() -> pd.DataFrame:
@@ -233,8 +258,15 @@ def _metrics(df: pd.DataFrame) -> dict:
         d = df.set_index('exit_ts')['net_pnl'].resample('1D').sum().fillna(0)
         if len(d) > 1 and d.std() > 0:
             sharpe = round(d.mean() / d.std() * (365 ** 0.5), 2)
+    # 실행 비용 가시화: 수수료 + 슬리피지가 총수익(gross)의 몇 %를 잠식했는가.
+    # 이 비율이 높으면 전략이 아니라 **실행**이 수익을 갉아먹고 있다는 뜻이다.
+    slip = float(df['slip_usd'].sum()) if 'slip_usd' in df.columns else 0.0
+    cost_total = fee + max(slip, 0.0)
+    gross_win = float(df.loc[df['pnl_usd'] > 0, 'pnl_usd'].sum())
+    cost_drag = round(cost_total / gross_win * 100, 1) if gross_win > 0 else 0.0
     return dict(total=total, wins=wins, wr=round(wins / total * 100, 1),
                 total_pnl=round(pnl, 2), gross_pnl=round(gross, 2), total_fee=round(fee, 2),
+                total_slip=round(slip, 2), cost_drag_pct=cost_drag,
                 pf=pf, avg_r=round(float(df['pnl_r'].mean()), 3),
                 mdd_pct=round(mdd_p, 1), mdd_usd=round(mdd_u, 2),
                 sharpe=sharpe, equity=round(INITIAL_CAPITAL + pnl, 2))

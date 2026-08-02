@@ -106,7 +106,71 @@ def _insert(pnl_r, strategy='S3', n=1, dry=0):
 #  왕복 비용 추정
 # ══════════════════════════════════════════════════════════════
 
+class TestFeeRateDetection:
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': False})
+
+    def test_uses_actual_discounted_rate(self, monkeypatch):
+        class _E:
+            def fetch_trading_fee(self, s):
+                return {'taker': 0.00075, 'maker': 0.00075}   # BNB 할인 적용
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        assert sm._detect_fee_rate() == pytest.approx(0.00075)
+
+    def test_warns_when_discount_not_active(self, monkeypatch, _no_telegram):
+        class _E:
+            def fetch_trading_fee(self, s):
+                return {'taker': 0.001}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        sm._detect_fee_rate()
+        assert any('BNB' in m for m in _no_telegram), '할인 미적용을 알려야 한다'
+
+    def test_falls_back_to_commission_rates(self, monkeypatch):
+        class _E:
+            def fetch_trading_fee(self, s):
+                raise Exception('no permission')
+
+            def fetch_balance(self):
+                return {'info': {'commissionRates': {'taker': '0.00075'}}}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        assert sm._detect_fee_rate() == pytest.approx(0.00075)
+
+    def test_default_on_total_failure(self, monkeypatch):
+        class _E:
+            def fetch_trading_fee(self, s):
+                raise Exception('down')
+
+            def fetch_balance(self):
+                raise Exception('down')
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        assert sm._detect_fee_rate() == sm.BT_SPOT_FEE
+
+    def test_probed_only_once(self, monkeypatch):
+        calls = {'n': 0}
+
+        class _E:
+            def fetch_trading_fee(self, s):
+                calls['n'] += 1
+                return {'taker': 0.00075}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        sm._detect_fee_rate(); sm._detect_fee_rate(); sm._detect_fee_rate()
+        assert calls['n'] == 1
+
+    def test_discount_relaxes_cost_guard(self, monkeypatch):
+        """할인이 적용되면 같은 SL에서도 비용/R이 낮아져 통과 범위가 넓어진다."""
+        monkeypatch.setattr(sm, '_get_ex', lambda: _Ex())
+        base, _ = sm._estimate_round_trip_cost('BTC/USDT')
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': 0.00075, 'checked': True})
+        disc, _ = sm._estimate_round_trip_cost('BTC/USDT')
+        assert disc < base
+
+
 class TestCostEstimate:
+    @pytest.fixture(autouse=True)
+    def _fixed_fee(self, monkeypatch):
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+
     def test_uses_live_spread(self, _ex):
         cost, spread = sm._estimate_round_trip_cost('BTC/USDT')
         assert spread == pytest.approx(0.001, rel=1e-3)      # (100.05-99.95)/100
@@ -135,6 +199,10 @@ class TestCostEstimate:
 # ══════════════════════════════════════════════════════════════
 
 class TestCostEdgeGuard:
+    @pytest.fixture(autouse=True)
+    def _fixed_fee(self, monkeypatch):
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+
     def test_tight_stop_rejected(self, _ex):
         """SL 1% → 비용률 0.004/0.01 = 0.40R 잠식 → 차단."""
         ok, why = sm._cost_edge_ok('S3', 'BTCUSDT', 'BTC/USDT', 1.0, 100.0)
@@ -212,6 +280,10 @@ class TestCostEdgeGuard:
 # ══════════════════════════════════════════════════════════════
 
 class TestSlippageTracking:
+    @pytest.fixture(autouse=True)
+    def _fixed_fee(self, monkeypatch):
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+
     def test_entry_slippage_recorded(self, _state, monkeypatch):
         """신호가보다 비싸게 체결되면 양수로 기록된다."""
         monkeypatch.setattr(sm, '_get_ex', lambda: _Ex(fill=100.5))

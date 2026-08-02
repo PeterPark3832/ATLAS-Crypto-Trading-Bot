@@ -1069,6 +1069,48 @@ def _get_momentum_rank_pct(sym: str) -> float:
     return ref.index(sym) / len(ref)
 
 
+_fee_rate: dict = {'taker': BT_SPOT_FEE, 'checked': False}
+
+
+def _detect_fee_rate() -> float:
+    """계정의 실제 taker 수수료율을 조회해 비용 계산에 반영.
+
+    BNB 수수료 결제를 켜면 25% 할인(0.1% → 0.075%)이다. 왕복 0.2%가
+    0.15%로 줄면 SL 5% 기준 1R의 4%→3%로 잠식이 줄어든다 — 코드 변경
+    없이 얻는 유일한 확정 이득이라 켜져 있는지 확인하고 알린다.
+    """
+    if _fee_rate['checked']:
+        return _fee_rate['taker']
+    _fee_rate['checked'] = True
+    try:
+        ex = _get_ex()
+        taker = None
+        try:
+            f = ex.fetch_trading_fee('BTC/USDT')
+            taker = float(f.get('taker') or 0) or None
+        except Exception:
+            pass
+        if taker is None:
+            # 폴백: 계정 정보의 commissionRates
+            info = ex.fetch_balance().get('info', {}) or {}
+            rates = info.get('commissionRates') or {}
+            if rates.get('taker') is not None:
+                taker = float(rates['taker'])
+        if taker and 0 < taker < 0.01:
+            _fee_rate['taker'] = taker
+            saved = (BT_SPOT_FEE - taker) / BT_SPOT_FEE * 100
+            log.info(f'[수수료] 실제 taker {taker*100:.4f}% '
+                     f'(기준 {BT_SPOT_FEE*100:.3f}% 대비 {saved:+.0f}%)')
+            if taker >= BT_SPOT_FEE * 0.99:
+                _tg('💡 수수료 절감 여지: BNB 수수료 결제가 꺼져 있는 것 같습니다.\n'
+                    '   계좌에 소량의 BNB를 두고 "Use BNB for fees"를 켜면 '
+                    '왕복 수수료가 25% 줄어듭니다.\n'
+                    '   (SL 5% 기준 거래당 1R의 약 1%p 절감 — 코드 변경 없이 얻는 확정 이득)')
+    except Exception as e:
+        log.info(f'[수수료] 실제 요율 조회 실패 — 기본값 {BT_SPOT_FEE*100:.3f}% 사용: {e}')
+    return _fee_rate['taker']
+
+
 def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
     """(왕복 비용률, 스프레드율) 추정.
 
@@ -1084,7 +1126,7 @@ def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
             spread = (ask - bid) / ((ask + bid) / 2)
     except Exception as e:
         log.debug(f'[{ccxt_sym}] 호가 조회 실패 — 기본 스프레드 사용: {e}')
-    cost = BT_SPOT_FEE * 2 + spread + SPOT_ASSUMED_SLIP_PCT * 2
+    cost = _detect_fee_rate() * 2 + spread + SPOT_ASSUMED_SLIP_PCT * 2
     return cost, spread
 
 
@@ -2149,6 +2191,8 @@ def main():
         _state['usdt_balance'] = usdt
     # 피크 자산·일간 손실 기준점은 재시작에도 보존돼야 한다 (아래 함수 주석 참조)
     _restore_risk_state(total)
+    if not _state['dry_run']:
+        _detect_fee_rate()      # 실제 요율 반영 + BNB 할인 미적용 시 안내
     log.info(f'[초기] 총자산 ${total:,.2f} (USDT ${usdt:,.2f}) '
              f'| 피크 ${_state["peak_equity"]:,.2f}')
 

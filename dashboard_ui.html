@@ -248,10 +248,11 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 /* ── Bento Grid ── */
 .bento{display:grid;gap:12px;margin-bottom:16px;
   grid-template-columns:2.5fr 2.5fr 2fr 2fr;
-  grid-template-rows:150px 150px 220px;
+  grid-template-rows:150px 150px 150px 220px;
   grid-template-areas:
     "eq    eq    pnl   wr  "
     "eq    eq    pf    mdd "
+    "daily daily cost  cost"
     "daily daily risk  risk";}
 .bento>.section{margin-bottom:0}
 .bento-eq{grid-area:eq;display:flex;flex-direction:column;padding:18px}
@@ -259,6 +260,7 @@ button{cursor:pointer;border:none;outline:none;font-family:inherit;background:no
 .bento-risk{grid-area:risk}
 .bento-pnl{grid-area:pnl}.bento-wr-st{grid-area:wr}
 .bento-pf{grid-area:pf}.bento-mdd{grid-area:mdd}
+.bento-cost{grid-area:cost}
 .bento .section-hdr{margin-bottom:8px}
 .bento-eq .chart-fill,.bento-daily .chart-fill{flex:1;min-height:0;position:relative}
 .bento .stat-card{padding:18px;justify-content:flex-end;gap:3px}
@@ -522,7 +524,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
     grid-template-areas:
       "eq   pnl  wr"
       "eq   pf   mdd"
-      "daily daily daily"
+      "daily daily cost"
       "risk  risk  risk";}
 }
 @media(max-width:767px){
@@ -545,6 +547,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
     grid-template-areas:
       "pnl  wr"
       "pf   mdd"
+      "cost cost"
       "eq   eq"
       "daily daily"
       "risk  risk";}
@@ -795,6 +798,13 @@ button:disabled{opacity:.35;cursor:not-allowed}
             <div class="stat-label">MDD</div>
             <div class="stat-val" id="k-mdd">—</div>
             <div class="stat-sub" id="k-sharpe">Sharpe —</div>
+          </div>
+          <!-- 실행 비용: 수수료+슬리피지가 총수익을 얼마나 잠식했는가 -->
+          <div class="stat-card bento-cost">
+            <span class="stat-icon"><svg class="ico" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v8M7.5 8.2c0-1 1.1-1.7 2.5-1.7s2.5.7 2.5 1.7-1.1 1.5-2.5 1.8-2.5.8-2.5 1.8 1.1 1.7 2.5 1.7 2.5-.7 2.5-1.7"/></svg></span>
+            <div class="stat-label">실행 비용</div>
+            <div class="stat-val" id="k-cost">—</div>
+            <div class="stat-sub" id="k-cost-sub">수수료 — · 슬리피지 —</div>
           </div>
           <!-- ⑥ 일별 PnL -->
           <div class="section bento-daily">
@@ -1353,6 +1363,14 @@ function renderStatCards(m,actualBal,initialCap){
   const mddC=m.mdd_pct>10?'neg':m.mdd_pct>5?'':'pos';
   setStatVal('k-mdd',mddC,m.mdd_pct,v=>`${v.toFixed(1)}%`);
   setText('k-sharpe',`Sharpe ${m.sharpe.toFixed(2)}`,'','stat-sub');
+  // 실행 비용: 수수료+슬리피지가 총이익을 잠식한 비율.
+  // 높으면 전략이 아니라 '실행'이 수익을 갉아먹고 있다는 신호다.
+  const drag=m.cost_drag_pct||0;
+  const dragC=drag>=40?'neg':drag>=20?'':'pos';
+  setStatVal('k-cost',dragC,drag,v=>`${v.toFixed(0)}%`);
+  setText('k-cost-sub',
+    `수수료 $${(m.total_fee||0).toFixed(2)} · 슬리피지 $${(m.total_slip||0).toFixed(2)}`,
+    '','stat-sub');
   // eq badge
   const retPct=initialCap>0?(equity-initialCap)/initialCap*100:0;
   setText('eq-badge',`$${equity.toFixed(2)} (${retPct>=0?'+':''}${retPct.toFixed(1)}%)`,'','');
