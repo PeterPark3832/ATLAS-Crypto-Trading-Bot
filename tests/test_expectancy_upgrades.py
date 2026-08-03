@@ -82,14 +82,19 @@ def _base_sig(entry=100.0, sl_pct=0.05, rr=2.0):
 
 class TestHalfKelly:
     def test_kelly_is_halved(self):
-        """raw Kelly가 명확히 계산되는 분포에서 half가 적용되는지 검증.
+        """raw Kelly가 명확히 계산되는 분포에서 half가 그대로 적용되는지 검증.
         wr=0.5, avg_w=2.0, avg_l=0.5 → b=4 → raw K = 0.5-0.5/4 = 0.375
-        → half = 0.1875 → 하한 0.30 미만이므로 SPOT_KELLY_SCALE_MIN."""
+        → half = 0.1875 (하한 0.15를 넘으므로 클램프되지 않고 그대로 쓰인다)
+
+        하한이 배수와 정합하지 않으면 이 값이 하한에 흡수돼 Kelly가 상수가
+        된다 — tests/test_kelly_effectiveness.py 참조."""
         for _ in range(10):
             _insert_trade(2.0)
         for _ in range(10):
             _insert_trade(-0.5)
-        assert sm._get_kelly_scale('S3') == pytest.approx(sm.SPOT_KELLY_SCALE_MIN)
+        expected = (0.5 - 0.5 / 4) * sm.SPOT_KELLY_FRACTION
+        assert expected > sm.SPOT_KELLY_SCALE_MIN, '이 케이스는 하한에 걸리면 안 된다'
+        assert sm._get_kelly_scale('S3') == pytest.approx(expected, abs=1e-6)
 
     def test_strong_edge_still_above_floor(self):
         """wr=0.75, avg_w=2, avg_l=0.4 → b=5 → raw=0.70 → half=0.35 (>하한)."""

@@ -146,7 +146,15 @@ SPOT_HEALTH_PF_HARD    = 0.7     # 실계좌 net PF < 0.7 → 해당 전략 신�
 
 # Kelly / Ratchet
 SPOT_KELLY_MIN_TRADES  = 10      # 최소 거래수 (20→10: Kelly 조기 활성화)
-SPOT_KELLY_SCALE_MIN   = 0.30
+SPOT_KELLY_SCALE_MIN   = 0.15
+# ↑ 하한은 **SPOT_KELLY_FRACTION과 정합**해야 한다.
+#   원래 0.30은 full Kelly 기준으로 잡힌 값이라, half-Kelly(×0.5) 도입 후에는
+#   현실적인 모든 성과 구간을 하한이 흡수해 Kelly가 상수 0.30이 됐다:
+#     WR45%/RR1.5 → half 0.04,  WR60%/RR2.5 → half 0.22  (둘 다 0.30으로 클램프)
+#   즉 좋은 전략에 자본을 더 배분하는 기능 자체가 죽어 있었다.
+#   0.15로 낮추면 차등이 복원된다 (약한 전략 0.15 / 우수 전략 0.22~0.27).
+#   ※ 절대 리스크를 키우고 싶다면 이 값이 아니라 SPOT_BASE_RISK_PCT를 조정할 것.
+#     하한을 올리면 Kelly가 다시 상수가 되어 성과 기반 배분이 사라진다.
 SPOT_KELLY_SCALE_MAX   = 2.00    # 상한 (1.50→2.00, WR>55% AND PF>1.5 조건부)
 SPOT_KELLY_WR_THRESH   = 0.55    # Kelly 상한 2.00 허용 최소 승률
 SPOT_KELLY_PF_THRESH   = 1.50    # Kelly 상한 2.00 허용 최소 PF
