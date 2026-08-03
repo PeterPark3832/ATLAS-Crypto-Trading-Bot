@@ -78,6 +78,7 @@ from atlas_spot_config import (
     WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
+    MOMENTUM_RS_GATE_PCT,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
     S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
@@ -2145,10 +2146,12 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                                 continue
                     # ────────────────────────────────────────────────────────
 
-                    # RS Gate: S6/S7은 모멘텀 하위 67% 심볼 진입 차단
+                    # RS Gate: 모멘텀 하위권 심볼 진입 차단
+                    # (임계값이 인라인 `*3`이라 사실상 무차단이었다 —
+                    #  config의 MOMENTUM_RS_GATE_PCT 주석 참조)
                     if strategy_id in MOMENTUM_RS_GATE_STRATS:
                         rank_pct = _get_momentum_rank_pct(symbol)
-                        if rank_pct > MOMENTUM_TOP_TIER_PCT * 3:
+                        if rank_pct > MOMENTUM_RS_GATE_PCT:
                             log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
                             continue
 

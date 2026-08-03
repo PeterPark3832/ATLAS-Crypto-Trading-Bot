@@ -67,7 +67,10 @@ GRIDS: dict[str, dict[str, list]] = {
     'S4': {'S4_RSI_ENTRY': [25, 30, 35], 'S4_ATR_SL': [1.5, 2.0, 2.5], 'S4_RR': [1.5, 2.0]},
     'S5': {'S5_BB_SIGMA': [2.0, 2.2, 2.5], 'S5_RSI_CONFIRM': [25, 30, 35], 'S5_ATR_SL': [1.0, 1.2, 1.5]},
     'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5], 'S6_ATR_SL': [1.5, 2.0, 2.5],
-           'SPOT_TRAIL_ENABLED': [False, True]},
+           'SPOT_TRAIL_ENABLED': [False, True],
+           # RS Gate는 인라인 `*3` 때문에 사실상 무차단(0.99)이었다.
+           # 주석의 의도(상위 33%만 통과)가 실제로 나은지 OOS로 판단시킨다.
+           'MOMENTUM_RS_GATE_PCT': [0.33, 0.67, 0.99]},
 }
 # 추적 손절은 추세추종(S3·S6)에만 그리드에 넣는다. 평균회귀(S4·S5)는
 # 되돌림을 먹는 구조라 조기 청산으로 손해 볼 가능성이 크고, 축을 늘릴수록
