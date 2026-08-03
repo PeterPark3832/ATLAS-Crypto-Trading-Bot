@@ -41,6 +41,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv(Path(__file__).parent / '.env')
 
+import atlas_spot_backtest as _bt_mod
+import atlas_spot_main as _live_mod
 import atlas_spot_strategies as strat
 from atlas_spot_backtest import (
     _since_ms, _load_or_fetch, build_regime_map,
@@ -60,11 +62,22 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID', '')
 #  값은 atlas_spot_strategies 모듈 전역명 = atlas_spot_config 상수명과 동일.
 #  조합 폭발 방지를 위해 파라미터 2~3개 × 소수 값으로 제한한다.
 GRIDS: dict[str, dict[str, list]] = {
-    'S3': {'S3_ADX_MIN': [20, 25, 30], 'S3_ATR_SL': [2.0, 2.5, 3.0]},
+    'S3': {'S3_ADX_MIN': [20, 25, 30], 'S3_ATR_SL': [2.0, 2.5, 3.0],
+           'SPOT_TRAIL_ENABLED': [False, True]},
     'S4': {'S4_RSI_ENTRY': [25, 30, 35], 'S4_ATR_SL': [1.5, 2.0, 2.5], 'S4_RR': [1.5, 2.0]},
     'S5': {'S5_BB_SIGMA': [2.0, 2.2, 2.5], 'S5_RSI_CONFIRM': [25, 30, 35], 'S5_ATR_SL': [1.0, 1.2, 1.5]},
-    'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5], 'S6_ATR_SL': [1.5, 2.0, 2.5]},
+    'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5], 'S6_ATR_SL': [1.5, 2.0, 2.5],
+           'SPOT_TRAIL_ENABLED': [False, True]},
 }
+# 추적 손절은 추세추종(S3·S6)에만 그리드에 넣는다. 평균회귀(S4·S5)는
+# 되돌림을 먹는 구조라 조기 청산으로 손해 볼 가능성이 크고, 축을 늘릴수록
+# 다중검정 인플레만 커진다. 필요하면 위 dict에 같은 항목을 추가하면 된다.
+
+# 고원(plateau) 판정에서 제외할 축.
+# 고원 개념은 '파라미터 표면이 매끄러운가'를 보는 것이라 **순서 있는 수치
+# 축**에만 의미가 있다. ON/OFF 같은 구조적 토글은 이웃이 항상 반대값이라,
+# 그 기능이 실제로 효과가 클수록 오히려 '고립된 피크'로 오판된다.
+PLATEAU_EXCLUDE = {'SPOT_TRAIL_ENABLED'}
 
 MIN_TRADES = 20   # IS/OOS 최소 거래 수 — 표본 부족 조합 배제 (과최적화 방지)
 PLATEAU_MIN_RATIO = 0.5   # 이웃 평균 IS 점수 / 최적 점수의 하한.
@@ -75,6 +88,8 @@ def _neighbors(combo: dict, grid: dict) -> list[dict]:
     """각 축에서 한 칸씩 움직인 이웃 조합."""
     out = []
     for k, v in combo.items():
+        if k in PLATEAU_EXCLUDE:
+            continue
         vals = grid[k]
         try:
             i = vals.index(v)
@@ -116,22 +131,40 @@ def tg(msg: str) -> None:
 def override_params(params: dict):
     """atlas_spot_strategies 모듈 전역을 임시 치환. 종료 시 원복.
     (신호 함수가 전역을 호출 시점에 조회하므로 재할당이 즉시 반영된다.)"""
-    missing = [k for k in params if not hasattr(strat, k)]
+    targets = {k: _param_targets(k) for k in params}
+    missing = [k for k, t in targets.items() if not t]
     if missing:
-        raise KeyError(f'전략 모듈에 없는 파라미터: {missing}')
-    saved = {k: getattr(strat, k) for k in params}
+        raise KeyError(f'어느 모듈에도 없는 파라미터: {missing}')
+    saved = [(m, k, getattr(m, k)) for k, ms in targets.items() for m in ms]
     try:
         for k, v in params.items():
-            setattr(strat, k, v)
+            for m in targets[k]:
+                setattr(m, k, v)
         yield
     finally:
-        for k, v in saved.items():
-            setattr(strat, k, v)
+        for m, k, v in saved:
+            setattr(m, k, v)
+
+
+def _param_targets(key: str) -> tuple:
+    """이 파라미터를 어느 모듈에 써야 하는가.
+
+    전략 진입 상수는 atlas_spot_strategies 전역이지만, 추적 손절 같은
+    **실행 규칙**은 라이브(atlas_spot_main)와 백테스트 양쪽 전역에 있다.
+    한쪽만 바꾸면 검증이 실제 동작과 어긋난다.
+    """
+    mods = tuple(m for m in (strat, _live_mod, _bt_mod) if hasattr(m, key))
+    return mods
 
 
 def current_params(sid: str) -> dict:
     """그리드에 해당하는 현재(라이브) 파라미터 값."""
-    return {k: getattr(strat, k) for k in GRIDS[sid]}
+    out = {}
+    for k in GRIDS[sid]:
+        t = _param_targets(k)
+        if t:
+            out[k] = getattr(t[0], k)
+    return out
 
 
 def load_symbol_data(sid: str, symbols: list[str], data_dir: Path):

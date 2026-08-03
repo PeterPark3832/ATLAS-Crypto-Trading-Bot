@@ -32,6 +32,68 @@ import reoptimize as ro
 #  이웃 탐색
 # ══════════════════════════════════════════════════════════════
 
+class TestGlobalParamOverride:
+    """추적 손절 같은 **실행 규칙**은 전략 모듈이 아니라 라이브·백테스트
+    양쪽 전역에 있다. 한쪽만 바꾸면 검증이 실제 동작과 어긋난다."""
+
+    def test_patches_both_live_and_backtest(self):
+        import atlas_spot_backtest as bt
+        import atlas_spot_main as sm
+        before = (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        with ro.override_params({'SPOT_TRAIL_ENABLED': True}):
+            assert sm.SPOT_TRAIL_ENABLED is True
+            assert bt.SPOT_TRAIL_ENABLED is True
+        assert (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED) == before
+
+    def test_strategy_constants_still_work(self):
+        before = ro.strat.S3_ADX_MIN
+        with ro.override_params({'S3_ADX_MIN': 99}):
+            assert ro.strat.S3_ADX_MIN == 99
+        assert ro.strat.S3_ADX_MIN == before
+
+    def test_restores_on_exception(self):
+        before = ro.strat.S3_ADX_MIN
+        with pytest.raises(RuntimeError):
+            with ro.override_params({'S3_ADX_MIN': 77}):
+                raise RuntimeError('중단')
+        assert ro.strat.S3_ADX_MIN == before, '예외가 나도 원복돼야 한다'
+
+    def test_unknown_param_raises(self):
+        with pytest.raises(KeyError):
+            with ro.override_params({'NOT_A_REAL_PARAM': 1}):
+                pass
+
+    def test_current_params_reads_right_module(self):
+        cur = ro.current_params('S3')
+        assert 'SPOT_TRAIL_ENABLED' in cur
+        import atlas_spot_main as sm
+        assert cur['SPOT_TRAIL_ENABLED'] == sm.SPOT_TRAIL_ENABLED
+
+
+class TestPlateauExclusion:
+    """고원 개념은 '파라미터 표면이 매끄러운가'라서 순서 있는 수치 축에만
+    의미가 있다. ON/OFF 토글은 이웃이 항상 반대값이라, 효과가 클수록
+    오히려 '고립된 피크'로 오판된다."""
+
+    def test_toggle_axis_excluded_from_neighbors(self):
+        combo = {'S3_ADX_MIN': 25, 'S3_ATR_SL': 2.5, 'SPOT_TRAIL_ENABLED': True}
+        ns = ro._neighbors(combo, ro.GRIDS['S3'])
+        assert ns, '수치 축 이웃은 있어야 한다'
+        assert all(n['SPOT_TRAIL_ENABLED'] is True for n in ns), (
+            '토글 축을 흔들면 그 기능의 효과가 곧 고립 피크로 오판된다')
+
+    def test_excluded_axis_declared(self):
+        assert 'SPOT_TRAIL_ENABLED' in ro.PLATEAU_EXCLUDE
+
+    def test_trailing_only_in_trend_strategies(self):
+        """평균회귀(S4·S5)는 되돌림을 먹는 구조라 조기 청산 위험이 크고,
+        축을 늘릴수록 다중검정 인플레만 커진다."""
+        assert 'SPOT_TRAIL_ENABLED' in ro.GRIDS['S3']
+        assert 'SPOT_TRAIL_ENABLED' in ro.GRIDS['S6']
+        assert 'SPOT_TRAIL_ENABLED' not in ro.GRIDS['S4']
+        assert 'SPOT_TRAIL_ENABLED' not in ro.GRIDS['S5']
+
+
 class TestNeighbors:
     def test_moves_one_axis_at_a_time(self):
         grid = {'a': [1, 2, 3], 'b': [10, 20, 30]}
