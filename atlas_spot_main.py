@@ -61,6 +61,8 @@ from atlas_spot_config import (
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
     SPOT_EDGE_MIN_TRADES,
+    SPOT_TRAIL_ENABLED, SPOT_TRAIL_ACTIVATE_R, SPOT_TRAIL_MULT,
+    SPOT_TRAIL_REARM_FRAC,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
@@ -320,6 +322,7 @@ def init_spot_db():
             sl_order_id  TEXT DEFAULT '',
             tp_order_id  TEXT DEFAULT '',
             entry_slip_pct REAL DEFAULT 0,
+            orig_sl      REAL DEFAULT 0,
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -378,6 +381,10 @@ def init_spot_db():
         if 'entry_slip_pct' not in pcols:
             conn.execute('ALTER TABLE spot_positions ADD COLUMN entry_slip_pct REAL DEFAULT 0')
             log.info('[DB] spot_positions.entry_slip_pct 컬럼 추가 (마이그레이션)')
+        if 'orig_sl' not in pcols:
+            conn.execute('ALTER TABLE spot_positions ADD COLUMN orig_sl REAL DEFAULT 0')
+            conn.execute('UPDATE spot_positions SET orig_sl=sl WHERE orig_sl=0')
+            log.info('[DB] spot_positions.orig_sl 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -401,11 +408,11 @@ def _save_position(strategy: str, symbol: str, entry_price: float, sl: float,
         INSERT OR REPLACE INTO spot_positions
         (strategy, symbol, entry_price, sl, tp, qty_tokens, cost_usdt,
          risk_pct, exit_type, max_hold_bars, bars_held, peak_price, entry_ts, regime,
-         entry_slip_pct)
-        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+         entry_slip_pct, orig_sl)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)
         """, (strategy, symbol, entry_price, sl, tp, qty, cost,
               risk_pct, exit_type, max_hold, entry_price,
-              datetime.now(timezone.utc).isoformat(), regime, entry_slip_pct))
+              datetime.now(timezone.utc).isoformat(), regime, entry_slip_pct, sl))
 
 
 def _load_position(strategy: str, symbol: str) -> Optional[dict]:
@@ -1111,6 +1118,22 @@ def _detect_fee_rate() -> float:
     return _fee_rate['taker']
 
 
+def trailing_sl(entry: float, cur_sl: float, peak: float,
+                sl_dist: float) -> float:
+    """추적 손절 계산. 순수 함수 — 라이브/백테스트가 공유한다.
+
+    peak가 entry + sl_dist × ACTIVATE_R 를 넘은 뒤부터
+    `peak − sl_dist × TRAIL_MULT` 로 손절을 따라 올린다(내리지 않음).
+    SL 거리를 기준으로 하므로 심볼·변동성에 무관하게 스케일이 맞고,
+    ACTIVATE_R = TRAIL_MULT 이면 활성화 시점이 자연스럽게 본전 이동이 된다.
+    """
+    if not SPOT_TRAIL_ENABLED or sl_dist <= 0:
+        return cur_sl
+    if peak < entry + sl_dist * SPOT_TRAIL_ACTIVATE_R:
+        return cur_sl                       # 아직 활성화 전
+    return max(cur_sl, peak - sl_dist * SPOT_TRAIL_MULT)
+
+
 def _typical_sl_pct() -> float:
     """실제 거래에서 관측된 SL 거리 중앙값. 표본이 없으면 보수적 기본값.
 
@@ -1489,6 +1512,10 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     cost_usdt   = float(pos['cost_usdt'])
     risk_pct    = float(pos['risk_pct'])
     sl          = float(pos['sl'])
+    # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로 sl이 올라간
+    # 뒤 그 값을 분모로 쓰면 R이 부풀고, 그 pnl_r이 Kelly·건강도·avg_r과
+    # 비용 가드까지 연쇄 오염시킨다.
+    orig_sl     = float(pos.get('orig_sl') or 0) or sl
     entry_ts    = pos['entry_ts']
     regime      = pos.get('regime', '')
 
@@ -1516,7 +1543,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
                 _pnl_u = (price - entry_price) * qty
                 _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                _sl_d = abs(entry_price - sl)
+                _sl_d = abs(entry_price - orig_sl)
                 _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                 _delete_position(strategy, symbol)
                 _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
@@ -1552,7 +1579,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                         _delete_position(strategy, symbol)
                         _pnl_u = (price - entry_price) * qty
                         _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                        _sl_d = abs(entry_price - sl)
+                        _sl_d = abs(entry_price - orig_sl)
                         _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                         _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
                                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
@@ -1591,7 +1618,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             if not sold_ok:
                 return
 
-    sl_dist   = abs(entry_price - sl)
+    sl_dist   = abs(entry_price - orig_sl)
     pnl_usdt  = (exit_price - entry_price) * qty
     pnl_pct   = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl_r     = pnl_usdt / (sl_dist * qty) if sl_dist > 0 else 0
@@ -1653,7 +1680,9 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
         qty         = float(order.get('filled') or pos['qty_tokens'])
         fallback_px = float(pos['sl']) if reason == 'SL' else float(pos.get('tp') or pos['sl'])
         exit_price  = float(order.get('average') or order.get('price') or fallback_px)
-        sl_dist     = abs(entry_price - float(pos['sl']))
+        # R배수 분모는 진입 시점의 위험 (추적 손절로 sl이 올라가도 불변)
+        sl_dist     = abs(entry_price - (float(pos.get('orig_sl') or 0)
+                                         or float(pos['sl'])))
         pnl_usdt    = (exit_price - entry_price) * qty
         pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
         pnl_r       = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
@@ -1705,6 +1734,34 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
 _rearm_attempts: dict = {}          # (strategy, symbol) → (마지막 시도 시각, 횟수)
 _REARM_INTERVAL = 300               # 자가복구 시도 간격(초)
 _REARM_ALERT_AFTER = 3              # 이 횟수를 넘기면 운영자에게 알린다
+
+
+def _rearm_trailing_stop(strategy: str, symbol: str, ccxt_sym: str,
+                         pos: dict, new_sl: float) -> None:
+    """추적 손절로 SL이 올라갔을 때 거래소 보호주문도 새 가격으로 재등록.
+
+    갱신하지 않으면 거래소에는 원래(더 낮은) 손절만 남아, 봇이 멈춘 사이
+    추적으로 확보한 이익이 보호되지 않는다. 다만 주문 취소·재등록은
+    API 비용이 있으므로 **의미 있게 움직였을 때만** 수행한다.
+    """
+    if _state.get('dry_run') or not SPOT_EXCHANGE_STOP:
+        return
+    old_sl = float(pos.get('sl') or 0)
+    sl_dist = abs(float(pos['entry_price']) - old_sl)
+    if sl_dist <= 0 or (new_sl - old_sl) < sl_dist * SPOT_TRAIL_REARM_FRAC:
+        return                                  # 미세 이동 — 주문 churn 방지
+    try:
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
+        tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
+        sl_id, tp_id = _place_protective_orders(
+            strategy, symbol, ccxt_sym, float(pos['qty_tokens']), new_sl, tp_for_oco)
+        _update_position_order_id(strategy, symbol, sl_id, tp_id)
+        if not sl_id:
+            log.warning(f'[{strategy}] {symbol} 추적 손절 재등록 실패 — '
+                        f'소프트웨어 SL만 작동 (자가복구가 재시도한다)')
+    except Exception as e:
+        log.warning(f'[{strategy}] {symbol} 추적 손절 재등록 오류(무시): {e}')
 
 
 def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
@@ -1838,9 +1895,16 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
             _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'BB_MID')
             return
 
-    # Peak 업데이트
+    # Peak 갱신 + 추적 손절
+    # (기존에는 peak만 기록하고 sl은 그대로 다시 써서 효과가 0이었다)
     if price > peak:
-        _update_position_sl(strategy, symbol, sl, price)
+        peak = price
+        new_sl = trailing_sl(entry, sl, peak, abs(entry - float(pos['sl'])))
+        _update_position_sl(strategy, symbol, new_sl, peak)
+        if new_sl > sl:
+            log.info(f'[{strategy}] {symbol} 추적 손절 {sl:,.4f} → {new_sl:,.4f} '
+                     f'(최고 {peak:,.4f})')
+            _rearm_trailing_stop(strategy, symbol, ccxt_sym, pos, new_sl)
 
 
 # ══════════════════════════════════════════════════════════════

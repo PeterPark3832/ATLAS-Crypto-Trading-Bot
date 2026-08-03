@@ -46,6 +46,7 @@ from atlas_spot_config import (
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
     SPOT_MAX_SL_PCT, SPOT_MAX_COST_PER_R,
+    SPOT_TRAIL_ENABLED,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_PF_HARD,
     SPOT_HEALTH_SOFT_SCALE,
     WF_IS_START, WF_IS_END, WF_OOS_START,
@@ -58,6 +59,7 @@ from atlas_spot_config import (
 from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
 )
+from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
 from atlas_regime import classify_regime, REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR
@@ -420,6 +422,10 @@ def backtest_strategy(
 
             slip = _get_slippage(symbol)
 
+            # 추적 손절 (라이브 `trailing_sl`과 동일 규칙 — 패리티)
+            # 순서 주의: **이번 봉의 SL 판정 전에** 갱신하면 같은 봉의 고가로
+            # 올린 손절이 같은 봉 저가에 걸리는 선행편향이 생긴다.
+            # 따라서 갱신은 이 봉의 청산 판정이 끝난 뒤(아래)에 수행한다.
             # SL 체크 (bar 저가로 SL 이탈)
             if cur_low <= position['sl']:
                 reason    = 'SL'
@@ -450,7 +456,10 @@ def backtest_strategy(
 
             if reason is not None:
                 entry_price = position['entry_price']
-                sl_dist     = abs(entry_price - position['sl'])
+                # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로
+                # SL이 올라간 뒤 그 값을 쓰면 분모가 줄어 R이 부풀고,
+                # 그 pnl_r이 Kelly·건강도·avg_r을 오염시킨다.
+                sl_dist     = abs(entry_price - position.get('orig_sl', position['sl']))
                 pnl_r       = (exit_price - entry_price) / sl_dist if sl_dist > 0 else 0.0
                 pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
                 fee_cost    = exit_price * position['qty'] * BT_SPOT_FEE
@@ -481,6 +490,16 @@ def backtest_strategy(
                     cooldown = S3_COOLDOWN
                 diag['exits'] += 1
                 continue
+
+            # 이 봉에서 청산되지 않았다 → 고가로 peak 갱신 후 손절 추적.
+            # (판정 이후에 갱신해야 같은 봉 고가로 올린 손절이 같은 봉
+            #  저가에 걸리는 선행편향이 생기지 않는다)
+            if SPOT_TRAIL_ENABLED:
+                position['peak'] = max(position.get('peak', position['entry_price']),
+                                       cur_high)
+                position['sl'] = trailing_sl(
+                    position['entry_price'], position['sl'], position['peak'],
+                    abs(position['entry_price'] - position.get('orig_sl', position['sl'])))
 
         # ── 진입 조건 ────────────────────────────────────────
         if position is not None:
@@ -603,6 +622,8 @@ def backtest_strategy(
         position = {
             'entry_price': entry_price,
             'sl':          sl,
+            'orig_sl':     sl,      # R배수 분모 — 추적으로 sl이 올라가도 불변
+            'peak':        entry_price,
             'tp':          tp,
             'qty':         qty,
             'cost_usdt':   cost_usdt,
