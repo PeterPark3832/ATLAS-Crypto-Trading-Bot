@@ -74,6 +74,7 @@ from atlas_spot_config import (
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
     STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    LIVE_STRATEGIES,
     WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
@@ -1132,6 +1133,31 @@ def trailing_sl(entry: float, cur_sl: float, peak: float,
     if peak < entry + sl_dist * SPOT_TRAIL_ACTIVATE_R:
         return cur_sl                       # 아직 활성화 전
     return max(cur_sl, peak - sl_dist * SPOT_TRAIL_MULT)
+
+
+def validate_active_strategies(strategies: list[str]) -> tuple[list, list]:
+    """활성 전략 목록을 검증한다. 반환: (실행 가능한 목록, 문제 설명 목록).
+
+    `--strategies`는 아무 문자열이나 받는데 검증이 없어서, 오타 하나로
+    봇이 **아무것도 거래하지 않으면서 "정상 기동"을 보고**하는 상태가 됐다.
+    죽는 방식이 세 가지라 각각 구분해서 알린다:
+      · STRATEGY_TIMEFRAMES에 없음  → 어느 루프에도 배정되지 않아 완전 침묵
+      · 전략 함수 없음               → 매 심볼 예외 후 조용히 무시
+      · REGIME_STRATEGY_MAP에 없음   → 모든 봉에서 레짐 차단, 신호 0
+    """
+    ok, problems = [], []
+    for s in strategies:
+        if s not in STRATEGY_TIMEFRAMES:
+            problems.append(f'{s}: 타임프레임 미정의 — 어느 루프에도 배정되지 '
+                            f'않아 완전히 동작하지 않음 (대소문자 확인)')
+        elif s not in CALC_FUNCS or s not in SIGNAL_FUNCS:
+            problems.append(f'{s}: 전략 함수 없음 — 신호 계산 불가')
+        elif not any(s in ss for ss in REGIME_STRATEGY_MAP.values()):
+            problems.append(f'{s}: 어느 레짐에도 배정되지 않음 — 모든 봉에서 '
+                            f'차단되어 진입이 0건')
+        else:
+            ok.append(s)
+    return ok, problems
 
 
 def _typical_sl_pct() -> float:
@@ -2348,7 +2374,24 @@ def main():
         return
 
     _state['dry_run'] = args.dry_run
-    _state['active_strategies'] = [s.strip().upper() for s in args.strategies.split(',')]
+    _requested = [s.strip().upper() for s in args.strategies.split(',') if s.strip()]
+    _valid, _problems = validate_active_strategies(_requested)
+    if _problems:
+        for p in _problems:
+            log.error(f'[기동] 실행 불가 전략 — {p}')
+        _tg('⚠️ 실행되지 않는 전략이 지정됐습니다:\n'
+            + '\n'.join(f'   • {p}' for p in _problems)
+            + f'\n실제 가동: {_valid or "없음"}')
+    if not _valid:
+        # 전략이 하나도 없으면 봇은 살아만 있고 아무 거래도 하지 않는다.
+        # "정상 기동"으로 보고하면 운영자가 몇 주를 그대로 흘려보낸다.
+        log.error(f'[기동] 실행 가능한 전략이 없습니다 (요청: {_requested}). '
+                  f'선택 가능: {sorted(LIVE_STRATEGIES)}')
+        _tg(f'🚨 실행 가능한 전략이 없어 기동을 중단합니다.\n'
+            f'   요청: {_requested}\n   선택 가능: {sorted(LIVE_STRATEGIES)}')
+        _tg_flush()
+        return
+    _state['active_strategies'] = _valid
 
     log.info(f'{"=" * 60}')
     log.info('  ATLAS Spot Trading Bot 시작')

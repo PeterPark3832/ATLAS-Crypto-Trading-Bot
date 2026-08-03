@@ -133,6 +133,51 @@ class TestSizingCapability:
 #  보고
 # ══════════════════════════════════════════════════════════════
 
+class TestStrategyValidation:
+    """`--strategies`는 아무 문자열이나 받는데 검증이 없어서, 오타 하나로
+    봇이 **아무것도 거래하지 않으면서 "정상 기동"을 보고**하는 상태가 됐다.
+    죽는 방식이 세 가지라 각각 구분해 알려야 한다."""
+
+    def test_valid_strategies_pass(self):
+        ok, problems = sm.validate_active_strategies(['S3', 'S4', 'S5', 'S6'])
+        assert ok == ['S3', 'S4', 'S5', 'S6'] and problems == []
+
+    def test_unknown_name_is_flagged(self):
+        ok, problems = sm.validate_active_strategies(['S9'])
+        assert ok == [] and len(problems) == 1
+        assert '타임프레임' in problems[0]
+
+    def test_lowercase_is_flagged(self):
+        """소문자는 어느 루프에도 배정되지 않아 완전히 침묵한다."""
+        ok, problems = sm.validate_active_strategies(['s3'])
+        assert ok == [] and problems
+
+    def test_strategy_without_regime_is_flagged(self):
+        """레짐 배정이 없으면 매 봉 차단되어 진입이 0건이 된다."""
+        ok, problems = sm.validate_active_strategies(['S7'])
+        assert ok == []
+        assert '레짐' in problems[0]
+
+    def test_partial_valid_keeps_good_ones(self):
+        ok, problems = sm.validate_active_strategies(['S3', 'S9', 'S6'])
+        assert ok == ['S3', 'S6'] and len(problems) == 1
+
+    def test_empty_input(self):
+        assert sm.validate_active_strategies([]) == ([], [])
+
+    def test_every_live_strategy_is_runnable(self):
+        """설정에 선언된 전략은 전부 실제로 돌 수 있어야 한다.
+        (이 단언이 깨지면 config 편집이 조용히 전략을 죽인 것)"""
+        ok, problems = sm.validate_active_strategies(list(sm.LIVE_STRATEGIES))
+        assert problems == [], f'선언됐지만 실행 불가: {problems}'
+        assert sorted(ok) == sorted(sm.LIVE_STRATEGIES)
+
+    def test_default_active_matches_live(self):
+        from atlas_spot_config import DEFAULT_ACTIVE_STRATEGIES, LIVE_STRATEGIES
+        assert sorted(DEFAULT_ACTIVE_STRATEGIES) == sorted(LIVE_STRATEGIES), (
+            '기본 활성 목록과 레짐 배정 목록이 어긋나면 일부 전략이 놀게 된다')
+
+
 class TestReport:
     def test_warns_on_dead_combination(self, _no_telegram):
         sm._report_sizing_capability(134.0)
