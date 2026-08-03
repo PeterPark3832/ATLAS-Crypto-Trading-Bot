@@ -172,7 +172,8 @@ def load_symbol_data(sid: str, symbols: list[str], data_dir: Path):
     since_ms = _since_ms(WF_IS_START)
     tf = STRATEGY_TIMEFRAMES.get(sid, '1d')
     btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir)
-    regime_map = build_regime_map(btc_1d) if btc_1d else {}
+    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir)   # 레짐 패리티
+    regime_map = build_regime_map(btc_1d, btc_4h) if btc_1d else {}
     ohlcv: dict[str, list] = {}
     for sym in symbols:
         data = _load_or_fetch(sym, tf, since_ms, data_dir)

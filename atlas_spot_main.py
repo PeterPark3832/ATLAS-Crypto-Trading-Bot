@@ -1135,6 +1135,41 @@ def trailing_sl(entry: float, cur_sl: float, peak: float,
     return max(cur_sl, peak - sl_dist * SPOT_TRAIL_MULT)
 
 
+_NO_TRADE_ALERT_HOURS = 6      # 이 시간 넘게 전 전략이 막히면 알린다
+
+
+def check_no_trade_regime(regime: str, now: float) -> None:
+    """전 전략이 차단되는 레짐이 길어지면 운영자에게 알린다.
+
+    CRISIS·MICRO_RANGING·UNKNOWN은 REGIME_STRATEGY_MAP이 빈 목록이라 그
+    구간에는 어떤 신호도 진입으로 이어지지 않는다. 로그에는 `regime_block`
+    카운터만 조용히 쌓여서, 봇이 멀쩡히 도는데 며칠째 거래가 없어도
+    운영자는 "장이 없나 보다"라고 넘기게 된다. 지속 시간을 재서 알린다.
+    """
+    blocked = not REGIME_STRATEGY_MAP.get(regime, [])
+    with _state_lock:
+        since = _state.get('no_trade_since')
+        alerted = _state.get('no_trade_alerted', False)
+        if not blocked:
+            _state['no_trade_since'] = None
+            _state['no_trade_alerted'] = False
+        elif since is None:
+            _state['no_trade_since'] = now
+            return
+    if not blocked:
+        if since is not None and alerted:
+            _tg(f'✅ 레짐이 {regime}(으)로 회복 — 거래 재개')
+        return
+    hours = (now - since) / 3600
+    if hours >= _NO_TRADE_ALERT_HOURS and not alerted:
+        with _state_lock:
+            _state['no_trade_alerted'] = True
+        _tg(f'⏸️ {hours:.0f}시간째 거래 정지 상태입니다.\n'
+            f'   레짐: {regime} — 이 레짐에 배정된 전략이 없습니다.\n'
+            f'   봇은 정상 동작 중이며, 레짐이 바뀌면 자동으로 재개합니다.\n'
+            f'   (의도한 정지가 아니라면 REGIME_STRATEGY_MAP을 확인하세요)')
+
+
 def validate_active_strategies(strategies: list[str]) -> tuple[list, list]:
     """활성 전략 목록을 검증한다. 반환: (실행 가능한 목록, 문제 설명 목록).
 
@@ -2170,6 +2205,11 @@ def _balance_poller(stop_event: threading.Event) -> None:
             # 60초마다 보존 — 피크와 당일 PnL 모두 최대 60초 이내 최신 상태로
             # 남으므로, 급작스러운 종료에도 리스크 기준점을 거의 잃지 않는다.
             _persist_risk_state()
+            # 전 전략이 막히는 레짐이 길어지면 알린다(조용한 정지 방지)
+            try:
+                check_no_trade_regime(get_cached_regime().regime, time.time())
+            except Exception as _e:
+                log.debug(f'[레짐] 정지 감시 실패(무시): {_e}')
             log.debug(f'[잔고] 총자산 ${total:,.2f} (USDT ${usdt:,.2f})')
         except Exception as e:
             log.warning(f'[잔고폴러] 오류: {e}')

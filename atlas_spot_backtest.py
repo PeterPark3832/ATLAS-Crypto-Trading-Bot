@@ -114,8 +114,18 @@ def load_ohlcv_csv(path: str) -> list:
     return df[['_ts', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
 
 
-def build_regime_map(btc_1d_ohlcv: list) -> dict:
-    """날짜 → 레짐 문자열 딕셔너리 반환. key: 'YYYY-MM-DD'"""
+def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> dict:
+    """날짜 → 레짐 문자열 딕셔너리 반환. key: 'YYYY-MM-DD'
+
+    **라이브(`atlas_regime.update_regime`)와 같은 입력을 넘겨야 한다.**
+    기존에는 adx_4h·adx_slope를 빼고 호출해서 백테스트에서는
+    MICRO_RANGING과 'ADX 하락 중 → WEAK_TREND 강등'이 아예 발생하지
+    않았다. 같은 날짜를 라이브는 MICRO_RANGING(전 전략 차단) 또는
+    WEAK_TREND(리스크 0.5배)로 보는데 백테스트는 TRENDING_UP으로 봤다는
+    뜻이라, 검증한 레짐 경로를 실계좌가 따라가지 않았다.
+
+    btc_4h_ohlcv를 주면 4H ADX까지 라이브와 동일하게 반영한다.
+    """
     from atlas_indicators import calc_adx
     if len(btc_1d_ohlcv) < 60:
         return {}
@@ -129,7 +139,17 @@ def build_regime_map(btc_1d_ohlcv: list) -> dict:
         (df['low']  - pc).abs(),
     ], axis=1).max(axis=1)
     atr14 = tr.rolling(14).mean()
+
+    # 날짜별 4H ADX (해당 일자까지의 4H 봉만 사용 — 선행편향 방지)
+    adx4h_by_date: dict = {}
+    if btc_4h_ohlcv:
+        df4 = _ohlcv_to_df(btc_4h_ohlcv)
+        dates4 = df4['ts'].dt.date.astype(str).values
+        for j in range(50, len(df4)):
+            adx4h_by_date[dates4[j]] = calc_adx(btc_4h_ohlcv[max(0, j - 50): j + 1], 14)
+
     regime_map: dict = {}
+    adx_hist: list = []
     for i in range(50, len(df)):
         date_key = str(df['ts'].iloc[i].date())
         window   = btc_1d_ohlcv[max(0, i - 50): i + 1]
@@ -138,7 +158,12 @@ def build_regime_map(btc_1d_ohlcv: list) -> dict:
         ema_val  = float(ema200.iloc[i])
         atr_val  = float(atr14.iloc[i]) if not pd.isna(atr14.iloc[i]) else 0.0
         atr_pct  = atr_val / btc_px if btc_px else 0.0
-        regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct)
+        # ADX 3봉 기울기 (라이브와 동일 — 추세 소멸 조기 감지)
+        adx_hist.append(adx)
+        adx_slope = (adx_hist[-1] - adx_hist[-3]) if len(adx_hist) >= 3 else 0.0
+        adx_4h    = adx4h_by_date.get(date_key, 0.0)
+        regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct,
+                                               adx_4h, adx_slope)
     return regime_map
 
 
@@ -709,8 +734,12 @@ def run_spot_backtest(
     # BTC 1D (레짐 맵용, 스팟 데이터 사용)
     print(f'\n[레짐맵] BTC 1D 데이터 로드...')
     btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir)
-    regime_map = build_regime_map(btc_1d) if btc_1d else {}
-    print(f'  레짐맵 생성: {len(regime_map)}일')
+    # 4H도 함께 로드 — 라이브가 adx_4h로 MICRO_RANGING을 판정하므로,
+    # 넘기지 않으면 백테스트만 다른 레짐 경로를 걷는다.
+    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir)
+    regime_map = build_regime_map(btc_1d, btc_4h) if btc_1d else {}
+    print(f'  레짐맵 생성: {len(regime_map)}일'
+          + ('' if btc_4h else ' (4H 없음 — MICRO_RANGING 미반영)'))
 
     # 필요한 타임프레임별 심볼 목록
     need_4h = [s for s in strategies if STRATEGY_TIMEFRAMES.get(s) == '4h']
