@@ -18,7 +18,7 @@ import pandas as pd
 import ccxt
 from dataclasses import dataclass
 from atlas_spot_config import BINANCE_API_KEY, BINANCE_API_SECRET
-from atlas_indicators import calc_adx, _ohlcv_to_df, _calc_atr
+from atlas_indicators import adx_min_bars, calc_adx, _ohlcv_to_df, _calc_atr
 
 # ── 레짐 분류 임계값 ─────────────────────────────────────────
 REGIME_ADX_TREND    = 25      # ADX >= 25 → 추세 구간
@@ -128,7 +128,15 @@ def update_regime(ex, candle_cache=None) -> RegimeState:
         else:
             ohlcv = ex.fetch_ohlcv('BTC/USDT', '1d', limit=REGIME_BTC_LOOKBACK + 20)
 
-        if not ohlcv or len(ohlcv) < 30:
+        # 가드는 **ADX가 실제로 계산 가능한 봉 수**에 맞춰야 한다.
+        # 30봉만 요구하면 30~41봉 구간에서 calc_adx가 0.0을 돌려주고,
+        # classify_regime은 그걸 '추세 없음'으로 읽어 RANGING으로 분류한다.
+        # 즉 데이터 문제가 정상 레짐으로 위장돼 S4·S5가 그대로 진입한다.
+        _min_bars = adx_min_bars(14)
+        if not ohlcv or len(ohlcv) < _min_bars:
+            log = logging.getLogger('atlas')
+            log.warning(f'[Regime] BTC 1D 봉 부족({len(ohlcv) if ohlcv else 0}/'
+                        f'{_min_bars}) — 레짐 갱신 보류, 직전 값 유지')
             return get_cached_regime()
 
         df = _ohlcv_to_df(ohlcv)

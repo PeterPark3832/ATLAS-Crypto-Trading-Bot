@@ -47,12 +47,28 @@ def _calc_rsi(close: pd.Series, period: int) -> pd.Series:
 #  ADX 계산 (장세 분류용)
 # ══════════════════════════════════════════════════════════════
 
+ADX_MIN_BARS_MULT = 3      # 필요 봉 수 = period × 이 값
+
+
+def adx_min_bars(period: int = 14) -> int:
+    """calc_adx가 값을 내기 위해 필요한 최소 봉 수.
+
+    호출측이 이 값을 확인하지 않으면, 데이터가 모자랄 때 반환되는 0.0을
+    '추세가 없다'로 오해하게 된다 — 레짐 분류에서는 그게 곧 RANGING이다.
+    """
+    return period * ADX_MIN_BARS_MULT
+
+
 def calc_adx(ohlcv: list, period: int = 14) -> float:
     """
     Wilder 방식 ADX 계산.
-    Returns: ADX 값 (float), 데이터 부족 시 0.0
+
+    Returns: ADX 값 (float). **데이터 부족 시 0.0** —
+    호출측은 `adx_min_bars(period)`로 봉 수를 먼저 확인할 것.
+    0.0은 '추세 없음'과 구분되지 않으므로, 레짐 분류에 그대로 넘기면
+    데이터 문제가 RANGING으로 위장된다.
     """
-    if len(ohlcv) < period * 3:
+    if len(ohlcv) < adx_min_bars(period):
         return 0.0
 
     df = _ohlcv_to_df(ohlcv)
