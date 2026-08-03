@@ -2007,8 +2007,17 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     i         = len(df) - 1
                     price     = _get_price(ccxt_sym)
 
+                    # 지표 판정은 **완성된 마지막 봉**으로 한다.
+                    # 거래소가 돌려주는 마지막 봉(i)은 형성 중이라 BB·EMA가
+                    # 폴링마다 흔들린다. 그 값으로 청산하면
+                    #   ① 봉 마감 시점의 값과 달라 백테스트가 검증한 적 없는
+                    #      동작이 되고(신호는 이미 i-1을 쓰므로 내부 불일치),
+                    #   ② 봉 중간에 잠깐 뒤집힌 크로스에 휩쓸려 조기 청산된다.
+                    # 가격 비교(SL/TP)는 여전히 실시간 price로 한다.
+                    i_closed  = max(0, len(df) - 2)
+
                     # 포지션 관리 (매 폴링마다)
-                    _manage_position(strategy_id, symbol, ccxt_sym, df, i)
+                    _manage_position(strategy_id, symbol, ccxt_sym, df, i_closed)
 
                     # 유니버스 밖 심볼은 관리 전용 — 신규 진입 금지.
                     # (유니버스에서 탈락했다는 건 거래량·모멘텀 기준을 더는

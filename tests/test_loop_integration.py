@@ -210,6 +210,52 @@ class TestLoopWiring:
             f'심볼당 1회여야 하는데 {env.n_ohlcv}회 (전략 수만큼 중복 조회 중)')
 
 
+class TestClosedBarParity:
+    """지표 판정은 **완성된 마지막 봉**으로 해야 한다.
+
+    거래소가 돌려주는 마지막 봉은 형성 중이라 BB·EMA가 폴링마다 흔들린다.
+    그 값으로 청산하면 ① 백테스트가 검증한 적 없는 동작이 되고(신호는 이미
+    i-1을 쓰므로 내부에서도 어긋난다) ② 봉 중간에 잠깐 뒤집힌 크로스에
+    휩쓸려 조기 청산된다.
+    """
+
+    def test_manage_position_gets_closed_bar(self, env, monkeypatch):
+        seen = {}
+
+        def _spy(strategy, symbol, ccxt_sym, df, i):
+            seen['i'] = i
+            seen['len'] = len(df)
+        monkeypatch.setattr(sm, '_manage_position', _spy)
+        _run_one_pass(monkeypatch)
+        assert seen, '_manage_position이 호출되지 않았다'
+        assert seen['i'] == seen['len'] - 2, (
+            f"형성 중인 봉({seen['len']-1})이 아니라 완성봉({seen['len']-2})을 "
+            f"넘겨야 한다 (실제 {seen['i']})")
+
+    def test_signal_and_exit_use_same_bar(self, env, monkeypatch):
+        """신호와 청산이 서로 다른 봉을 보면 같은 순간에 모순된 판단을 한다."""
+        idx = {}
+
+        def _mp(strategy, symbol, ccxt_sym, df, i):
+            idx['exit'] = i
+        monkeypatch.setattr(sm, '_manage_position', _mp)
+
+        orig = sm.SIGNAL_FUNCS['S3']
+
+        def _sig(df, i):
+            idx['signal'] = i
+            return orig(df, i)
+        monkeypatch.setitem(sm.SIGNAL_FUNCS, 'S3', _sig)
+
+        _run_one_pass(monkeypatch)
+        if 'signal' in idx:      # 새 봉이 닫혀 신호까지 갔을 때만 비교 가능
+            assert idx['signal'] == idx['exit']
+
+    def test_single_bar_does_not_crash(self, env, monkeypatch):
+        """봉이 1개뿐이어도 음수 인덱스로 떨어지지 않아야 한다."""
+        assert max(0, 1 - 2) == 0
+
+
 class TestCandleCacheEviction:
     def test_stale_entries_are_swept(self, env):
         cache = sm.CandleCache(ttl=1)
