@@ -1111,6 +1111,94 @@ def _detect_fee_rate() -> float:
     return _fee_rate['taker']
 
 
+def _typical_sl_pct() -> float:
+    """실제 거래에서 관측된 SL 거리 중앙값. 표본이 없으면 보수적 기본값.
+
+    사이징 진단은 '전형적인 신호'를 가정해야 의미가 있으므로 상수보다
+    실측값을 쓴다.
+    """
+    try:
+        with _db_lock, _db_conn() as conn:
+            rows = conn.execute(
+                'SELECT entry_price, pnl_r, pnl_usdt, qty_tokens FROM spot_trades '
+                'WHERE COALESCE(dry_run,0)=0 AND pnl_r != 0 AND entry_price > 0 '
+                'AND qty_tokens > 0 ORDER BY id DESC LIMIT 200'
+            ).fetchall()
+        vals = []
+        for r in rows:
+            # pnl_r = pnl_usdt / (sl_dist * qty)  →  sl_dist = pnl_usdt / (pnl_r * qty)
+            sl_dist = abs(float(r['pnl_usdt']) / (float(r['pnl_r']) * float(r['qty_tokens'])))
+            pct = sl_dist / float(r['entry_price'])
+            if 0.002 < pct < 0.5:
+                vals.append(pct)
+        if len(vals) >= 10:
+            return float(np.median(vals))
+    except Exception as e:
+        log.debug(f'[진단] SL 중앙값 계산 실패: {e}')
+    return 0.05          # 관측치가 없을 때의 대표값 (ATR 기반 전략들의 통상 범위)
+
+
+def _diagnose_sizing_capability(equity: float) -> list[dict]:
+    """전략 × 레짐 조합별로 **실제로 진입 가능한지** 점검한다.
+
+    사이징은 여러 스케일의 곱이라(기본 × Kelly × 래칫 × 레짐 × 건강도)
+    작은 값들이 겹치면 주문금액이 거래소 최소치($5) 아래로 내려간다.
+    그러면 그 조합은 **신호가 나와도 영원히 체결되지 않는데**, 로그에만
+    한 줄 남아 운영자는 '전략이 돌고 있다'고 믿게 된다. 소액 계좌에서
+    하락장 커버리지가 통째로 죽는 것이 대표적인 경우다.
+    기동 시 한 번 계산해 죽은 조합을 명시적으로 알린다.
+    """
+    sl_pct = _typical_sl_pct()
+    out = []
+    for regime, strats in REGIME_STRATEGY_MAP.items():
+        if regime == 'WEAK_TREND':
+            r_scale = WEAK_TREND_RISK_SCALE
+        elif regime == 'TRENDING_DOWN':
+            r_scale = TRENDING_DOWN_RISK_SCALE
+        else:
+            r_scale = 1.0
+        for sid in strats:
+            kelly  = _get_kelly_scale(sid)
+            health = _get_strategy_health_scale(sid)
+            risk   = SPOT_BASE_RISK_PCT * kelly * r_scale * health
+            cost   = (equity * risk / sl_pct) if sl_pct > 0 else 0.0
+            cost   = min(cost, equity * SPOT_MAX_ALLOC_PCT)
+            out.append({
+                'strategy': sid, 'regime': regime,
+                'risk_pct': risk, 'cost_usdt': cost,
+                'tradable': cost >= SPOT_MIN_ORDER_USDT,
+                'kelly': kelly, 'health': health, 'regime_scale': r_scale,
+            })
+    return out
+
+
+def _report_sizing_capability(equity: float) -> None:
+    """진단 결과를 로그·텔레그램으로 알린다."""
+    try:
+        rows = _diagnose_sizing_capability(equity)
+    except Exception as e:
+        log.warning(f'[진단] 사이징 점검 실패(무시): {e}')
+        return
+    sl_pct = _typical_sl_pct()
+    dead = [r for r in rows if not r['tradable']]
+    log.info(f'[진단] 사이징 점검 (자산 ${equity:,.2f}, 전형 SL {sl_pct*100:.1f}%)')
+    for r in rows:
+        mark = '  ' if r['tradable'] else '✗ '
+        log.info(f'  {mark}{r["strategy"]}/{r["regime"]:<14} '
+                 f'리스크 {r["risk_pct"]*100:5.3f}% '
+                 f'(설정 {SPOT_BASE_RISK_PCT*100:.1f}% 대비 '
+                 f'{r["risk_pct"]/SPOT_BASE_RISK_PCT*100:3.0f}%) '
+                 f'→ 주문 ${r["cost_usdt"]:6.2f}')
+    if dead:
+        lines = '\n'.join(
+            f'   • {r["strategy"]} / {r["regime"]} — 주문 ${r["cost_usdt"]:.2f}'
+            for r in dead)
+        _tg(f'⚠️ 진입 불가 조합 {len(dead)}건 (주문금액이 거래소 최소 '
+            f'${SPOT_MIN_ORDER_USDT:.0f} 미달)\n{lines}\n'
+            f'   신호가 나와도 체결되지 않습니다. 자본을 늘리거나 해당 레짐의 '
+            f'리스크 스케일을 조정해야 실제로 동작합니다.')
+
+
 def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
     """(왕복 비용률, 스프레드율) 추정.
 
@@ -2216,6 +2304,7 @@ def main():
     _restore_risk_state(total)
     if not _state['dry_run']:
         _detect_fee_rate()      # 실제 요율 반영 + BNB 할인 미적용 시 안내
+        _report_sizing_capability(total)   # 진입 불가 조합 사전 경고
     log.info(f'[초기] 총자산 ${total:,.2f} (USDT ${usdt:,.2f}) '
              f'| 피크 ${_state["peak_equity"]:,.2f}')
 
