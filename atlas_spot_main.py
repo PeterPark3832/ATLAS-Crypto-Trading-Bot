@@ -1787,7 +1787,24 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
             pass
         _prefetch_prices(_pass_syms)
 
-        for symbol in universe:
+        # 유니버스에서 빠진 심볼도 '보유 중이면' 계속 순회한다.
+        # SL/TP 판정·청산·보호주문 재등록이 전부 이 루프에서만 일어나므로
+        # (_manage_position 호출부는 아래 한 곳뿐), 4시간마다 도는 유니버스
+        # 갱신으로 심볼이 빠지면 그 포지션이 통째로 방치된다 —
+        # 소프트웨어 SL조차 돌지 않아 거래소 주문이 없으면 완전 무방비가 된다.
+        # 이 심볼들은 관리 전용이며, 신규 진입은 유니버스 안에서만 한다.
+        _held: list[str] = []
+        try:
+            _held = [p['symbol'] for p in _load_all_positions()
+                     if p['strategy'] in strategies]
+        except Exception:
+            pass
+        _uni_set  = set(universe)
+        scan_syms = list(universe) + [s for s in dict.fromkeys(_held)
+                                      if s not in _uni_set]
+
+        for symbol in scan_syms:
+            manage_only = symbol not in _uni_set
             ccxt_sym = symbol.replace('USDT', '/USDT')
             ex = _get_ex()
 
@@ -1814,6 +1831,12 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
 
                     # 포지션 관리 (매 폴링마다)
                     _manage_position(strategy_id, symbol, ccxt_sym, df, i)
+
+                    # 유니버스 밖 심볼은 관리 전용 — 신규 진입 금지.
+                    # (유니버스에서 탈락했다는 건 거래량·모멘텀 기준을 더는
+                    #  만족하지 않는다는 뜻이므로 새로 사지 않는다)
+                    if manage_only:
+                        continue
 
                     # 신규 봉 확인 (새 봉이 닫혔을 때만 신호 체크)
                     cur_ts = int(df.iloc[i]['ts'].timestamp())

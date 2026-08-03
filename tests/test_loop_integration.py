@@ -152,6 +152,49 @@ class TestLoopWiring:
         _run_one_pass(monkeypatch)
         assert 'GONE/USDT' in captured['syms']
 
+    def test_open_position_symbol_is_managed(self, env, monkeypatch):
+        """유니버스에서 빠진 보유 심볼도 실제로 _manage_position 을 타야 한다.
+
+        시세 프리페치만 되고 순회에서 빠지면 SL/TP 판정·청산·보호주문
+        재등록이 전부 멈춰 포지션이 방치된다(거래소 주문 없으면 무방비).
+        """
+        sm._save_position('S3', 'GONEUSDT', 100.0, 95.0, 110.0, 1.0, 100.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        seen = []
+        monkeypatch.setattr(
+            sm, '_manage_position',
+            lambda strat, sym, ccxt_sym, df, i: seen.append((strat, sym)))
+        _run_one_pass(monkeypatch)
+        assert ('S3', 'GONEUSDT') in seen, (
+            '유니버스 밖 보유 심볼이 관리 루프에서 누락됐다')
+
+    def test_out_of_universe_symbol_is_manage_only(self, env, monkeypatch):
+        """유니버스 밖 심볼은 관리만 하고 신규 진입은 하지 않는다."""
+        sm._save_position('S3', 'GONEUSDT', 100.0, 95.0, 110.0, 1.0, 100.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        monkeypatch.setattr(sm, '_manage_position',
+                            lambda *a, **k: None)
+        entered = []
+        monkeypatch.setattr(sm, '_spot_buy',
+                            lambda *a, **k: entered.append(a[1]))
+        _run_one_pass(monkeypatch)
+        assert 'GONEUSDT' not in entered, (
+            '유니버스에서 탈락한 심볼에 신규 진입이 발생했다')
+
+    def test_other_timeframe_position_not_scanned(self, env, monkeypatch):
+        """이 루프가 담당하지 않는 전략의 포지션은 끌어오지 않는다.
+
+        (4H 루프가 1D 전용 전략의 보유 심볼까지 캔들을 받으면 낭비다)
+        """
+        sm._save_position('S5', 'OTHERUSDT', 100.0, 95.0, 110.0, 1.0, 100.0,
+                          0.02, 'sl_tp', 0, 'RANGING')
+        seen = []
+        monkeypatch.setattr(
+            sm, '_manage_position',
+            lambda strat, sym, ccxt_sym, df, i: seen.append(sym))
+        _run_one_pass(monkeypatch, strategies=('S3',), timeframe='4h')
+        assert 'OTHERUSDT' not in seen
+
     def test_pass_does_not_raise_and_db_intact(self, env, monkeypatch):
         _run_one_pass(monkeypatch)
         # 포지션 테이블과 거래 테이블이 정상 조회돼야 한다
