@@ -611,6 +611,13 @@ def print_report(result: dict, cfg: LearnConfig = DEFAULT) -> None:
     mode_txt = '상대배분' if cfg.relative else '절대배분'
     print(f'  {mode_txt} · 반감기 {cfg.half_life_days:.0f}일 · {k_txt} · '
           f'최소정보량 {cfg.min_info:.0f} · 비용 {cfg.cost_per_r:.3f}R')
+    # τ = 팔 간 '진짜' 성과 차이. **학습기의 가치를 결정하는 단 하나의 변수**다.
+    # τ가 작으면 재배분할 것이 없어 학습기는 기껏해야 중립이고, 격리가 켜져
+    # 있으면 오히려 손해다. 합성 시장 기준 손익분기는 τ ≈ 0.25R.
+    tau = math.sqrt(between_arm_variance(result)[0]) if len(result) >= 2 else 0.0
+    verdict = ('재배분 가치 있음' if tau >= 0.25 else
+               '차이가 작다 — 학습기 이득이 거의 없거나 마이너스')
+    print(f'  팔 간 실제 차이 τ = {tau:.3f}R  →  {verdict}')
     print('═' * w)
     if not result:
         print('\n  관측 없음 — 학습할 거래 기록이 없다. 배분은 전부 중립(1.00)이다.')
