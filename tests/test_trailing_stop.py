@@ -15,6 +15,7 @@ Kelly·건강도·avg_r·비용 가드까지 연쇄 오염시킨다.
 
 import os
 import sys
+import time
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
@@ -231,6 +232,75 @@ class TestRearm:
 # ══════════════════════════════════════════════════════════════
 #  백테스트 패리티
 # ══════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def _ex(monkeypatch):
+    ex = _Ex()
+    monkeypatch.setattr(sm, '_get_ex', lambda: ex)
+    return ex
+
+
+class TestRearmBackoff:
+    """자가복구는 '언젠가 성공할 실패'에만 재시도해야 한다.
+
+    주문금액이 거래소 최소치에 못 미치면 몇 번을 시도해도 영원히 실패한다
+    (소액 계좌에서 흔하다 — 사이징 진단 참조). 구분하지 않으면 5분마다
+    무한 재시도하며 API만 쓰고, 해결 불가능한 경고를 계속 계산한다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _live(self, monkeypatch):
+        monkeypatch.setattr(sm, '_state', {'dry_run': False})
+        monkeypatch.setattr(sm, '_rearm_attempts', {})
+        self.placed = []
+        monkeypatch.setattr(sm, '_place_protective_orders',
+                            lambda *a, **k: (self.placed.append(a), ('', ''))[1])
+
+    def _pos(self, qty):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 95.0, 110.0, qty, qty * 100,
+                          0.02, 'sl_tp', 0, 'TRENDING_DOWN')
+        return sm._load_position('S4', 'BTCUSDT')
+
+    def test_impossible_detected(self, _ex):
+        assert sm._protection_impossible('BTC/USDT', 0.04, 95.0) is True   # $3.8
+        assert sm._protection_impossible('BTC/USDT', 1.0, 95.0) is False
+
+    def test_structural_failure_backs_off(self, _ex, _no_telegram):
+        pos = self._pos(0.04)                       # 명목가 $4 < 최소 $5
+        for _ in range(5):
+            sm._rearm_attempts[('S4', 'BTCUSDT')] = (
+                0.0, sm._rearm_attempts.get(('S4', 'BTCUSDT'), (0, 0))[1])
+            sm._rearm_missing_protection('S4', 'BTCUSDT', 'BTC/USDT', pos)
+        assert self.placed == [], '불가능한 조건에서 주문을 시도하면 안 된다'
+        last, _ = sm._rearm_attempts[('S4', 'BTCUSDT')]
+        assert last > time.time() + 3600, '장기 보류로 전환돼야 한다'
+
+    def test_alerts_once_about_impossibility(self, _ex, _no_telegram):
+        pos = self._pos(0.04)
+        for _ in range(5):
+            sm._rearm_attempts[('S4', 'BTCUSDT')] = (
+                0.0, sm._rearm_attempts.get(('S4', 'BTCUSDT'), (0, 0))[1])
+            sm._rearm_missing_protection('S4', 'BTCUSDT', 'BTC/USDT', pos)
+        msgs = [m for m in _no_telegram if '보호주문 불가' in m]
+        assert len(msgs) == 1, '반복 경고는 무시당한다'
+        assert '소프트웨어 SL' in msgs[0], '실제 위험을 알려야 한다'
+
+    def test_transient_failure_still_retries(self, _ex, _no_telegram):
+        """금액이 충분하면(=일시적 실패) 재시도를 계속해야 한다."""
+        pos = self._pos(1.0)
+        for _ in range(3):
+            sm._rearm_attempts[('S4', 'BTCUSDT')] = (
+                0.0, sm._rearm_attempts.get(('S4', 'BTCUSDT'), (0, 0))[1])
+            sm._rearm_missing_protection('S4', 'BTCUSDT', 'BTC/USDT', pos)
+        assert len(self.placed) == 3
+
+    def test_record_cleared_on_position_close(self, _ex):
+        self._pos(1.0)
+        sm._rearm_attempts[('S4', 'BTCUSDT')] = (123.0, 2)
+        sm._delete_position('S4', 'BTCUSDT')
+        assert ('S4', 'BTCUSDT') not in sm._rearm_attempts, (
+            '남겨두면 항목이 쌓이고, 재진입 시 옛 실패 횟수를 물려받는다')
+
 
 class TestBacktestEffect:
     """트레일링이 백테스트 청산에 실제로 개입하는지 결정적으로 확인한다.

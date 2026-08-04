@@ -449,6 +449,9 @@ def _update_position_tp(strategy: str, symbol: str, new_tp: float):
 
 
 def _delete_position(strategy: str, symbol: str):
+    # 자가복구 재시도 기록도 함께 버린다 — 남겨두면 종료된 포지션의 항목이
+    # 계속 쌓이고, 같은 심볼에 재진입했을 때 옛 실패 횟수를 물려받는다.
+    _rearm_attempts.pop((strategy, symbol), None)
     with _db_lock, _db_conn() as conn:
         conn.execute(
             'DELETE FROM spot_positions WHERE strategy=? AND symbol=?',
@@ -1796,6 +1799,7 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
 _rearm_attempts: dict = {}          # (strategy, symbol) → (마지막 시도 시각, 횟수)
 _REARM_INTERVAL = 300               # 자가복구 시도 간격(초)
 _REARM_ALERT_AFTER = 3              # 이 횟수를 넘기면 운영자에게 알린다
+_REARM_GIVEUP = 86400               # 구조적 불가 시 재시도 보류 기간(초)
 
 
 def _rearm_trailing_stop(strategy: str, symbol: str, ccxt_sym: str,
@@ -1826,6 +1830,17 @@ def _rearm_trailing_stop(strategy: str, symbol: str, ccxt_sym: str,
         log.warning(f'[{strategy}] {symbol} 추적 손절 재등록 오류(무시): {e}')
 
 
+def _protection_impossible(ccxt_sym: str, qty: float, sl_price: float) -> bool:
+    """거래소 보호주문이 **구조적으로** 불가능한가.
+
+    주문 금액이 거래소 최소치에 못 미치면 재시도해도 영원히 실패한다.
+    (소액 계좌에서 흔하다 — `_diagnose_sizing_capability` 참조)
+    일시적 실패와 구분하지 않으면 5분마다 무한 재시도하며 API만 낭비한다.
+    """
+    q = _sellable_qty(ccxt_sym, qty)
+    return q <= 0 or q * sl_price * (1 - SPOT_STOP_LIMIT_GAP) < SPOT_MIN_ORDER_USDT
+
+
 def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
                               pos: dict) -> None:
     """보호주문이 없는 포지션에 대해 주기적으로 재등록을 시도한다.
@@ -1837,6 +1852,15 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
     now = time.time()
     last, cnt = _rearm_attempts.get(key, (0.0, 0))
     if now - last < _REARM_INTERVAL:
+        return
+    # 구조적 불가(주문금액 < 거래소 최소치)면 재시도해도 영원히 실패한다.
+    # 소프트웨어 SL이 유일한 보호라는 사실만 1회 알리고 재시도를 멈춘다.
+    if _protection_impossible(ccxt_sym, float(pos['qty_tokens']), float(pos['sl'])):
+        if cnt == 0:
+            _tg(f'ℹ️ [{strategy}] {symbol} 거래소 보호주문 불가 — 주문금액이 '
+                f'최소치(${SPOT_MIN_ORDER_USDT:.0f}) 미만입니다.\n'
+                f'   소프트웨어 SL만 작동합니다(봇이 멈추면 손절되지 않음).')
+        _rearm_attempts[key] = (now + _REARM_GIVEUP, max(cnt, 1))
         return
     tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
     sl_id, tp_id = _place_protective_orders(strategy, symbol, ccxt_sym,
