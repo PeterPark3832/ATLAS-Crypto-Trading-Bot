@@ -24,7 +24,6 @@ for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
-import pytest
 
 import atlas_spot_backtest as bt
 import atlas_spot_main as sm
