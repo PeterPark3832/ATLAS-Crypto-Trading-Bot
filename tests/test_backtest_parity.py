@@ -165,12 +165,58 @@ class TestSizingParity:
         _, diag = _run()
         assert diag.get('health_blocked', 0) == 0
 
+    # ── Kelly 사이징 — 소스 문자열이 아니라 **동작**으로 검증한다 ──
+    #   예전에는 `'kelly_scale = SPOT_KELLY_SCALE_MIN' in src` 처럼 소스를
+    #   문자열로 검사했다. 그러면 표현만 바꿔도 실패하고(리팩터링 방해),
+    #   반대로 표현을 유지한 채 의미를 바꾸면 통과한다(진짜 회귀를 놓침).
+    #   `_bt_kelly_scale`이 순수함수로 분리되면서 직접 시험할 수 있게 됐다.
+
+    @staticmethod
+    def _fake_trades(pnl_rs, risk_pct=0.02):
+        from atlas_spot_backtest import SpotTrade
+        return [SpotTrade(symbol='X', strategy='S6', direction='LONG', mode='',
+                          entry=1.0, exit_px=1.0, pnl_r=r, risk_pct=risk_pct,
+                          reason='SL' if r <= 0 else 'TP', entry_bar=i,
+                          exit_bar=i + 1, regime='RANGING')
+                for i, r in enumerate(pnl_rs)]
+
     def test_losing_streak_uses_min_kelly(self):
         """전패 구간에서 라이브는 최소 스케일을 쓴다 — 백테스트도 동일해야
         낙관 편향이 생기지 않는다."""
-        src = Path(bt.__file__).read_text()
-        assert 'if not wins_r:' in src
-        assert 'kelly_scale = SPOT_KELLY_SCALE_MIN' in src
+        losing = self._fake_trades([-1.0] * 40)
+        assert bt._bt_kelly_scale(losing) == pytest.approx(cfg.SPOT_KELLY_SCALE_MIN)
+
+    def test_thin_sample_does_not_scale(self):
+        """표본이 적으면 개입하지 않는다(중립 1.0)."""
+        few = self._fake_trades([1.0] * (cfg.SPOT_KELLY_MIN_TRADES - 1))
+        assert bt._bt_kelly_scale(few) == 1.0
+
+    def test_all_wins_stays_neutral(self):
+        """전승은 b를 계산할 수 없다 — 표본 편향일 뿐이므로 상향하지 않는다."""
+        assert bt._bt_kelly_scale(self._fake_trades([1.0] * 40)) == 1.0
+
+    def test_good_record_scales_above_floor(self):
+        good = self._fake_trades([2.0, 2.0, 2.0, -1.0] * 12)
+        assert bt._bt_kelly_scale(good) > cfg.SPOT_KELLY_SCALE_MIN
+
+    def test_kelly_never_exceeds_cap(self):
+        for rs in ([3.0] * 30 + [-1.0] * 2, [5.0, -0.1] * 25, [1.0, -1.0] * 25):
+            assert bt._bt_kelly_scale(self._fake_trades(rs)) <= cfg.SPOT_KELLY_SCALE_MAX
+
+    def test_health_returns_none_when_blocked(self):
+        """차단과 '스케일 0.0'을 같은 값으로 돌려주면 곱셈으로 흘러들어가
+        조용히 0 사이즈 주문이 된다 — 명시적으로 구분돼야 한다."""
+        bad = self._fake_trades([-1.0] * 40)
+        assert bt._bt_health_scale(bad) is None
+
+    def test_health_soft_scale_between_thresholds(self):
+        mixed = self._fake_trades([1.0] * 10 + [-1.0] * 12)
+        val = bt._bt_health_scale(mixed)
+        assert val in (None, cfg.SPOT_HEALTH_SOFT_SCALE, 1.0)
+
+    def test_health_neutral_on_thin_sample(self):
+        few = self._fake_trades([-1.0] * (cfg.SPOT_HEALTH_MIN_TRADES - 1))
+        assert bt._bt_health_scale(few) == 1.0
 
 
 # ══════════════════════════════════════════════════════════════

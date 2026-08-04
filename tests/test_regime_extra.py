@@ -11,7 +11,6 @@ MICRO_RANGING 분기, update_regime(거래소 모킹), is_crisis,
 
 import os
 import sys
-import time
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):

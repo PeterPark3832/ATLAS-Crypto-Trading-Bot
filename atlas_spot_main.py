@@ -43,7 +43,6 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -57,7 +56,7 @@ except ImportError:
 
 from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
-    SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
+    SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_KILL_SWITCH,
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
     SPOT_EDGE_MIN_TRADES,
@@ -68,12 +67,15 @@ from atlas_spot_config import (
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
     SPOT_KELLY_FRACTION, SPOT_EQUITY_PER_SLOT,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_SOFT_SCALE, SPOT_HEALTH_PF_HARD,
+    SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
+    SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
+    SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     SPOT_HEALTH_WINDOW_DAYS,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    STRATEGY_TIMEFRAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
     LIVE_STRATEGIES,
     WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
@@ -86,9 +88,9 @@ from atlas_spot_config import (
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
 from atlas_regime import (
-    get_cached_regime, update_regime, regime_loop,
-    REGIME_CRISIS, REGIME_RANGING, REGIME_WEAK_TREND,
-    REGIME_TRENDING_UP, REGIME_TRENDING_DOWN,
+    get_cached_regime, regime_loop,
+    REGIME_CRISIS, REGIME_WEAK_TREND,
+    REGIME_TRENDING_DOWN,
 )
 
 
@@ -605,16 +607,23 @@ def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
         try:
             ex = _get_ex()
 
+            # 정밀도 포맷 폴백. 거래소 메타데이터를 못 읽으면 수동 포맷으로
+            # 물러난다 — 기능이 사라지는 건 아니지만, 반복되면 주문이 거부될
+            # 수 있으므로 흔적은 남긴다(디버그 레벨: 주문마다 호출된다).
             def _p(v):
                 try:
                     return ex.price_to_precision(ccxt_sym, v)
-                except Exception:
+                except Exception as e:
+                    log.debug(f'[{strategy}] {symbol} 가격 정밀도 조회 실패, '
+                              f'수동 포맷 사용: {e}')
                     return f'{v:.8f}'.rstrip('0').rstrip('.')
 
             def _a(v):
                 try:
                     return ex.amount_to_precision(ccxt_sym, v)
-                except Exception:
+                except Exception as e:
+                    log.debug(f'[{strategy}] {symbol} 수량 정밀도 조회 실패, '
+                              f'수동 포맷 사용: {e}')
                     return f'{v:.8f}'.rstrip('0').rstrip('.')
 
             # Binance Spot OCO (POST /api/v3/orderList/oco) — SELL:
@@ -927,8 +936,12 @@ def _get_spot_equity() -> tuple[float, float]:
                 ticker = ex.fetch_ticker(sym)
                 price = float(ticker['last'] or 0)
                 total += qty * price
-            except Exception:
-                pass
+            except Exception as e:
+                # 이 자산이 총자산에서 **누락**된다. 총자산은 사이징·드로다운
+                # 래칫·일일 손실한도의 기준이므로, 과소평가되면 그만큼
+                # 작게 베팅하고 래칫이 잘못 발동한다. 조용히 넘기면 안 된다.
+                log.warning(f'[자산평가] {currency} 시세 조회 실패 — '
+                            f'총자산에서 제외됨(과소평가): {e}')
         return total, usdt
     except Exception as e:
         log.warning(f'[잔고] 조회 실패: {e}')
@@ -1059,6 +1072,57 @@ def _get_strategy_health_scale(strategy: str) -> float:
     if pf < SPOT_HEALTH_PF_SOFT:
         return SPOT_HEALTH_SOFT_SCALE
     return 1.0
+
+
+_learn_cache: dict = {'at': 0.0, 'result': {}, 'cfg': None}
+
+
+def _learn_config():
+    """config 상수 → LearnConfig. 매 호출 검증되므로 오설정은 여기서 걸린다."""
+    import atlas_learning as _L
+    return _L.LearnConfig(
+        half_life_days=SPOT_LEARN_HALF_LIFE_DAYS,
+        min_info=SPOT_LEARN_MIN_INFO,
+        unproven_scale=SPOT_LEARN_UNPROVEN_SCALE,
+        explore_floor=SPOT_LEARN_FLOOR,
+        max_scale=SPOT_LEARN_MAX_SCALE,
+        gain=SPOT_LEARN_GAIN,
+        cost_per_r=SPOT_LEARN_COST_PER_R,
+    )
+
+
+def _get_learn_result(force: bool = False) -> dict:
+    """학습 결과(캐시). 진입마다 DB 전체를 훑으면 전략 루프가 느려진다.
+
+    실패 시 **빈 dict**를 돌려준다 — 호출자는 그걸 '미검증'으로 해석해
+    중립 배분을 쓴다. 학습기가 죽었다고 봇이 멈추면 안 된다.
+    """
+    now = time.time()
+    if (not force and _learn_cache['result']
+            and now - _learn_cache['at'] < SPOT_LEARN_REFRESH_MIN * 60):
+        return _learn_cache['result']
+    try:
+        import atlas_learning as _L
+        obs = _L.load_observations(SPOT_DB_FILE)
+        res = _L.learn(obs, cfg=_learn_config())
+    except Exception as e:
+        log.warning(f'[학습] 계산 실패(중립 배분으로 진행): {e}')
+        res = {}
+    _learn_cache['at'] = now
+    _learn_cache['result'] = res
+    return res
+
+
+def _get_learn_scale(strategy: str, regime: str) -> float:
+    """(전략 × 레짐) 배분 배수. 학습기가 꺼져 있으면 1.0(무개입)."""
+    if not SPOT_LEARN_ENABLED:
+        return 1.0
+    try:
+        import atlas_learning as _L
+        return _L.scale_for(_get_learn_result(), strategy, regime, _learn_config())
+    except Exception as e:
+        log.warning(f'[학습] 배분 조회 실패(중립): {e}')
+        return 1.0
 
 
 def _get_spot_funding(sym: str) -> float:
@@ -1400,7 +1464,9 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         return False
 
     # 전략 건강도 자기교정: 실계좌 net PF 기준 감봉/차단
-    health = _get_strategy_health_scale(strategy)
+    # 학습기를 켜면 이 경로는 **비활성**이다 — 같은 일(성과 기반 감봉)을
+    # 레짐까지 나눠서 하므로, 둘 다 걸면 같은 근거로 두 번 깎는 셈이다.
+    health = 1.0 if SPOT_LEARN_ENABLED else _get_strategy_health_scale(strategy)
     if health <= 0:
         log.warning(f'[{strategy}] {symbol} 매수 차단: 실계좌 net PF < '
                     f'{SPOT_HEALTH_PF_HARD} (표본 {SPOT_HEALTH_MIN_TRADES}건+)')
@@ -1411,7 +1477,14 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         return False
     _state.pop(f'health_blocked_{strategy}', None)
 
-    kelly    = _get_kelly_scale(strategy)
+    # 학습기 ON이면 Kelly 자리를 학습 배분이 대신한다(곱하지 않는다).
+    # 스케일을 겹겹이 곱하면 주문이 거래소 최소액 아래로 내려가는 문제가
+    # 있었고(실효 리스크가 설정값의 9%까지 내려갔다), 학습기는 Kelly가
+    # 하려던 일을 레짐까지 나눠서 더 정교하게 한다.
+    if SPOT_LEARN_ENABLED:
+        kelly = _get_learn_scale(strategy, regime)
+    else:
+        kelly = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
     if regime == REGIME_WEAK_TREND:
         r_scale = WEAK_TREND_RISK_SCALE
@@ -1443,16 +1516,10 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         log.info(f'[{strategy}] {symbol} 매수 차단(비용): {_cost_why}')
         return False
 
-    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale * health
-    risk_usd   = equity * adj_risk
-    qty        = risk_usd / sl_dist
-    cost_usdt  = qty * entry_price
-
-    # 배분 한도
-    if cost_usdt > equity * SPOT_MAX_ALLOC_PCT:
-        cost_usdt = equity * SPOT_MAX_ALLOC_PCT
-        qty       = cost_usdt / entry_price
-        adj_risk  = (qty * sl_dist) / equity
+    adj_risk, qty, cost_usdt = _size_position(
+        equity, sl_dist, entry_price,
+        kelly=kelly, ratchet=ratchet, regime=r_scale,
+        funding=funding_scale, rs=rs_scale, health=health)
 
     # 잔고 확인
     ok, reason = _check_buying_power(cost_usdt)
@@ -1542,8 +1609,13 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
                 try:
                     emergency_sl = _place_stop_loss_order(strategy, symbol, ccxt_sym,
                                                           qty, sl_final)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # DB 저장이 이미 실패한 상태에서 비상 손절까지 실패하면
+                    # **아무 보호도 없는 포지션**이 남는다. 아래 알림은 DB
+                    # 실패만 알리므로, 이걸 삼키면 운영자는 손절이 걸린 줄 안다.
+                    log.error(f'[{strategy}] {symbol} 비상 손절 주문 실패 — '
+                              f'무보호 포지션: {e}')
+                    emergency_sl = ''
             _tg(f'🚨 [{strategy}] {symbol} **포지션 DB 저장 실패** — 봇이 추적하지 못하는 '
                 f'보유분이 생겼습니다. 수동 확인 필요.\n'
                 f'   수량 {qty:.6f} @ {fill_price:,.4f} / SL {sl_final:,.4f}\n'
@@ -1575,7 +1647,6 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     entry_price = float(pos['entry_price'])
     qty         = float(pos['qty_tokens'])
     cost_usdt   = float(pos['cost_usdt'])
-    risk_pct    = float(pos['risk_pct'])
     sl          = float(pos['sl'])
     # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로 sl이 올라간
     # 뒤 그 값을 분모로 쓰면 R이 부풀고, 그 pnl_r이 Kelly·건강도·avg_r과
@@ -1879,6 +1950,169 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
             f'   거래소 잔고/미체결 주문을 확인해 주세요.')
 
 
+def _s5_safety_block(symbol: str) -> Optional[str]:
+    """S5 전용 안전 필터. 차단 사유를 반환하고, 통과하면 None.
+
+    (전문가 회의 결론 2026-06-04)
+      [1] SL 쿨다운 — 같은 종목에서 손절 직후 재진입하면 같은 하락에
+          연속으로 맞는다. 평균회귀 전략이라 '더 싸졌으니 또 산다'가
+          되기 쉬운 구조다.
+      [2] BTC 상관 그룹 한도 — 상관이 높은 종목에 동시 진입하면 분산이
+          아니라 같은 베팅을 여러 번 하는 것이다.
+    """
+    with _db_lock, _db_conn() as c:
+        row = c.execute(
+            "SELECT exit_ts FROM spot_trades "
+            "WHERE strategy='S5' AND symbol=? AND reason='SL' "
+            "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
+        ).fetchone()
+    if row:
+        try:
+            hours = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(row[0])).total_seconds() / 3600
+        except (ValueError, TypeError) as e:
+            log.warning(f'[S5] {symbol} SL 시각 파싱 실패 — 쿨다운 미적용: {e}')
+            hours = None
+        if hours is not None:
+            limit_h = S5_SL_COOLDOWN_BARS * 24
+            if hours < limit_h:
+                log.info(f'[S5] {symbol} SL쿨다운: {hours:.0f}h 전 SL ({limit_h:.0f}h 대기)')
+                return 'sl_cooldown'
+
+    if symbol in S5_BTC_CORR_SYMBOLS:
+        syms = tuple(S5_BTC_CORR_SYMBOLS)
+        with _db_lock, _db_conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
+                f"AND symbol IN ({','.join('?' * len(syms))})", syms
+            ).fetchone()[0]
+        if n >= S5_CORR_MAX_POS:
+            log.info(f'[S5] {symbol} BTC상관 한도: {n}/{S5_CORR_MAX_POS}개 진입중')
+            return 'btc_corr_limit'
+    return None
+
+
+def _rs_gate_scale(strategy_id: str, symbol: str) -> Optional[float]:
+    """모멘텀 RS Gate + 주도주 부스트. 차단이면 **None**.
+
+    차단(None)과 감봉(작은 배수)을 타입으로 구분한다 — 0.0으로 표현하면
+    곱셈에 흘러들어가 '수량 0 주문'이 된다.
+
+    백테스트 `_bt_rs_gate`와 같은 규칙이다. 두 함수가 갈라지면 WFO가
+    검증한 임계값이 실계좌에서 다르게 동작한다.
+    """
+    if strategy_id not in MOMENTUM_RS_GATE_STRATS:
+        return 1.0
+    rank_pct = _get_momentum_rank_pct(symbol)
+    if rank_pct > MOMENTUM_RS_GATE_PCT:
+        log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
+        return None
+    return MOMENTUM_TOP_RISK_MULT if rank_pct <= MOMENTUM_TOP_TIER_PCT else 1.0
+
+
+def _funding_scale(strategy_id: str, symbol: str) -> Optional[float]:
+    """펀딩비 기반 리스크 배수. 롱 과밀이면 **None**(진입 차단).
+
+    ⚠️ 백테스트는 이 필터를 모델링하지 않는다 — 과거 펀딩비 데이터를
+    받지 않기 때문이다. 즉 백테스트는 라이브가 실제로는 걸렀을 구간까지
+    거래한 것으로 계산한다(낙관 편향).
+    """
+    if strategy_id not in FUNDING_APPLY_STRATS:
+        return 1.0
+    funding = _get_spot_funding(symbol)
+    if funding >= FUNDING_LONG_BLOCK:
+        log.info(f'[펀딩 차단] {symbol} funding={funding*100:.3f}%/8h — 롱 과밀')
+        return None
+    if funding <= FUNDING_SHORT_BOOST:
+        return 1.20      # 숏 스퀴즈 기대 구간 +20%
+    return 1.0
+
+
+def _size_position(equity: float, sl_dist: float, entry_price: float, *,
+                   kelly: float = 1.0, ratchet: float = 1.0,
+                   regime: float = 1.0, funding: float = 1.0,
+                   rs: float = 1.0, health: float = 1.0) -> tuple:
+    """(실효 리스크비율, 수량, 주문금액)을 계산한다. **부수효과 없음.**
+
+    리스크는 스케일들의 **곱**이다. 이 저장소에서 가장 비싼 버그가 여기서
+    나왔다 — 1보다 작은 값이 겹쳐 실효 리스크가 설정값의 9%까지 내려갔고,
+    주문금액이 거래소 최소치($5) 아래로 떨어져 하락장 전략이 통째로
+    체결되지 않았다(dc7fb24). 그래서 각 스케일을 **키워드 인자로** 받아
+    호출부에서 무엇이 곱해지는지 한눈에 보이게 한다.
+
+    배분 상한에 걸리면 수량을 줄이고 **실효 리스크를 역산**한다. 상한 때문에
+    실제로 건 위험이 줄었는데 adj_risk를 그대로 두면, 그 값이 DB에 저장돼
+    Kelly·건강도·학습기 통계를 전부 부풀린다.
+    """
+    if equity <= 0 or sl_dist <= 0 or entry_price <= 0:
+        return 0.0, 0.0, 0.0
+    adj_risk  = (SPOT_BASE_RISK_PCT * kelly * ratchet * regime
+                 * funding * rs * health)
+    qty       = (equity * adj_risk) / sl_dist
+    cost_usdt = qty * entry_price
+    cap = equity * SPOT_MAX_ALLOC_PCT
+    if cost_usdt > cap:
+        cost_usdt = cap
+        qty       = cost_usdt / entry_price
+        adj_risk  = (qty * sl_dist) / equity
+    return adj_risk, qty, cost_usdt
+
+
+def _live_exit_decision(strategy: str, symbol: str, df, i: int, price: float,
+                        entry: float, sl: float, tp: float,
+                        bars_held: int, max_hold: int) -> Optional[str]:
+    """지금 청산해야 하는가. Returns: 사유 문자열 or None. **부수효과 없음.**
+
+    백테스트의 `_bt_exit_decision`과 **대칭으로** 뽑아 둔 함수다. 두 함수를
+    나란히 두면 라이브에만 있는 규칙이 눈에 보인다 — 실제로 이 분리 과정에서
+    아래 두 가지 격차가 드러났다.
+
+    ⚠️ **백테스트가 모델링하지 않는 라이브 전용 청산 2건**
+
+      1. `BB_MID` (S4) — 라이브는 가격이 볼린저 중앙선에 닿으면 청산한다.
+         백테스트의 `EXIT_CHECK_FUNCS`에는 S4가 **없어서**(S2/S3/S6/S7만)
+         SL·TP·TIME으로만 청산한다. 즉 백테스트의 S4는 라이브보다 오래
+         들고 간다 — 평균회귀 전략이라 되돌림을 더 먹거나 더 토해낸다.
+
+      2. S5의 실시간 TP 갱신 — 라이브는 매 폴링마다 TP를 현재
+         `bb_upper`로 옮긴다(이 함수 호출 **전에** 수행). 백테스트는
+         진입 시점의 정적 TP를 끝까지 쓴다.
+
+    둘 다 성과 차이를 만들지만, 고치려면 백테스트 청산 규칙을 바꿔야 하고
+    그건 과거 검증 결과 전체를 무효화한다. 지금은 **격차를 명시**해 두고,
+    WFO를 다시 돌릴 때 함께 처리하는 편이 안전하다.
+    """
+    if price <= sl:
+        return 'SL'
+    if tp > 0 and price >= tp:
+        return 'TP'
+
+    exit_fn = EXIT_CHECK_FUNCS.get(strategy)
+    if exit_fn is not None and df is not None:
+        try:
+            should_exit = (exit_fn(df, i, entry) if strategy == 'S6'
+                           else exit_fn(df, i))
+            if should_exit:
+                return 'CROSS'
+        except Exception as e:
+            # 청산 함수가 죽으면 그 봉의 청산 신호가 **사라진다**. SL/TP는
+            # 별도로 살아 있으므로 즉시 위험하진 않지만, 반복되면 전략이
+            # 의도한 청산 규칙 없이 도는 셈이다.
+            log.warning(f'[{strategy}] {symbol} 청산 조건 평가 실패 '
+                        f'(이번 봉 CROSS 청산 건너뜀): {e}')
+
+    if max_hold > 0 and bars_held >= max_hold:
+        return 'TIME'
+
+    # S4: BB 중앙선 도달 청산 (라이브 전용 — 위 경고 참조)
+    if strategy == 'S4' and df is not None and 'bb_mid' in df.columns:
+        bb_mid = float(df.iloc[i]['bb_mid']) if not pd.isna(df.iloc[i]['bb_mid']) else 0
+        if bb_mid > 0 and price >= bb_mid:
+            return 'BB_MID'
+
+    return None
+
+
 def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> None:
     """현재 포지션 SL/TP/청산 체크."""
     pos = _load_position(strategy, symbol)
@@ -1914,7 +2148,9 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
 
     sl        = float(pos['sl'])
     tp        = float(pos['tp'])
-    exit_type = pos.get('exit_type', 'sl_tp')
+    # exit_type은 **기록용 메타데이터**다. 실제 청산 분기는
+    # EXIT_CHECK_FUNCS(전략별 청산 함수)가 담당하므로 여기서 읽지 않는다.
+    # (읽고 버리면 이 값이 동작을 제어한다고 오해하게 된다)
     max_hold  = int(pos.get('max_hold_bars', 0))
     # bars_held: 실제 보유시간 기반으로 계산 후 DB에 라이트백
     _tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
@@ -1927,8 +2163,10 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
             with _db_lock, _db_conn() as conn:
                 conn.execute('UPDATE spot_positions SET bars_held=? WHERE strategy=? AND symbol=?',
                              (bars_held, strategy, symbol))
-    except Exception:
+    except Exception as e:
+        # 보유 봉수가 어긋나면 시간 기반 청산(max_hold) 시점이 밀린다.
         bars_held = int(pos.get('bars_held', 0))
+        log.debug(f'[{strategy}] {symbol} 보유봉수 계산 실패, DB값 사용: {e}')
     peak      = float(pos.get('peak_price', entry))
 
     # S5: BB_upper를 실시간 TP로 업데이트 (DB도 갱신하여 대시보드 정확도 향상)
@@ -1939,47 +2177,18 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
                 _update_position_tp(strategy, symbol, live_bb_upper)
             tp = live_bb_upper
 
-    # SL 체크
-    if price <= sl:
+    reason = _live_exit_decision(strategy, symbol, df, i, price,
+                                 entry, sl, tp, bars_held, max_hold)
+    if reason == 'SL':
         # NOTIONAL 사전 검사: 포지션 가치 < $5이면 Binance가 주문 거부
         # → 매도 시도하지 않고 DB 유지, 가격 회복 시 자동 매도
         _pos_val = price * float(pos.get('qty_tokens', 0))
         if _pos_val < SPOT_MIN_ORDER_USDT:
             log.info(f'[{strategy}] {symbol} SL 감지 → NOTIONAL 미달(${_pos_val:.2f}) — 가격 회복 대기')
             return  # 포지션 DB 유지, 다음 폴링에서 재검사
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'SL')
+    if reason:
+        _spot_sell(strategy, symbol, ccxt_sym, pos, price, reason)
         return
-
-    # TP 체크
-    if tp > 0 and price >= tp:
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'TP')
-        return
-
-    # 추가 청산 조건 (크로스 등)
-    exit_fn = EXIT_CHECK_FUNCS.get(strategy)
-    if exit_fn is not None and df is not None:
-        try:
-            if strategy == 'S6':
-                should_exit = exit_fn(df, i, entry)
-            else:
-                should_exit = exit_fn(df, i)
-            if should_exit:
-                _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'CROSS')
-                return
-        except Exception:
-            pass
-
-    # 시간 기반 청산
-    if max_hold > 0 and bars_held >= max_hold:
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'TIME')
-        return
-
-    # S4: BB_mid 도달 청산
-    if strategy == 'S4' and df is not None and 'bb_mid' in df.columns:
-        bb_mid = float(df.iloc[i]['bb_mid']) if not pd.isna(df.iloc[i]['bb_mid']) else 0
-        if bb_mid > 0 and price >= bb_mid:
-            _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'BB_MID')
-            return
 
     # Peak 갱신 + 추적 손절
     # (기존에는 peak만 기록하고 sl은 그대로 다시 써서 효과가 0이었다)
@@ -2021,8 +2230,11 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
         try:
             _pass_syms += [p['symbol'].replace('USDT', '/USDT')
                            for p in _load_all_positions()]
-        except Exception:
-            pass
+        except Exception as e:
+            # 보유 심볼이 프리페치에서 빠지면 그 포지션의 SL/TP 판정이
+            # 시세 없이 돌아 이번 사이클을 건너뛴다.
+            log.warning(f'[시세] 보유 심볼 목록 조회 실패 — 일부 포지션 '
+                        f'판정이 지연될 수 있음: {e}')
         _prefetch_prices(_pass_syms)
 
         # 유니버스에서 빠진 심볼도 '보유 중이면' 계속 순회한다.
@@ -2035,8 +2247,11 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
         try:
             _held = [p['symbol'] for p in _load_all_positions()
                      if p['strategy'] in strategies]
-        except Exception:
-            pass
+        except Exception as e:
+            # 보유 목록이 비면 관리 대상에서 빠져 **이번 사이클 청산 판정이
+            # 통째로 누락**된다. 유니버스 밖으로 나간 심볼이 특히 위험하다.
+            log.error(f'[관리] 보유 포지션 목록 조회 실패 — 이번 사이클 '
+                      f'청산 판정 누락 위험: {e}')
         _uni_set  = set(universe)
         scan_syms = list(universe) + [s for s in dict.fromkeys(_held)
                                       if s not in _uni_set]
@@ -2140,60 +2355,18 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     if sig['signal'] != 1:
                         continue
 
-                    # ── S5 전용 안전 필터 (전문가 회의 결론 2026-06-04) ──────
-                    if strategy_id == 'S5':
-                        # [1] SL 쿨다운: 같은 종목 SL 후 N 바 재진입 금지
-                        with _db_lock, _db_conn() as _c:
-                            _sl_row = _c.execute(
-                                "SELECT exit_ts FROM spot_trades "
-                                "WHERE strategy='S5' AND symbol=? AND reason='SL' "
-                                "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
-                            ).fetchone()
-                        if _sl_row:
-                            _sl_h = (datetime.now(timezone.utc) -
-                                     datetime.fromisoformat(_sl_row[0])).total_seconds() / 3600
-                            _limit_h = S5_SL_COOLDOWN_BARS * 24
-                            if _sl_h < _limit_h:
-                                log.info(f'[S5] {symbol} SL쿨다운: {_sl_h:.0f}h 전 SL ({_limit_h:.0f}h 대기)')
-                                continue
+                    if strategy_id == 'S5' and _s5_safety_block(symbol):
+                        continue
 
-                        # [2] BTC 상관 그룹 동시 포지션 한도
-                        if symbol in S5_BTC_CORR_SYMBOLS:
-                            _syms = tuple(S5_BTC_CORR_SYMBOLS)
-                            with _db_lock, _db_conn() as _c:
-                                _corr_n = _c.execute(
-                                    "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
-                                    f"AND symbol IN ({','.join('?'*len(_syms))})", _syms
-                                ).fetchone()[0]
-                            if _corr_n >= S5_CORR_MAX_POS:
-                                log.info(f'[S5] {symbol} BTC상관 한도: {_corr_n}/{S5_CORR_MAX_POS}개 진입중')
-                                continue
-                    # ────────────────────────────────────────────────────────
-
-                    # RS Gate: 모멘텀 하위권 심볼 진입 차단
-                    # (임계값이 인라인 `*3`이라 사실상 무차단이었다 —
-                    #  config의 MOMENTUM_RS_GATE_PCT 주석 참조)
-                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
-                        rank_pct = _get_momentum_rank_pct(symbol)
-                        if rank_pct > MOMENTUM_RS_GATE_PCT:
-                            log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
-                            continue
+                    # 모멘텀 RS Gate + 주도주 부스트
+                    rs_scale = _rs_gate_scale(strategy_id, symbol)
+                    if rs_scale is None:
+                        continue
 
                     # 펀딩비 필터: 추세추종 전략 롱 과밀 구간 차단
-                    funding_scale = 1.0
-                    if strategy_id in FUNDING_APPLY_STRATS:
-                        funding = _get_spot_funding(symbol)
-                        if funding >= FUNDING_LONG_BLOCK:
-                            log.info(f'[펀딩 차단] {symbol} funding={funding*100:.3f}%/8h — 롱 과밀')
-                            continue
-                        if funding <= FUNDING_SHORT_BOOST:
-                            funding_scale = 1.20   # 숏 스퀴즈 기대 구간 +20%
-
-                    # 모멘텀 주도주 티어 리스크 부스트
-                    rs_scale = 1.0
-                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
-                        if _get_momentum_rank_pct(symbol) <= MOMENTUM_TOP_TIER_PCT:
-                            rs_scale = MOMENTUM_TOP_RISK_MULT
+                    funding_scale = _funding_scale(strategy_id, symbol)
+                    if funding_scale is None:
+                        continue
 
                     # sig에 스케일 반영 (risk는 _spot_buy에서 SPOT_BASE_RISK_PCT 기반이므로 플래그 전달)
                     sig['_funding_scale'] = funding_scale
@@ -2263,6 +2436,8 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
             _state['day_pnl']      = 0.0
             _state['day_start_eq'] = equity
             _state['daily_loss_alerted'] = False
+        # 리셋 전 값은 그날의 최종 손익이다 — 버리면 사후에 재구성할 수 없다.
+        log.info(f'[일일 리셋] 전일 손익 ${day_pnl:+,.2f} → 새 기준 자본 ${equity:,.2f}')
         _persist_risk_state()   # 리셋 직후 재시작해도 새 기준점이 유지되도록
 
         # 일간 브리핑

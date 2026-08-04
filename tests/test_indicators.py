@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from atlas_indicators import (
     _calc_rsi, _calc_atr, _ohlcv_to_df,

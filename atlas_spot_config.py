@@ -166,6 +166,29 @@ SPOT_HEALTH_PF_SOFT    = 1.0     # 실계좌 net PF < 1.0 → 해당 전략 리�
 SPOT_HEALTH_SOFT_SCALE = 0.5
 SPOT_HEALTH_PF_HARD    = 0.7     # 실계좌 net PF < 0.7 → 해당 전략 신규 진입 차단
 
+# ── 자기주도 학습 (atlas_learning) ────────────────────────────────
+# 켜면 Kelly·건강도를 **대체**한다(곱하지 않는다). 스케일을 곱할수록
+# 주문이 작아져 거래소 최소액 아래로 내려가는 문제가 있었고, 학습기는
+# Kelly가 하려던 일(성과 기반 배분)을 레짐까지 나눠서 더 정교하게 한다.
+#
+# ⚠️ 기본 OFF. 켜기 전에 반드시 확인할 것:
+#    python capital_plan.py --equity <자산>   # 최소주문 문턱
+#    python atlas_learning.py                 # 현재 이력으로 어떤 배분이 나오는지
+#    이력이 없으면 전 조합이 '미검증'이라 배분이 SPOT_LEARN_UNPROVEN_SCALE로
+#    시작한다. 소액 계좌에서는 이것만으로 주문이 $5 미만이 될 수 있다.
+SPOT_LEARN_ENABLED       = False
+SPOT_LEARN_HALF_LIFE_DAYS = 45.0  # 증거 반감기 — 시장 비정상성 대응
+SPOT_LEARN_MIN_INFO      = 8.0    # 이보다 정보량이 적으면 개입하지 않는다
+SPOT_LEARN_UNPROVEN_SCALE = 0.25  # 미검증 조합 배분(증명 전엔 작게)
+SPOT_LEARN_FLOOR         = 0.25   # 배분 하한 — 흡수상태 방지
+SPOT_LEARN_MAX_SCALE     = 1.50   # 배분 상한
+SPOT_LEARN_GAIN          = 0.50   # 팔 간 차이 1σ당 배분 변화폭
+SPOT_LEARN_COST_PER_R    = 0.04   # 수수료가 1R에서 차지하는 비중.
+                                  # 슬리피지는 넣지 말 것 — pnl_r이 실제
+                                  # 체결가 기반이라 이미 반영돼 있다
+SPOT_LEARN_REFRESH_MIN   = 30     # 학습 결과 재계산 주기(분). 진입마다
+                                  # DB 전체를 훑으면 루프가 느려진다
+
 # Kelly / Ratchet
 SPOT_KELLY_MIN_TRADES  = 10      # 최소 거래수 (20→10: Kelly 조기 활성화)
 SPOT_KELLY_SCALE_MIN   = 0.15

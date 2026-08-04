@@ -29,7 +29,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +41,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (
-    BT_SPOT_FEE, BT_SPOT_SLIPPAGE, BT_INITIAL_EQ,
+    BT_SPOT_FEE, BT_INITIAL_EQ,
     BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
     SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
@@ -53,6 +53,9 @@ from atlas_spot_config import (
     SPOT_TRAIL_ENABLED,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_PF_HARD,
     SPOT_HEALTH_SOFT_SCALE,
+    SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
+    SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
+    SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
@@ -66,7 +69,7 @@ from atlas_spot_strategies import (
 from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
-from atlas_regime import classify_regime, REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR
+from atlas_regime import classify_regime, REGIME_BTC_LOOKBACK
 
 
 # ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
@@ -150,13 +153,20 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
         df4 = _ohlcv_to_df(btc_4h_ohlcv)
         dates4 = df4['ts'].dt.date.astype(str).values
         for j in range(50, len(df4)):
-            adx4h_by_date[dates4[j]] = calc_adx(btc_4h_ohlcv[max(0, j - 50): j + 1], 14)
+            # 윈도우 길이는 라이브와 **같은 상수**를 써야 한다 — 아래 1D 주석 참조
+            _w4 = btc_4h_ohlcv[max(0, j - REGIME_BTC_LOOKBACK + 1): j + 1]
+            adx4h_by_date[dates4[j]] = calc_adx(_w4, 14)
 
     regime_map: dict = {}
     adx_hist: list = []
     for i in range(50, len(df)):
         date_key = str(df['ts'].iloc[i].date())
-        window   = btc_1d_ohlcv[max(0, i - 50): i + 1]
+        # ⚠️ 윈도우 **길이**가 라이브와 같아야 한다.
+        # Wilder ADX는 재귀 평활이라 워밍업 길이가 값을 바꾼다. 예전에는
+        # 여기가 51봉(i-50:i+1), 라이브가 50봉(`ohlcv[-LOOKBACK:]`)이라
+        # 같은 날짜의 ADX가 달랐다(36.15 vs 35.72). 한 봉 차이가 레짐
+        # 경계에서 분류를 뒤집고, 그러면 어떤 전략이 거래할지가 달라진다.
+        window   = btc_1d_ohlcv[max(0, i - REGIME_BTC_LOOKBACK + 1): i + 1]
         adx      = calc_adx(window, 14)
         btc_px   = float(close.iloc[i])
         ema_val  = float(ema200.iloc[i])
@@ -169,6 +179,163 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
         regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct,
                                                adx_4h, adx_slope)
     return regime_map
+
+
+def _bt_exit_decision(position: dict, strategy_id: str, df, i: int,
+                      exit_fn, slip: float,
+                      cur_high: float, cur_low: float, cur_close: float,
+                      bars_held: int, max_hold: int) -> tuple:
+    """이 봉에서 청산되는가. Returns: (사유 or None, 청산가).
+
+    **판정 순서가 곧 우선순위다** — SL이 TP보다 먼저 온다. 한 봉 안에서
+    고가와 저가를 모두 건드렸을 때 어느 쪽이 먼저 체결됐는지는 일봉·4시간봉
+    데이터로 알 수 없으므로, 불리한 쪽(SL)을 택해 성과를 과대평가하지 않는다.
+
+    추적 손절 갱신은 **여기서 하지 않는다.** 이 봉의 판정이 끝난 뒤에 해야
+    같은 봉 고가로 올린 손절이 같은 봉 저가에 걸리는 선행편향이 없다.
+    """
+    # SL — bar 저가가 손절선을 이탈
+    if cur_low <= position['sl']:
+        return 'SL', min(position['sl'], cur_close) * (1 - slip)
+
+    # TP — bar 고가가 목표가 도달
+    if position['tp'] > 0 and cur_high >= position['tp']:
+        return 'TP', position['tp'] * (1 - slip)
+
+    # 전략별 추가 청산 조건(크로스 등)
+    if exit_fn is not None:
+        try:
+            should_exit = (exit_fn(df, i, position['entry_price'])
+                           if strategy_id == 'S6' else exit_fn(df, i))
+            if should_exit:
+                return 'CROSS', cur_close * (1 - slip)
+        except Exception:
+            # 지표 결측 등으로 청산 함수가 실패해도 봉 루프를 멈추면 안 된다.
+            # SL/TP는 이미 위에서 확인했으므로 보호는 유지된다.
+            pass
+
+    # 시간 기반 청산
+    if max_hold > 0 and bars_held >= max_hold:
+        return 'TIME', cur_close * (1 - slip)
+
+    return None, 0.0
+
+
+def _bt_rs_gate(rs_applies: bool, rank_map, rank_keys: list,
+                symbol: str, date_key: str) -> tuple:
+    """RS Gate 판정. Returns: (리스크 배수 or **None(차단)**, 진단키 or None).
+
+    차단을 `None`으로 돌려주는 이유: 배수 0.0으로 표현하면 호출부에서
+    곱셈에 흘러들어가 '진입은 했는데 수량이 0'인 주문이 된다. 차단과
+    감봉은 다른 사건이므로 타입으로 구분한다.
+
+    라이브 `_get_momentum_rank_pct`와 같은 기본값(0.5)을 쓴다 — 순위를
+    모를 때 하위권으로 취급하면 신규 심볼이 영구 차단된다.
+    """
+    if not rs_applies:
+        return 1.0, None
+    rank_pct = _rank_pct_asof(rank_map, rank_keys, symbol, date_key)
+    if rank_pct is None:
+        rank_pct = 0.5
+    if rank_pct > MOMENTUM_RS_GATE_PCT:
+        return None, 'rs_gate_block'
+    if rank_pct <= MOMENTUM_TOP_TIER_PCT:
+        return MOMENTUM_TOP_RISK_MULT, 'rs_top_tier'
+    return 1.0, None
+
+
+def _bt_entry_filters(sl_dist: float, entry_price: float,
+                      slip: float) -> Optional[str]:
+    """라이브 진입 필터 패리티. 차단되면 진단키를, 통과하면 None을 낸다.
+
+    라이브에만 있고 백테스트에 없으면 성과가 구조적으로 과대평가된다.
+
+    ※ 남아있는 한계 — **포트폴리오 제약은 모델링하지 못한다.**
+      `backtest_strategy`는 (전략 × 심볼) 단위로 독립 실행되므로 동시
+      포지션 수 상한(SPOT_MAX_POSITIONS), 슬롯당 최소 자본
+      (SPOT_EQUITY_PER_SLOT), USDT 예비금(SPOT_RESERVE_PCT), 전략 간
+      자본 경합을 반영할 수 없다. 즉 백테스트는 여전히 라이브보다
+      **낙관적**이며, 특히 신호가 몰리는 구간에서 라이브는 일부 진입을
+      포기한다. 결과를 상한선으로 읽을 것.
+    """
+    sl_pct = sl_dist / entry_price
+    if sl_pct > SPOT_MAX_SL_PCT:
+        return 'sl_too_wide'
+    # 비용 대비 엣지: 왕복비용이 1R을 얼마나 잠식하는지
+    # (라이브 `_cost_edge_ok`와 동일한 부등식. 스프레드는 백테스트에
+    #  호가 데이터가 없어 슬리피지 모델로 근사한다)
+    cost_rate = BT_SPOT_FEE * 2 + slip * 2
+    if cost_rate / sl_pct > SPOT_MAX_COST_PER_R:
+        return 'cost_exceeds_edge'
+    return None
+
+
+def _bt_kelly_scale(trades: list) -> float:
+    """Kelly 스케일 — 라이브 `_get_kelly_scale`과 같은 규칙.
+
+    `backtest_strategy`에서 뽑아낸 순수함수다. 인라인이던 시절에는 이 로직만
+    따로 시험할 수 없어서, 라이브와 어긋나도 알아채기 어려웠다.
+    """
+    if len(trades) < SPOT_KELLY_MIN_TRADES:
+        return 1.0
+    recent   = trades[-200:]
+    wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
+    losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
+    if not wins_r:
+        # 전패 구간 — 라이브와 동일하게 최소 스케일로. (1.0을 유지하면
+        # 연패 중에도 정상 사이즈로 베팅하는 낙관 편향이 생긴다)
+        return SPOT_KELLY_SCALE_MIN
+    if not losses_r:
+        return 1.0
+    wr = len(wins_r) / len(recent)
+    b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
+    # half-Kelly (라이브와 패리티 유지)
+    kelly_raw = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
+    # 조건부 상한: WR·PF가 모두 좋을 때만 KELLY_SCALE_MAX까지 허용
+    gross_w = sum(abs(r) for r in wins_r)
+    gross_l = sum(abs(r) for r in losses_r)
+    pf = gross_w / gross_l if gross_l > 0 else 0.0
+    k_max = (SPOT_KELLY_SCALE_MAX
+             if (wr >= SPOT_KELLY_WR_THRESH and pf >= SPOT_KELLY_PF_THRESH)
+             else 1.50)
+    return max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
+
+
+def _bt_health_scale(trades: list) -> Optional[float]:
+    """전략 건강도 스케일 — 라이브 `_get_strategy_health_scale` 패리티.
+
+    Returns:
+        스케일(float), 또는 **차단이면 None**. 차단과 '스케일 0.0'을 같은
+        값으로 돌려주면 호출부에서 곱셈으로 흘러들어가 조용히 0 사이즈
+        주문이 된다 — 명시적으로 구분한다.
+    """
+    if len(trades) < SPOT_HEALTH_MIN_TRADES:
+        return 1.0
+    recent = trades[-200:]
+    # 손익 기여도 = R배수 × 그 거래의 리스크 비중(자본 대비).
+    # 라이브는 USD net PF를 쓰지만 백테스트에는 거래별 USD 손익이 없으므로
+    # 비율로 근사한다 — 판정 자체의 패리티가 목적이다.
+    nets = [t.pnl_r * t.risk_pct for t in recent]
+    gw = sum(n for n in nets if n > 0)
+    gl = abs(sum(n for n in nets if n < 0))
+    pf = gw / gl if gl > 0 else float('inf')
+    if pf < SPOT_HEALTH_PF_HARD:
+        return None
+    return SPOT_HEALTH_SOFT_SCALE if pf < SPOT_HEALTH_PF_SOFT else 1.0
+
+
+def _bt_learn_config():
+    """config 상수 → LearnConfig (라이브 `_learn_config`와 동일 값)."""
+    import atlas_learning as _L
+    return _L.LearnConfig(
+        half_life_days=SPOT_LEARN_HALF_LIFE_DAYS,
+        min_info=SPOT_LEARN_MIN_INFO,
+        unproven_scale=SPOT_LEARN_UNPROVEN_SCALE,
+        explore_floor=SPOT_LEARN_FLOOR,
+        max_scale=SPOT_LEARN_MAX_SCALE,
+        gain=SPOT_LEARN_GAIN,
+        cost_per_r=SPOT_LEARN_COST_PER_R,
+    )
 
 
 def build_momentum_rank_map(ohlcv_by_symbol: dict,
@@ -333,6 +500,73 @@ def _since_ms(date_str: str) -> int:
 #  성과 지표
 # ══════════════════════════════════════════════════════════════
 
+def _equity_curve(trades: list, initial_equity: float) -> tuple:
+    """거래 순서대로 자본을 굴려 (자본곡선, 최종자본, 최대낙폭)을 낸다.
+
+    복리다 — 각 거래는 **그 시점 자본**의 risk_pct만큼 건다. 그래서 같은
+    거래 집합이라도 순서가 다르면 최종 자본이 달라진다. 이 함수가 순서를
+    보존하는 이유이고, 지표를 거래 목록 평균으로 대신 계산하면 안 되는
+    이유이기도 하다.
+
+    자본에 하한(0.01)을 두는 것은 음수 자본에서 수익률이 발산해 Sharpe가
+    무의미해지는 것을 막기 위해서다.
+    """
+    equity = initial_equity
+    eq_curve = [equity]
+    peak_eq = equity
+    max_dd = 0.0
+    for t in trades:
+        equity += equity * t.risk_pct * t.pnl_r
+        equity = max(equity, 0.01)
+        eq_curve.append(equity)
+        if equity > peak_eq:
+            peak_eq = equity
+        else:
+            max_dd = max(max_dd, (peak_eq - equity) / peak_eq)
+    return eq_curve, equity, max_dd
+
+
+def _cagr_pct(equity: float, initial_equity: float,
+              start_date: str, end_date: str) -> float:
+    """연평균 성장률(%). 날짜가 없거나 파싱 불가면 0.0.
+
+    기간 하한 0.1년: 짧은 구간에서 지수가 폭발해 CAGR이 수천 %로 나오는
+    것을 막는다. 그런 값은 Calmar까지 오염시킨다.
+    """
+    if not start_date or not end_date or equity <= 0:
+        return 0.0
+    try:
+        dt_s = datetime.strptime(start_date, '%Y-%m-%d')
+        dt_e = datetime.strptime(end_date, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return 0.0
+    years = max((dt_e - dt_s).days / 365.25, 0.1)
+    return ((equity / initial_equity) ** (1 / years) - 1) * 100
+
+
+def _risk_ratios(eq_curve: list) -> tuple:
+    """(Sharpe, Sortino) — 자본곡선 수익률 기준, 252일 연율화.
+
+    표본이 2개 미만이거나 표준편차가 0이면 0.0을 낸다. 0으로 나눠 inf가
+    나오면 WFO 합격 판정이 통과해 버린다 — '변동이 없어서' 나온 무한대를
+    '위험 없는 수익'으로 읽는 셈이다.
+    """
+    if len(eq_curve) < 2:
+        return 0.0, 0.0
+    rets = np.array([
+        (eq_curve[i] - eq_curve[i - 1]) / eq_curve[i - 1]
+        for i in range(1, len(eq_curve))
+    ])
+    sharpe = 0.0
+    if len(rets) > 1 and rets.std() > 0:
+        sharpe = float(rets.mean() / rets.std() * math.sqrt(252))
+    sortino = 0.0
+    down = rets[rets < 0]
+    if len(down) > 1 and down.std() > 0:
+        sortino = float(rets.mean() / down.std() * math.sqrt(252))
+    return sharpe, sortino
+
+
 def calc_spot_metrics(trades: list, initial_equity: float = BT_INITIAL_EQ,
                       start_date: str = '', end_date: str = '') -> dict:
     """스팟 거래 목록으로 종합 성과 지표 계산."""
@@ -349,63 +583,10 @@ def calc_spot_metrics(trades: list, initial_equity: float = BT_INITIAL_EQ,
     pf_denom = abs(sum(losses))
     pf       = abs(sum(wins)) / pf_denom if pf_denom > 0 else 999.0
 
-    # 자본 곡선
-    equity     = initial_equity
-    eq_curve   = [equity]
-    peak_eq    = equity
-    max_dd     = 0.0
-    drawdown_durations = []
-    dd_start   = None
-
-    for t in trades:
-        equity += equity * t.risk_pct * t.pnl_r
-        equity = max(equity, 0.01)
-        eq_curve.append(equity)
-        if equity > peak_eq:
-            if dd_start is not None:
-                drawdown_durations.append(len(eq_curve) - dd_start)
-            dd_start = None
-            peak_eq = equity
-        else:
-            if dd_start is None:
-                dd_start = len(eq_curve)
-            dd = (peak_eq - equity) / peak_eq
-            max_dd = max(max_dd, dd)
-
+    eq_curve, equity, max_dd = _equity_curve(trades, initial_equity)
     total_pnl_pct = (equity - initial_equity) / initial_equity * 100
-
-    # CAGR 계산
-    cagr = 0.0
-    if start_date and end_date:
-        try:
-            dt_s = datetime.strptime(start_date, '%Y-%m-%d')
-            dt_e = datetime.strptime(end_date, '%Y-%m-%d')
-            years = max((dt_e - dt_s).days / 365.25, 0.1)
-            if equity > 0:
-                cagr = ((equity / initial_equity) ** (1 / years) - 1) * 100
-        except Exception:
-            pass
-
-    # Sharpe (연율화)
-    rets = np.array([
-        (eq_curve[i] - eq_curve[i - 1]) / eq_curve[i - 1]
-        for i in range(1, len(eq_curve))
-    ])
-    sharpe = 0.0
-    if len(rets) > 1:
-        std = rets.std()
-        if std > 0:
-            sharpe = float(rets.mean() / std * math.sqrt(252))
-
-    # Sortino (하방 변동성만)
-    down_rets = rets[rets < 0]
-    sortino = 0.0
-    if len(down_rets) > 1:
-        down_std = down_rets.std()
-        if down_std > 0:
-            sortino = float(rets.mean() / down_std * math.sqrt(252))
-
-    # Calmar
+    cagr = _cagr_pct(equity, initial_equity, start_date, end_date)
+    sharpe, sortino = _risk_ratios(eq_curve)
     calmar = cagr / (max_dd * 100) if max_dd > 0 else 0.0
 
     hold_hours = [getattr(t, 'hold_hours', 0) for t in trades if hasattr(t, 'hold_hours')]
@@ -488,6 +669,12 @@ def backtest_strategy(
 
     trades   = []
     equity   = initial_equity
+    # 자기주도 학습 상태 — 라이브가 학습 배분을 쓰면 백테스트도 같은 규칙을
+    # 써야 한다. 안 그러면 검증한 사이징과 실계좌 사이징이 갈라진다.
+    learn_obs:   list = []      # 청산된 거래 → 관측
+    learn_res:   dict = {}
+    learn_at             = None   # 마지막 학습 시각(시뮬레이션 시계)
+    learn_cfg = _bt_learn_config() if SPOT_LEARN_ENABLED else None
     position = None      # 현재 포지션 dict or None
     cooldown = 0         # 쿨다운 카운터 (S3용)
     diag     = defaultdict(int)
@@ -512,43 +699,12 @@ def backtest_strategy(
         if position is not None:
             bars_held = i - position['entry_bar']
             max_hold  = position.get('max_hold', 0)
-            exit_type = position.get('exit_type', 'sl_tp')
-
-            reason    = None
+            # exit_type은 기록용 메타데이터 — 청산 분기는 EXIT_CHECK_FUNCS가 한다
 
             slip = _get_slippage(symbol)
-
-            # 추적 손절 (라이브 `trailing_sl`과 동일 규칙 — 패리티)
-            # 순서 주의: **이번 봉의 SL 판정 전에** 갱신하면 같은 봉의 고가로
-            # 올린 손절이 같은 봉 저가에 걸리는 선행편향이 생긴다.
-            # 따라서 갱신은 이 봉의 청산 판정이 끝난 뒤(아래)에 수행한다.
-            # SL 체크 (bar 저가로 SL 이탈)
-            if cur_low <= position['sl']:
-                reason    = 'SL'
-                exit_price = min(position['sl'], cur_close) * (1 - slip)
-
-            # TP 체크 (bar 고가로 TP 도달)
-            elif position['tp'] > 0 and cur_high >= position['tp']:
-                reason    = 'TP'
-                exit_price = position['tp'] * (1 - slip)
-
-            # 추가 청산 조건 체크 (크로스 등)
-            elif exit_fn is not None:
-                try:
-                    if strategy_id == 'S6':
-                        should_exit = exit_fn(df, i, position['entry_price'])
-                    else:
-                        should_exit = exit_fn(df, i)
-                    if should_exit:
-                        reason = 'CROSS'
-                        exit_price = cur_close * (1 - slip)
-                except Exception:
-                    pass
-
-            # 시간 기반 청산
-            if reason is None and max_hold > 0 and bars_held >= max_hold:
-                reason    = 'TIME'
-                exit_price = cur_close * (1 - slip)
+            reason, exit_price = _bt_exit_decision(
+                position, strategy_id, df, i, exit_fn, slip,
+                cur_high, cur_low, cur_close, bars_held, max_hold)
 
             if reason is not None:
                 entry_price = position['entry_price']
@@ -557,7 +713,6 @@ def backtest_strategy(
                 # 그 pnl_r이 Kelly·건강도·avg_r을 오염시킨다.
                 sl_dist     = abs(entry_price - position.get('orig_sl', position['sl']))
                 pnl_r       = (exit_price - entry_price) / sl_dist if sl_dist > 0 else 0.0
-                pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
                 fee_cost    = exit_price * position['qty'] * BT_SPOT_FEE
                 cost_usdt   = position['cost_usdt']
 
@@ -581,6 +736,12 @@ def backtest_strategy(
                     cost_usdt  = round(cost_usdt, 2),
                 )
                 trades.append(t)
+                if learn_cfg is not None:
+                    import atlas_learning as _L
+                    learn_obs.append(_L.Observation(
+                        strategy_id, position.get('regime', '') or 'UNKNOWN',
+                        float(pnl_r), row['ts'].to_pydatetime()
+                        if hasattr(row['ts'], 'to_pydatetime') else datetime.now(timezone.utc)))
                 position = None
                 if strategy_id == 'S3':
                     cooldown = S3_COOLDOWN
@@ -631,17 +792,12 @@ def backtest_strategy(
         # 라이브는 모멘텀 하위권 심볼의 돌파 진입을 막고 상위 티어는 리스크를
         # 올린다. 백테스트가 이걸 모르면 MOMENTUM_RS_GATE_PCT는 어떤 값을
         # 넣어도 결과가 같아, WFO가 검증할 수 없는(=검증된 척만 하는) 축이 된다.
-        rs_scale = 1.0
-        if rs_applies:
-            rank_pct = _rank_pct_asof(rank_map, rank_keys, symbol, date_key)
-            if rank_pct is None:
-                rank_pct = 0.5      # 라이브 `_get_momentum_rank_pct` 기본값
-            if rank_pct > MOMENTUM_RS_GATE_PCT:
-                diag['rs_gate_block'] = diag.get('rs_gate_block', 0) + 1
-                continue
-            if rank_pct <= MOMENTUM_TOP_TIER_PCT:
-                rs_scale = MOMENTUM_TOP_RISK_MULT
-                diag['rs_top_tier'] = diag.get('rs_top_tier', 0) + 1
+        rs_scale, rs_flag = _bt_rs_gate(rs_applies, rank_map, rank_keys,
+                                        symbol, date_key)
+        if rs_flag:
+            diag[rs_flag] = diag.get(rs_flag, 0) + 1
+        if rs_scale is None:
+            continue
 
         slip        = _get_slippage(symbol)
         entry_price = float(row['open']) * (1 + slip)  # 현재봉 시가 = 신호봉 다음봉 오픈
@@ -662,60 +818,42 @@ def backtest_strategy(
         #   USDT 예비금(SPOT_RESERVE_PCT), 전략 간 자본 경합을 반영할 수 없다.
         #   즉 백테스트는 여전히 라이브보다 **낙관적**이며, 특히 신호가 몰리는
         #   구간에서 라이브는 일부 진입을 포기한다. 결과를 상한선으로 읽을 것.
-        sl_pct = sl_dist / entry_price
-        if sl_pct > SPOT_MAX_SL_PCT:
-            diag['sl_too_wide'] = diag.get('sl_too_wide', 0) + 1
-            continue
-        # 비용 대비 엣지: 왕복비용이 1R을 얼마나 잠식하는지
-        # (라이브 `_cost_edge_ok`와 동일한 부등식. 스프레드는 백테스트에
-        #  호가 데이터가 없어 슬리피지 모델로 근사한다)
-        cost_rate  = BT_SPOT_FEE * 2 + slip * 2
-        cost_per_r = cost_rate / sl_pct
-        if cost_per_r > SPOT_MAX_COST_PER_R:
-            diag['cost_exceeds_edge'] = diag.get('cost_exceeds_edge', 0) + 1
+        block = _bt_entry_filters(sl_dist, entry_price, slip)
+        if block:
+            diag[block] = diag.get(block, 0) + 1
             continue
 
         # 포지션 크기 계산 (스팟: 레버리지 없음)
-        # Kelly 스케일링 (SPOT_KELLY_MIN_TRADES 건 이후부터 적용)
-        kelly_scale = 1.0
-        if len(trades) >= SPOT_KELLY_MIN_TRADES:
-            recent = trades[-200:]
-            wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
-            losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
-            if not wins_r:
-                # 전패 구간 — 라이브와 동일하게 최소 스케일로 (기존에는 1.0을
-                # 유지해 연패 중에도 정상 사이즈로 베팅하는 낙관 편향이 있었다)
-                kelly_scale = SPOT_KELLY_SCALE_MIN
-            if wins_r and losses_r:
-                wr = len(wins_r) / len(recent)
-                b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
-                # half-Kelly (라이브 _get_kelly_scale과 패리티 유지)
-                kelly_raw = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
-                # 조건부 상한: WR>55% AND PF>1.5 시 KELLY_SCALE_MAX(2.0), 아니면 1.50
-                gross_w = sum(abs(r) for r in wins_r)
-                gross_l = sum(abs(r) for r in losses_r)
-                pf = gross_w / gross_l if gross_l > 0 else 0.0
-                k_max = SPOT_KELLY_SCALE_MAX if (wr >= SPOT_KELLY_WR_THRESH and
-                                                  pf >= SPOT_KELLY_PF_THRESH) else 1.50
-                kelly_scale = max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
-        # 전략 건강도 자기교정 (라이브 `_get_strategy_health_scale` 패리티)
-        # 최근 실적의 net PF가 나쁘면 감봉/차단된다. 이걸 빼면 백테스트는
-        # 라이브가 실제로는 걸러냈을 구간까지 정상 사이즈로 거래한 셈이 된다.
-        health_scale = 1.0
-        if len(trades) >= SPOT_HEALTH_MIN_TRADES:
-            _recent_h = trades[-200:]
-            # 손익 기여도 = R배수 × 그 거래의 리스크 비중 (자본 대비 비율).
-            # 라이브는 USD net PF를 쓰지만 백테스트에는 거래별 USD 손익이
-            # 없으므로 비율로 근사한다 — 판정 자체의 패리티가 목적이다.
-            _nets = [t.pnl_r * t.risk_pct for t in _recent_h]
-            _gw = sum(n for n in _nets if n > 0)
-            _gl = abs(sum(n for n in _nets if n < 0))
-            _pf = _gw / _gl if _gl > 0 else float('inf')
-            if _pf < SPOT_HEALTH_PF_HARD:
-                diag['health_blocked'] = diag.get('health_blocked', 0) + 1
+        kelly_scale  = _bt_kelly_scale(trades)
+        health_scale = _bt_health_scale(trades)
+        if health_scale is None:          # net PF가 하드 임계 미만 → 진입 차단
+            diag['health_blocked'] = diag.get('health_blocked', 0) + 1
+            continue
+
+        # 학습기 ON이면 Kelly·건강도 자리를 학습 배분이 대신한다(라이브와 동일).
+        if learn_cfg is not None:
+            import atlas_learning as _L
+            _now_dt = (row['ts'].to_pydatetime() if hasattr(row['ts'], 'to_pydatetime')
+                       else None)
+            if _now_dt is not None:
+                if _now_dt.tzinfo is None:
+                    _now_dt = _now_dt.replace(tzinfo=timezone.utc)
+                # 라이브와 같은 주기로만 재계산한다 — 매 진입마다 전체를 다시
+                # 학습하면 O(n²)이 된다.
+                # ※ 현 전략들은 4H·1D봉이라 진입 간격이 항상 30분을 넘는다.
+                #   즉 이 스로틀은 **지금은 한 번도 걸리지 않는다**(성능 방어용).
+                #   분봉 전략을 추가하면 그때부터 의미가 생긴다.
+                if (learn_at is None or
+                        (_now_dt - learn_at).total_seconds() >= SPOT_LEARN_REFRESH_MIN * 60):
+                    learn_res = _L.learn(learn_obs, now=_now_dt, cfg=learn_cfg)
+                    learn_at = _now_dt
+                learn_scale = _L.scale_for(learn_res, strategy_id, regime, learn_cfg)
+            else:
+                learn_scale = learn_cfg.unproven_scale
+            kelly_scale, health_scale = learn_scale, 1.0
+            if learn_scale <= 0:
+                diag['learn_blocked'] = diag.get('learn_blocked', 0) + 1
                 continue
-            if _pf < SPOT_HEALTH_PF_SOFT:
-                health_scale = SPOT_HEALTH_SOFT_SCALE
 
         adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale * rs_scale
         risk_usd     = equity * adj_risk_pct
@@ -781,8 +919,6 @@ def _backtest_buyhold(symbol, df, ts_start, ts_end,
 
     entry_price = float(df_filt.iloc[0]['close'])
     exit_price  = float(df_filt.iloc[-1]['close'])
-    pnl_r       = (exit_price - entry_price) / (entry_price * 0.1) if entry_price > 0 else 0
-    hold_days   = (df_filt.index[-1] - df_filt.index[0])
 
     t = SpotTrade(
         symbol     = symbol, strategy = 'S1',
@@ -970,7 +1106,7 @@ def print_comparison_report(results: dict, start_date: str, end_date: str,
 
     headers = ['전략', '심볼수', '거래수', 'WR%', 'PF', 'MDD%', 'Sharpe', 'Sortino', 'CAGR%', '총PnL%']
     col_w   = [22, 6, 6, 6, 5, 6, 7, 7, 7, 7]
-    header  = '  ' + '  '.join(h.ljust(w) for h, w in zip(headers, col_w))
+    header  = '  ' + '  '.join(h.ljust(w) for h, w in zip(headers, col_w, strict=False))
     print(header)
     print(f'  {"─" * (sum(col_w) + len(col_w) * 2)}')
 
@@ -992,7 +1128,7 @@ def print_comparison_report(results: dict, start_date: str, end_date: str,
             f"{combined.get('cagr_pct', 0):+.1f}",
             f"{combined.get('total_pnl_pct', 0):+.1f}",
         ]
-        line = '  ' + '  '.join(v.ljust(w) for v, w in zip(row, col_w))
+        line = '  ' + '  '.join(v.ljust(w) for v, w in zip(row, col_w, strict=False))
         print(line)
 
     print(f'{"═" * w}\n')

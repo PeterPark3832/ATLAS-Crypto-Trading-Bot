@@ -53,7 +53,7 @@ class TestRsGate:
     def test_documented_intent_would_block(self):
         """주석의 의도(상위 33%만 통과)로 바꾸면 실제로 차단이 일어난다."""
         intended = cfg.MOMENTUM_TOP_TIER_PCT
-        assert (49 / 50) > intended, '0.33이면 하위권이 실제로 차단된다'
+        assert intended < (49 / 50), '0.33이면 하위권이 실제로 차단된다'
 
     def test_top_tier_boost_still_works(self, monkeypatch):
         """게이트는 죽어 있었지만 상위 티어 리스크 부스트는 정상 동작한다."""
@@ -85,7 +85,7 @@ class TestRsGate:
         before = sm.MOMENTUM_RS_GATE_PCT
         with ro.override_params({'MOMENTUM_RS_GATE_PCT': 0.33}):
             assert sm.MOMENTUM_RS_GATE_PCT == 0.33
-        assert sm.MOMENTUM_RS_GATE_PCT == before
+        assert before == sm.MOMENTUM_RS_GATE_PCT
 
 
 # ══════════════════════════════════════════════════════════════

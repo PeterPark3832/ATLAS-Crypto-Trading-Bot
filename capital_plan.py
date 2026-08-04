@@ -205,7 +205,7 @@ def bnb_saving(sl_pct: float = DEFAULT_SL_PCT) -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def breakeven(sl_pct: float = DEFAULT_SL_PCT, bnb: bool = False,
-              payoffs=(1.0, 1.5, 2.0, 3.0)) -> list[dict]:
+              payoffs: tuple = (1.0, 1.5, 2.0, 3.0)) -> list[dict]:
     """손익비별 손익분기 승률.
 
     비용을 넣은 식:  WR × b − (1 − WR) × 1 − cost_per_r = 0
@@ -259,6 +259,26 @@ def stressed_cells(equity: float, sl_pct: float = DEFAULT_SL_PCT) -> list[dict]:
                       kelly=SPOT_KELLY_SCALE_MIN, health=SPOT_HEALTH_SOFT_SCALE)
 
 
+def learn_cells(equity: float, sl_pct: float = DEFAULT_SL_PCT) -> list[dict]:
+    """자기주도 학습을 **켰을 때**의 체결 가능성.
+
+    학습기는 Kelly·건강도를 대체하며, 이력이 없는 조합은
+    `SPOT_LEARN_UNPROVEN_SCALE`(0.25)에서 시작한다. 즉 **켜는 순간
+    모든 조합이 1/4 크기**가 되므로, 소액 계좌에서는 주문이 거래소
+    최소액 아래로 내려가 봇이 조용히 멈출 수 있다.
+
+    탐색 하한도 같은 값이라, 최악의 경우에도 이 배분이 바닥이다.
+    """
+    from atlas_spot_config import SPOT_LEARN_UNPROVEN_SCALE
+    return dead_cells(equity, sl_pct, kelly=SPOT_LEARN_UNPROVEN_SCALE, health=1.0)
+
+
+def learn_activation_equity(sl_pct: float = DEFAULT_SL_PCT) -> float:
+    """학습기를 켜도 **모든 조합이 살아 있는** 최소 자본."""
+    rows = learn_cells(1000.0, sl_pct)      # 자본 무관 — activation만 본다
+    return max((r['activation_equity'] for r in rows), default=math.inf)
+
+
 def build_report(equity: float, sl_pct: float, bnb: bool) -> dict:
     return {
         'equity':      equity,
@@ -266,6 +286,8 @@ def build_report(equity: float, sl_pct: float, bnb: bool) -> dict:
         'bnb':         bnb,
         'cells':       dead_cells(equity, sl_pct),
         'stressed':    stressed_cells(equity, sl_pct),
+        'learn':       learn_cells(equity, sl_pct),
+        'learn_activation': learn_activation_equity(sl_pct),
         'uncovered':   uncovered_regimes(equity, sl_pct),
         'slots':       slot_capacity(equity),
         'cost':        cost_profile(sl_pct, bnb),
@@ -323,6 +345,25 @@ def print_report(rep: dict) -> None:
         print(f'    회복이 가장 필요할 때 거래가 끊긴다는 뜻이다.')
     else:
         print(f'  최악의 사이징에서도 전 조합이 체결 가능하다.')
+
+    # ①-c 학습기를 켰을 때
+    from atlas_spot_config import SPOT_LEARN_ENABLED, SPOT_LEARN_UNPROVEN_SCALE
+    ldead = [r for r in rep['learn'] if not r['tradable']]
+    state = '켜짐' if SPOT_LEARN_ENABLED else '꺼짐'
+    print(f'\n①-c 자기주도 학습 켤 때(현재 {state}, 미검증 배분 '
+          f'{SPOT_LEARN_UNPROVEN_SCALE:.2f})  —  '
+          f'{len(rep["learn"]) - len(ldead)}/{len(rep["learn"])}칸 생존')
+    if ldead:
+        for r in sorted(ldead, key=lambda x: -x['activation_equity']):
+            print(f'  ✗ {r["strategy"]:<4}/{r["regime"]:<14} '
+                  f'주문 ${r["order_usdt"]:6.2f}   '
+                  f'→ 필요자본 {_fmt_eq(r["activation_equity"])}')
+        print(f'  ⚠ 지금 켜면 {len(ldead)}칸이 즉시 멈춘다. '
+              f'전 조합을 살리려면 {_fmt_eq(rep["learn_activation"])} 필요.')
+        print(f'    학습기는 이력이 쌓이기 전 모든 조합을 미검증으로 보므로, '
+              f'켜는 순간이 가장 작은 주문이 나가는 시점이다.')
+    else:
+        print(f'  지금 켜도 전 조합이 체결 가능하다.')
 
     # ② 슬롯
     s = rep['slots']

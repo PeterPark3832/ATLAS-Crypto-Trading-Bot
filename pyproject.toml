@@ -1,0 +1,111 @@
+[project]
+name = "atlas-spot-bot"
+version = "1.0.0"
+description = "ATLAS — Binance 현물 자동매매 봇"
+requires-python = ">=3.11"
+
+# ══════════════════════════════════════════════════════════════
+#  Ruff — 린트 설정
+# ══════════════════════════════════════════════════════════════
+#  이 저장소에서 정적분석은 스타일 도구가 아니라 **버그 탐지기**다.
+#  실제로 ruff의 F401(미사용 import) 하나가 "config 상수 9개가 동작을
+#  바꾸지 못한다"는 결함으로 이어졌다(a1a4f8f). 그래서 F/B 계열은
+#  엄격하게 두고, 줄바꿈·따옴표 같은 취향 규칙은 끈다.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".git", "__pycache__", "state", "results", "data", "logs"]
+
+[tool.ruff.lint]
+select = [
+    "F",      # pyflakes — 미사용 import/변수, 정의되지 않은 이름
+    "E",      # pycodestyle 오류
+    "W",      # pycodestyle 경고
+    "B",      # flake8-bugbear — 실제 버그 패턴
+    "C4",     # comprehension 최적화
+    "SIM",    # 단순화 가능
+    "RET",    # return 흐름
+    "A",      # 빌트인 섀도잉
+    "PIE",    # 잡다한 안티패턴
+    "PERF",   # 성능
+]
+ignore = [
+    # ── 이 저장소의 의도된 스타일 ──
+    "E501",    # 줄 길이 — 한글 주석이 많아 산술적 길이가 의미 없다
+    "E701",    # `if x: return` 한 줄 — 가드절에 의도적으로 쓴다
+    "E702",    # `a; b` 한 줄 — 로그+리턴 쌍에 의도적으로 쓴다
+    "E402",    # 모듈 상단 외 import — 환경변수를 먼저 세팅해야 하는
+               # 모듈이 여럿이라(테스트 키 주입) 구조상 불가피하다
+    "F541",    # placeholder 없는 f-string — 서식 일관성 유지 목적
+    "E741",    # 모호한 변수명(l) — OHLCV 관례상 low를 l로 쓴다
+    # ── 취향 영역 ──
+    "SIM108",  # 삼항 강제
+    "RET504",  # 즉시 반환 강제 — 이름이 설명 역할을 하는 경우가 많다
+    "RET505",  # else 제거 강제 — 대칭 분기가 읽기 쉬울 때가 있다
+    "TRY003",  # 예외 메시지 길이
+    "PERF203", # 루프 내 try — 봉 단위 처리에서 한 종목 실패가 전체를
+               # 멈추면 안 되므로 의도적이다
+    # ── 아래는 전수 검토 후 "결함 아님"으로 판정한 항목 ──
+    # (2026-08 감사: 각 발생 지점을 하나씩 확인했고 동작 문제는 없었다.
+    #  다시 켜고 싶으면 이 줄만 지우면 된다)
+    "SIM105",  # try/except/pass → contextlib.suppress. 표현 취향
+    "PERF401", # 수동 리스트 빌드 → 컴프리헨션. 루프 안에서 로그를 남기는
+               # 곳이 있어 기계적 변환이 오히려 읽기 나빠진다
+    "SIM102",  # 중첩 if — 조건의 의미 단위를 나눠 두는 편이 읽기 쉽다
+    "SIM110",  # any() 재구현 — 조기 반환이 의도인 곳
+    "SIM202",  # not != — 도메인 표현을 그대로 둔다
+    "C401",    # set 제너레이터
+    "A002",    # 빌트인 인자명 섀도잉(1건, 외부 API 시그니처)
+    "B007",    # 미사용 루프 변수(1건, 인덱스 의미 전달용)
+    "C408",    # dict(a=1, b=2) — 키가 많은 메트릭 딕셔너리에서
+               # 키워드 형태가 리터럴보다 읽기 쉬워 의도적으로 쓴다
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트는 픽스처 특성상 미사용 인자·재정의가 정상이다
+"tests/*" = ["F811", "B011", "SIM117"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI Depends 등 호출식 기본값을 쓰는 프레임워크 관용구 허용
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
+# ══════════════════════════════════════════════════════════════
+#  pytest
+# ══════════════════════════════════════════════════════════════
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning:atlas_.*"]
+
+# ══════════════════════════════════════════════════════════════
+#  커버리지
+# ══════════════════════════════════════════════════════════════
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "*/site-packages/*"]
+
+[tool.coverage.report]
+# 실계좌를 다루는 모듈은 커버리지가 떨어지면 즉시 알아야 한다.
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]
+
+# ══════════════════════════════════════════════════════════════
+#  mypy — 점진 도입
+# ══════════════════════════════════════════════════════════════
+#  전면 strict는 8,700줄 기존 코드에서 수백 건이 쏟아져 아무도 안 보게 된다.
+#  **금액·수량 계산이 있는 모듈부터** 좁게 켜고 넓혀 간다.
+#  잡으려는 것: None 전파(가격 조회 실패 → None × qty), 숫자/문자열 혼동,
+#  Optional 반환을 그대로 산술에 쓰는 실수.
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true       # ccxt·fastmcp 등 스텁 없는 외부 패키지
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false          # 미주석 함수까지 검사하면 노이즈가 압도한다
+exclude = ['^tests/', '^state/', '^results/']
+
+[[tool.mypy.overrides]]
+# 금액·수량이 흐르는 모듈 — 여기부터 조인다
+module = ["atlas_indicators", "atlas_learning", "atlas_regime", "capital_plan"]
+disallow_untyped_defs = true
+warn_return_any = true

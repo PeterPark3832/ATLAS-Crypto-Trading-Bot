@@ -213,7 +213,7 @@ class TestDuplicateBarProtection:
         진입 기록이 있으면 재진입이 차단되어야 한다."""
         ohlcv = _make_ohlcv()
         _fake_ex_and_cache(monkeypatch, ohlcv)
-        cur_ts = int(pd.to_datetime(ohlcv[-1][0], unit='ms', utc=True).timestamp())
+        _cur_ts = int(pd.to_datetime(ohlcv[-1][0], unit='ms', utc=True).timestamp())
         future_ts = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
         sm._save_position('TEST', 'BTCUSDT', 100.0, 90.0, 110.0, 1.0, 100.0,
                            0.02, 'sl_tp', 0, 'TRENDING_UP')

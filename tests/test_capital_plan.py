@@ -126,6 +126,41 @@ class TestDeadCells:
         assert all(r['tradable'] for r in cp.stressed_cells(need * 1.001))
 
 
+class TestLearnerInteraction:
+    """학습기를 켜면 **켜는 순간이 가장 작은 주문**이 나가는 시점이다.
+
+    이력이 없으면 전 조합이 미검증(0.25)이라, 소액 계좌에서는 켜자마자
+    주문이 거래소 최소액 아래로 내려가 봇이 조용히 멈출 수 있다.
+    운영자가 켜기 전에 문턱을 알아야 한다.
+    """
+
+    def test_learner_shrinks_orders(self):
+        base = {(r['strategy'], r['regime']): r['order_usdt']
+                for r in cp.dead_cells(300)}
+        for r in cp.learn_cells(300):
+            assert r['order_usdt'] <= base[(r['strategy'], r['regime'])] + 1e-9
+
+    def test_uses_unproven_scale(self):
+        rows = cp.learn_cells(1000)
+        up = next(r for r in rows if r['regime'] == 'TRENDING_UP')
+        assert up['risk_pct'] == pytest.approx(
+            cfg.SPOT_BASE_RISK_PCT * cfg.SPOT_LEARN_UNPROVEN_SCALE)
+
+    def test_activation_threshold_is_finite_and_sufficient(self):
+        need = cp.learn_activation_equity()
+        assert math.isfinite(need)
+        assert all(r['tradable'] for r in cp.learn_cells(need * 1.001))
+
+    def test_just_below_threshold_has_dead_cells(self):
+        need = cp.learn_activation_equity()
+        assert any(not r['tradable'] for r in cp.learn_cells(need * 0.99))
+
+    def test_threshold_appears_in_report(self, capsys):
+        cp.print_report(cp.build_report(300, 0.05, False))
+        out = capsys.readouterr().out
+        assert '자기주도 학습' in out
+
+
 class TestUncoveredRegimes:
     def test_empty_map_entries_are_uncovered(self):
         out = cp.uncovered_regimes(100_000)

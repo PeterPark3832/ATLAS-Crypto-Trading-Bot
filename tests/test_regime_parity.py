@@ -170,3 +170,160 @@ class TestNoTradeAlert:
         sm.check_no_trade_regime('UNKNOWN', 1000.0)
         sm.check_no_trade_regime('UNKNOWN', 1000.0 + 3600 * 7)
         assert len(self.sent) == 1
+
+
+# ══════════════════════════════════════════════════════════════
+#  형성 중인 봉 · ADX 윈도우 길이 (2026-08 감사)
+# ══════════════════════════════════════════════════════════════
+
+class TestFormingBarExcluded:
+    """거래소는 **아직 끝나지 않은** 현재 봉을 마지막에 붙여 준다.
+    그 값은 하루 종일 변하므로 지표에 넣으면 레짐이 하루에도 몇 번 뒤집힌다 —
+    백테스트가 한 번도 본 적 없는 동작이다. 합성 데이터에서 약 15%의
+    레짐 판정이 달랐다."""
+
+    def test_drops_last_bar(self):
+        import atlas_regime as rg
+        oh = [[i, 1, 2, 0.5, 1.5, 100] for i in range(10)]
+        assert rg._drop_forming_bar(oh) == oh[:-1]
+
+    def test_short_input_is_safe(self):
+        import atlas_regime as rg
+        assert rg._drop_forming_bar([]) == []
+        assert rg._drop_forming_bar(None) == []
+        assert len(rg._drop_forming_bar([[1, 1, 1, 1, 1, 1]])) == 1
+
+    def test_does_not_mutate_input(self):
+        import atlas_regime as rg
+        oh = [[i, 1, 2, 0.5, 1.5, 100] for i in range(5)]
+        rg._drop_forming_bar(oh)
+        assert len(oh) == 5, '원본을 건드리면 호출부가 조용히 영향받는다'
+
+    def test_update_regime_uses_it(self):
+        """호출되지 않으면 헬퍼만 있고 동작은 그대로다."""
+        src = Path(__import__('atlas_regime').__file__).read_text()
+        body = src[src.index('def update_regime'):]
+        assert '_drop_forming_bar(ohlcv)' in body
+
+
+class TestAdxWindowParity:
+    """Wilder ADX는 재귀 평활이라 **워밍업 길이가 값을 바꾼다.**
+    라이브 50봉 vs 백테스트 51봉 오프바이원으로 같은 날 ADX가 달랐다
+    (36.15 vs 35.72). 레짐 경계에서 이 차이가 분류를 뒤집는다."""
+
+    @staticmethod
+    def _series(n=180, seed=5):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        px, out = 100.0, []
+        for i in range(n):
+            o = px
+            px = max(px * (1 + 0.004 + rng.normal(0, 0.02)), 1.0)
+            out.append([i * 86400000, o, max(o, px) * 1.01, min(o, px) * 0.99, px, 1e6])
+        return out
+
+    def test_window_lengths_match(self):
+        from atlas_indicators import calc_adx
+        from atlas_regime import REGIME_BTC_LOOKBACK as LB
+        from atlas_regime import _drop_forming_bar
+        o = _drop_forming_bar(self._series())
+        live = calc_adx(o[-LB:], 14)
+        bt_win = o[max(0, len(o) - 1 - LB + 1): len(o)]
+        assert len(bt_win) == LB, f'백테스트 윈도우 {len(bt_win)}봉 ≠ 라이브 {LB}봉'
+        assert calc_adx(bt_win, 14) == pytest.approx(live)
+
+    def test_slope_endpoint_equals_level(self):
+        """같은 함수가 레벨과 기울기를 한 봉 어긋난 기준으로 읽으면 안 된다."""
+        from atlas_indicators import calc_adx
+        from atlas_regime import REGIME_BTC_LOOKBACK as LB
+        from atlas_regime import _drop_forming_bar
+        o = _drop_forming_bar(self._series())
+        level = calc_adx(o[-LB:], 14)
+        series = [calc_adx(o[-(LB + k):(-k if k else None)], 14)
+                  for k in range(2, -1, -1)]
+        assert series[-1] == pytest.approx(level)
+
+    def test_slope_matches_backtest(self):
+        from atlas_indicators import calc_adx
+        from atlas_regime import REGIME_BTC_LOOKBACK as LB
+        from atlas_regime import _drop_forming_bar
+        o = _drop_forming_bar(self._series())
+        series = [calc_adx(o[-(LB + k):(-k if k else None)], 14)
+                  for k in range(2, -1, -1)]
+        hist = [calc_adx(o[max(0, i - LB + 1):i + 1], 14)
+                for i in range(len(o) - 3, len(o))]
+        assert (series[-1] - series[0]) == pytest.approx(hist[-1] - hist[-3])
+
+    def test_backtest_uses_named_constant(self):
+        """매직넘버 50이 남아 있으면 상수를 바꿔도 한쪽만 움직인다."""
+        import atlas_spot_backtest as bt
+        src = Path(bt.__file__).read_text()
+        body = src[src.index('def build_regime_map'):src.index('def _bt_exit_decision')]
+        assert 'i - 50' not in body and 'j - 50' not in body
+        assert 'REGIME_BTC_LOOKBACK' in body
+
+
+class TestUpdateRegimeMatchesBacktest:
+    """앞의 검사들은 슬라이스 로직을 **복제**해서 확인한다 — 프로덕션 코드가
+    바뀌어도 복제본은 그대로라 변형을 놓친다(실제로 기울기 범위를 되돌리는
+    변형이 살아남았다). 여기서는 진짜 `update_regime`을 돌려
+    `build_regime_map`이 같은 날짜에 내는 값과 직접 대조한다."""
+
+    class _FakeEx:
+        def __init__(self, d1, d4):
+            self._d1, self._d4 = d1, d4
+
+        def fetch_ohlcv(self, symbol, timeframe, limit=None):
+            return list(self._d1 if timeframe == '1d' else self._d4)
+
+    @staticmethod
+    def _bars(n, seed, step_ms):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        px, out = 100.0, []
+        base = 1577836800000
+        for i in range(n):
+            o = px
+            drift = 0.010 if (i // 30) % 2 == 0 else -0.006
+            px = max(px * (1 + drift + rng.normal(0, 0.02)), 1.0)
+            out.append([base + i * step_ms, o, max(o, px) * 1.012,
+                        min(o, px) * 0.988, px, 1e6])
+        return out
+
+    def test_adx_and_slope_match_build_regime_map(self, monkeypatch):
+        import atlas_regime as rg
+        import atlas_spot_backtest as bt
+
+        d1 = self._bars(260, 11, 86400000)
+        d4 = self._bars(260, 12, 4 * 3600000)
+
+        state = rg.update_regime(self._FakeEx(d1, d4))
+
+        # 라이브는 형성 중인 마지막 봉을 버린다 → 백테스트에서 대응하는
+        # 날짜는 '끝에서 두 번째' 일봉이다.
+        rmap = bt.build_regime_map(d1[:-1], d4)
+        import pandas as pd
+        last_date = str(pd.to_datetime(d1[-2][0], unit='ms', utc=True).date())
+
+        assert state.regime == rmap[last_date], (
+            f'같은 날짜에 라이브 {state.regime} vs 백테스트 {rmap[last_date]}')
+
+    def test_slope_is_not_stale_by_one_bar(self, monkeypatch):
+        """기울기 끝점이 레벨보다 이르면 이 검사가 실패한다."""
+        import atlas_regime as rg
+        from atlas_indicators import calc_adx
+        from atlas_regime import REGIME_BTC_LOOKBACK as LB
+
+        d1 = self._bars(260, 21, 86400000)
+        d4 = self._bars(260, 22, 4 * 3600000)
+        state = rg.update_regime(self._FakeEx(d1, d4))
+
+        completed = d1[:-1]
+        expect_level = calc_adx(completed[-LB:], 14)
+        expect_slope = expect_level - calc_adx(completed[-(LB + 2):-2], 14)
+
+        assert state.adx == pytest.approx(expect_level), (
+            'ADX 레벨이 완성봉 기준이 아니다')
+        assert state.adx_slope == pytest.approx(expect_slope), (
+            f'기울기 {state.adx_slope:+.3f} ≠ 기대 {expect_slope:+.3f} — '
+            f'끝점이 레벨과 다른 봉을 보고 있다')

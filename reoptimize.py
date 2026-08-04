@@ -228,7 +228,10 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
                       oos_end: str) -> dict:
     """한 전략을 그리드 서치. Returns 제안 dict (개선 없으면 accepted=False)."""
     grid = GRIDS[sid]
-    combos = [dict(zip(grid.keys(), vals))
+    # strict=True: 그리드 축 수와 product 결과 길이가 어긋나면 조용히
+    # 잘리는 대신 즉시 실패한다 — 잘린 조합은 '검증된 파라미터'로
+    # 보고되므로 가장 위험한 실패다.
+    combos = [dict(zip(grid.keys(), vals, strict=True))
               for vals in itertools.product(*grid.values())]
     print(f'\n[{sid}] {STRATEGY_NAMES.get(sid, sid)} — {len(combos)}개 조합 그리드')
 

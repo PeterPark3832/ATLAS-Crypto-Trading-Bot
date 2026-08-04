@@ -2,7 +2,18 @@
 ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
-import io, os, time, json, secrets, shlex, sqlite3, subprocess, logging, hashlib, hmac, threading
+import io
+import os
+import time
+import json
+import secrets
+import shlex
+import sqlite3
+import subprocess
+import logging
+import hashlib
+import hmac
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -599,13 +610,18 @@ async def control(req: Request):
         # BOT_START_ARGS로 원래 운용 구성 보존 — 인자 없이 띄우면 dry-run으로
         # 돌리던 봇이 실주문 모드로 재기동되는 사고가 날 수 있다.
         cmd = ['python3', '-u', 'atlas_spot_main.py'] + shlex.split(BOT_START_ARGS)
-        subprocess.Popen(
-            cmd,
-            cwd=str(BOT_DIR),
-            stdout=open(log_path, 'a'),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        # with 블록으로 감싸야 부모(대시보드)의 fd가 닫힌다. Popen은 자식에게
+        # 넘길 때 fd를 복제하므로 블록을 빠져나가도 로그는 계속 쓰인다.
+        # 예전에는 열어두기만 해서 **봇을 재시작할 때마다 fd가 하나씩 샜다** —
+        # 장기 구동 시 파일 디스크립터 고갈로 대시보드가 죽는다.
+        with open(log_path, 'a') as _logf:
+            subprocess.Popen(
+                cmd,
+                cwd=str(BOT_DIR),
+                stdout=_logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         args_desc = BOT_START_ARGS or '(기본 인자 — 라이브 모드)'
         _tg(f'▶️ [스팟 대시보드] 봇 시작 명령: {args_desc}')
         return {'ok': True, 'msg': f'봇 시작 완료 ({args_desc})'}

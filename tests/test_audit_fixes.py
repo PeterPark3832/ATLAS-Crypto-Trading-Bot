@@ -184,7 +184,7 @@ class TestOrphanOrderGuard:
         rows = _trades()
         assert len(rows) == 1
         assert rows[0]['reason'] == 'SL', '고아주문 취소 후 정상 청산돼야 한다'
-        assert all('MANUAL_SOLD' != r['reason'] for r in rows)
+        assert all(r['reason'] != 'MANUAL_SOLD' for r in rows)
         assert ('cancel', 'ORPHAN1') in _ex.calls
 
     def test_sweep_skipped_when_another_strategy_holds_same_symbol(
@@ -425,7 +425,7 @@ class TestRiskStatePersistence:
     def test_withdrawal_rebases_peak(self, _state, monkeypatch):
         """피크를 영구 보존하면 출금도 낙폭으로 오인해 래칫이 영영 잠긴다.
         (손실이 없는데 리스크만 0.4배로 고정)"""
-        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        monkeypatch.setattr(sm, '_load_all_positions', list)
         _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(10_000.0)      # 기준점 확립
 
@@ -436,7 +436,7 @@ class TestRiskStatePersistence:
         assert sm._get_ratchet_scale() == 1.0, '출금은 낙폭이 아니다'
 
     def test_deposit_rebases_peak_upward(self, _state, monkeypatch):
-        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        monkeypatch.setattr(sm, '_load_all_positions', list)
         _state.update({'peak_equity': 1_000.0, 'equity': 1_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(1_000.0)
         _state['equity'] = 2_000.0
@@ -445,7 +445,7 @@ class TestRiskStatePersistence:
 
     def test_realized_loss_is_not_mistaken_for_withdrawal(self, _state, monkeypatch):
         """실현 손실로 설명되는 감소는 입출금이 아니다 — 래칫이 살아야 한다."""
-        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        monkeypatch.setattr(sm, '_load_all_positions', list)
         _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(10_000.0)
 
@@ -460,7 +460,7 @@ class TestRiskStatePersistence:
     def test_multi_day_losses_not_mistaken_for_withdrawal(self, _state, monkeypatch):
         """day_pnl은 자정마다 0으로 리셋된다. 그것을 기준으로 삼으면 며칠에
         걸친 실현손실이 통째로 '출금'으로 오인돼 래칫이 스스로 풀린다."""
-        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        monkeypatch.setattr(sm, '_load_all_positions', list)
         _state.update({'peak_equity': 10_000.0, 'equity': 10_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(10_000.0)
 
@@ -476,7 +476,7 @@ class TestRiskStatePersistence:
 
     def test_dry_run_trades_excluded_from_capital_flow(self, _state, monkeypatch):
         """가상 거래는 실제 자산을 움직이지 않으므로 실현손익 집계에서 빠져야 한다."""
-        monkeypatch.setattr(sm, '_load_all_positions', lambda: [])
+        monkeypatch.setattr(sm, '_load_all_positions', list)
         _state.update({'peak_equity': 1_000.0, 'equity': 1_000.0, 'day_pnl': 0.0})
         sm._rebase_peak_on_capital_flow(1_000.0)
         with sm._db_lock, sm._db_conn() as conn:

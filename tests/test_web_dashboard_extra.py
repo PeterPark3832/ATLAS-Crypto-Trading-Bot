@@ -11,7 +11,6 @@ _regime_from_log, _parse_regime_metrics(로그 파싱) 을 검증합니다.
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
