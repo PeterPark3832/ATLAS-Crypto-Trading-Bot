@@ -1956,6 +1956,61 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
             f'   거래소 잔고/미체결 주문을 확인해 주세요.')
 
 
+def _live_exit_decision(strategy: str, symbol: str, df, i: int, price: float,
+                        entry: float, sl: float, tp: float,
+                        bars_held: int, max_hold: int) -> Optional[str]:
+    """지금 청산해야 하는가. Returns: 사유 문자열 or None. **부수효과 없음.**
+
+    백테스트의 `_bt_exit_decision`과 **대칭으로** 뽑아 둔 함수다. 두 함수를
+    나란히 두면 라이브에만 있는 규칙이 눈에 보인다 — 실제로 이 분리 과정에서
+    아래 두 가지 격차가 드러났다.
+
+    ⚠️ **백테스트가 모델링하지 않는 라이브 전용 청산 2건**
+
+      1. `BB_MID` (S4) — 라이브는 가격이 볼린저 중앙선에 닿으면 청산한다.
+         백테스트의 `EXIT_CHECK_FUNCS`에는 S4가 **없어서**(S2/S3/S6/S7만)
+         SL·TP·TIME으로만 청산한다. 즉 백테스트의 S4는 라이브보다 오래
+         들고 간다 — 평균회귀 전략이라 되돌림을 더 먹거나 더 토해낸다.
+
+      2. S5의 실시간 TP 갱신 — 라이브는 매 폴링마다 TP를 현재
+         `bb_upper`로 옮긴다(이 함수 호출 **전에** 수행). 백테스트는
+         진입 시점의 정적 TP를 끝까지 쓴다.
+
+    둘 다 성과 차이를 만들지만, 고치려면 백테스트 청산 규칙을 바꿔야 하고
+    그건 과거 검증 결과 전체를 무효화한다. 지금은 **격차를 명시**해 두고,
+    WFO를 다시 돌릴 때 함께 처리하는 편이 안전하다.
+    """
+    if price <= sl:
+        return 'SL'
+    if tp > 0 and price >= tp:
+        return 'TP'
+
+    exit_fn = EXIT_CHECK_FUNCS.get(strategy)
+    if exit_fn is not None and df is not None:
+        try:
+            should_exit = (exit_fn(df, i, entry) if strategy == 'S6'
+                           else exit_fn(df, i))
+            if should_exit:
+                return 'CROSS'
+        except Exception as e:
+            # 청산 함수가 죽으면 그 봉의 청산 신호가 **사라진다**. SL/TP는
+            # 별도로 살아 있으므로 즉시 위험하진 않지만, 반복되면 전략이
+            # 의도한 청산 규칙 없이 도는 셈이다.
+            log.warning(f'[{strategy}] {symbol} 청산 조건 평가 실패 '
+                        f'(이번 봉 CROSS 청산 건너뜀): {e}')
+
+    if max_hold > 0 and bars_held >= max_hold:
+        return 'TIME'
+
+    # S4: BB 중앙선 도달 청산 (라이브 전용 — 위 경고 참조)
+    if strategy == 'S4' and df is not None and 'bb_mid' in df.columns:
+        bb_mid = float(df.iloc[i]['bb_mid']) if not pd.isna(df.iloc[i]['bb_mid']) else 0
+        if bb_mid > 0 and price >= bb_mid:
+            return 'BB_MID'
+
+    return None
+
+
 def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> None:
     """현재 포지션 SL/TP/청산 체크."""
     pos = _load_position(strategy, symbol)
@@ -2020,51 +2075,18 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
                 _update_position_tp(strategy, symbol, live_bb_upper)
             tp = live_bb_upper
 
-    # SL 체크
-    if price <= sl:
+    reason = _live_exit_decision(strategy, symbol, df, i, price,
+                                 entry, sl, tp, bars_held, max_hold)
+    if reason == 'SL':
         # NOTIONAL 사전 검사: 포지션 가치 < $5이면 Binance가 주문 거부
         # → 매도 시도하지 않고 DB 유지, 가격 회복 시 자동 매도
         _pos_val = price * float(pos.get('qty_tokens', 0))
         if _pos_val < SPOT_MIN_ORDER_USDT:
             log.info(f'[{strategy}] {symbol} SL 감지 → NOTIONAL 미달(${_pos_val:.2f}) — 가격 회복 대기')
             return  # 포지션 DB 유지, 다음 폴링에서 재검사
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'SL')
+    if reason:
+        _spot_sell(strategy, symbol, ccxt_sym, pos, price, reason)
         return
-
-    # TP 체크
-    if tp > 0 and price >= tp:
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'TP')
-        return
-
-    # 추가 청산 조건 (크로스 등)
-    exit_fn = EXIT_CHECK_FUNCS.get(strategy)
-    if exit_fn is not None and df is not None:
-        try:
-            if strategy == 'S6':
-                should_exit = exit_fn(df, i, entry)
-            else:
-                should_exit = exit_fn(df, i)
-            if should_exit:
-                _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'CROSS')
-                return
-        except Exception as e:
-            # 청산 함수가 죽으면 그 봉의 청산 신호가 **사라진다**. SL/TP는
-            # 별도로 살아 있으므로 즉시 위험하진 않지만, 반복되면 전략이
-            # 의도한 청산 규칙 없이 도는 셈이다.
-            log.warning(f'[{strategy}] {symbol} 청산 조건 평가 실패 '
-                        f'(이번 봉 CROSS 청산 건너뜀): {e}')
-
-    # 시간 기반 청산
-    if max_hold > 0 and bars_held >= max_hold:
-        _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'TIME')
-        return
-
-    # S4: BB_mid 도달 청산
-    if strategy == 'S4' and df is not None and 'bb_mid' in df.columns:
-        bb_mid = float(df.iloc[i]['bb_mid']) if not pd.isna(df.iloc[i]['bb_mid']) else 0
-        if bb_mid > 0 and price >= bb_mid:
-            _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'BB_MID')
-            return
 
     # Peak 갱신 + 추적 손절
     # (기존에는 peak만 기록하고 sl은 그대로 다시 써서 효과가 0이었다)
