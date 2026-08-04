@@ -118,6 +118,21 @@ def classify_regime(adx: float, btc_price: float,
     return REGIME_WEAK_TREND
 
 
+def _drop_forming_bar(ohlcv: list | None) -> list:
+    """마지막(형성 중인) 봉을 제거한다.
+
+    거래소 OHLCV의 마지막 원소는 **아직 마감되지 않은** 현재 봉이다.
+    지표에 그대로 넣으면 하루 종일 값이 흔들리고, 완성봉만 보는 백테스트와
+    서로 다른 경로를 걷게 된다.
+
+    봉이 2개 미만이면 자를 것이 없으므로 그대로 돌려준다 — 호출부의
+    최소 봉수 가드가 이어서 처리한다.
+    """
+    if not ohlcv or len(ohlcv) < 2:
+        return list(ohlcv or [])
+    return list(ohlcv[:-1])
+
+
 def update_regime(ex: Any, candle_cache: Any = None) -> RegimeState:
     """
     BTC 1D OHLCV를 조회해 레짐을 갱신한다.
@@ -128,6 +143,23 @@ def update_regime(ex: Any, candle_cache: Any = None) -> RegimeState:
             ohlcv = candle_cache.get(ex, 'BTC/USDT', '1d', REGIME_BTC_LOOKBACK + 20)
         else:
             ohlcv = ex.fetch_ohlcv('BTC/USDT', '1d', limit=REGIME_BTC_LOOKBACK + 20)
+
+        # 형성 중인 봉을 버린다. 거래소는 **아직 끝나지 않은** 현재 봉을
+        # 마지막에 붙여 주는데, 그 값은 하루 종일 변한다.
+        #
+        # 예전에는 이걸 그대로 써서 두 가지 문제가 있었다:
+        #   ① 내부 불일치 — ADX '레벨'은 미완성 봉을 포함하는데 ADX '기울기'는
+        #      제외했다(기울기는 `[-(LB+k):-k]` 슬라이스라 끝을 잘라낸다).
+        #      같은 함수가 같은 지표를 두 기준으로 읽고 있었다.
+        #   ② 백테스트와 괴리 — 백테스트는 완성된 일봉만 본다. 즉 검증한
+        #      레짐 경로를 실계좌가 그대로 따라가지 않았다. 합성 데이터로
+        #      재어 보니 **약 15%**에서 레짐이 달라졌고, 레짐은 어떤 전략이
+        #      거래할지를 정하므로 그대로 성과 차이가 된다.
+        #
+        # 완성봉만 쓰면 반응이 최대 하루 늦지만, 미완성 봉으로 레짐이
+        # 하루에도 몇 번씩 뒤집히는 것보다 낫다 — 그 진동은 백테스트가
+        # 한 번도 본 적 없는 동작이다.
+        ohlcv = _drop_forming_bar(ohlcv)
 
         # 가드는 **ADX가 실제로 계산 가능한 봉 수**에 맞춰야 한다.
         # 30봉만 요구하면 30~41봉 구간에서 calc_adx가 0.0을 돌려주고,
@@ -158,13 +190,20 @@ def update_regime(ex: Any, candle_cache: Any = None) -> RegimeState:
         adx = calc_adx(ohlcv[-REGIME_BTC_LOOKBACK:], period=14)
 
         # ADX 기울기: 직전 3봉 ADX 시계열로 추세 소멸 조기 감지
-        # k는 3,2,1이므로 항상 양수다. 예전에는 `-(k if k else None)`로 써
-        # k=0(끝까지)을 처리하는 것처럼 보였지만 그 분기는 도달할 수 없었고,
-        # 타입만 `int | None`이 되어 None에 단항 마이너스를 적용하는 형태가
-        # 됐다(mypy가 잡았다). 실제로는 언제나 `-k`다.
+        # 기울기의 **끝점은 레벨과 같은 봉**이어야 한다.
+        #
+        # 예전에는 k가 3,2,1이라 끝점이 t-1이었고, 위의 `adx`(레벨)는 t였다.
+        # 같은 함수가 같은 지표를 한 봉 어긋난 기준으로 읽은 셈이다.
+        # 게다가 백테스트는 `adx(t) − adx(t−2)`로 계산하므로 라이브만
+        # `adx(t−1) − adx(t−3)`이 되어 검증한 경로와 달랐다.
+        #
+        # k=0은 '끝까지'를 뜻하므로 슬라이스 끝을 None으로 둬야 한다.
+        # (`-0`은 0이라 `[-LB:0]` = 빈 리스트가 된다 — 예전 코드가
+        #  `if k else None`을 쓴 이유이고, k가 0이 될 일이 없어 죽어 있었다)
         adx_series_raw = [
-            calc_adx(ohlcv[-(REGIME_BTC_LOOKBACK + k):-k], period=14)
-            for k in range(3, 0, -1)
+            calc_adx(ohlcv[-(REGIME_BTC_LOOKBACK + k):(-k if k else None)],
+                     period=14)
+            for k in range(2, -1, -1)
         ]
         adx_slope = (adx_series_raw[-1] - adx_series_raw[0]) if len(adx_series_raw) == 3 else 0.0
 

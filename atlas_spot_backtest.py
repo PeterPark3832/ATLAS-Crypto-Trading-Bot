@@ -69,7 +69,7 @@ from atlas_spot_strategies import (
 from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
-from atlas_regime import classify_regime
+from atlas_regime import classify_regime, REGIME_BTC_LOOKBACK
 
 
 # ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
@@ -153,13 +153,20 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
         df4 = _ohlcv_to_df(btc_4h_ohlcv)
         dates4 = df4['ts'].dt.date.astype(str).values
         for j in range(50, len(df4)):
-            adx4h_by_date[dates4[j]] = calc_adx(btc_4h_ohlcv[max(0, j - 50): j + 1], 14)
+            # 윈도우 길이는 라이브와 **같은 상수**를 써야 한다 — 아래 1D 주석 참조
+            _w4 = btc_4h_ohlcv[max(0, j - REGIME_BTC_LOOKBACK + 1): j + 1]
+            adx4h_by_date[dates4[j]] = calc_adx(_w4, 14)
 
     regime_map: dict = {}
     adx_hist: list = []
     for i in range(50, len(df)):
         date_key = str(df['ts'].iloc[i].date())
-        window   = btc_1d_ohlcv[max(0, i - 50): i + 1]
+        # ⚠️ 윈도우 **길이**가 라이브와 같아야 한다.
+        # Wilder ADX는 재귀 평활이라 워밍업 길이가 값을 바꾼다. 예전에는
+        # 여기가 51봉(i-50:i+1), 라이브가 50봉(`ohlcv[-LOOKBACK:]`)이라
+        # 같은 날짜의 ADX가 달랐다(36.15 vs 35.72). 한 봉 차이가 레짐
+        # 경계에서 분류를 뒤집고, 그러면 어떤 전략이 거래할지가 달라진다.
+        window   = btc_1d_ohlcv[max(0, i - REGIME_BTC_LOOKBACK + 1): i + 1]
         adx      = calc_adx(window, 14)
         btc_px   = float(close.iloc[i])
         ema_val  = float(ema200.iloc[i])
