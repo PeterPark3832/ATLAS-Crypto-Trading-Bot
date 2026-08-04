@@ -1516,16 +1516,10 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         log.info(f'[{strategy}] {symbol} 매수 차단(비용): {_cost_why}')
         return False
 
-    adj_risk   = SPOT_BASE_RISK_PCT * kelly * ratchet * r_scale * funding_scale * rs_scale * health
-    risk_usd   = equity * adj_risk
-    qty        = risk_usd / sl_dist
-    cost_usdt  = qty * entry_price
-
-    # 배분 한도
-    if cost_usdt > equity * SPOT_MAX_ALLOC_PCT:
-        cost_usdt = equity * SPOT_MAX_ALLOC_PCT
-        qty       = cost_usdt / entry_price
-        adj_risk  = (qty * sl_dist) / equity
+    adj_risk, qty, cost_usdt = _size_position(
+        equity, sl_dist, entry_price,
+        kelly=kelly, ratchet=ratchet, regime=r_scale,
+        funding=funding_scale, rs=rs_scale, health=health)
 
     # 잔고 확인
     ok, reason = _check_buying_power(cost_usdt)
@@ -1954,6 +1948,36 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
         _tg(f'⚠️ [{strategy}] {symbol} 거래소 보호주문 등록이 {cnt}회 연속 실패했습니다.\n'
             f'   현재 소프트웨어 SL만 작동 중 — 봇이 멈추면 손절되지 않습니다.\n'
             f'   거래소 잔고/미체결 주문을 확인해 주세요.')
+
+
+def _size_position(equity: float, sl_dist: float, entry_price: float, *,
+                   kelly: float = 1.0, ratchet: float = 1.0,
+                   regime: float = 1.0, funding: float = 1.0,
+                   rs: float = 1.0, health: float = 1.0) -> tuple:
+    """(실효 리스크비율, 수량, 주문금액)을 계산한다. **부수효과 없음.**
+
+    리스크는 스케일들의 **곱**이다. 이 저장소에서 가장 비싼 버그가 여기서
+    나왔다 — 1보다 작은 값이 겹쳐 실효 리스크가 설정값의 9%까지 내려갔고,
+    주문금액이 거래소 최소치($5) 아래로 떨어져 하락장 전략이 통째로
+    체결되지 않았다(dc7fb24). 그래서 각 스케일을 **키워드 인자로** 받아
+    호출부에서 무엇이 곱해지는지 한눈에 보이게 한다.
+
+    배분 상한에 걸리면 수량을 줄이고 **실효 리스크를 역산**한다. 상한 때문에
+    실제로 건 위험이 줄었는데 adj_risk를 그대로 두면, 그 값이 DB에 저장돼
+    Kelly·건강도·학습기 통계를 전부 부풀린다.
+    """
+    if equity <= 0 or sl_dist <= 0 or entry_price <= 0:
+        return 0.0, 0.0, 0.0
+    adj_risk  = (SPOT_BASE_RISK_PCT * kelly * ratchet * regime
+                 * funding * rs * health)
+    qty       = (equity * adj_risk) / sl_dist
+    cost_usdt = qty * entry_price
+    cap = equity * SPOT_MAX_ALLOC_PCT
+    if cost_usdt > cap:
+        cost_usdt = cap
+        qty       = cost_usdt / entry_price
+        adj_risk  = (qty * sl_dist) / equity
+    return adj_risk, qty, cost_usdt
 
 
 def _live_exit_decision(strategy: str, symbol: str, df, i: int, price: float,

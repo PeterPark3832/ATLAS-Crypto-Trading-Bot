@@ -106,19 +106,56 @@ class TestConfigParity:
 # ══════════════════════════════════════════════════════════════
 
 class TestReplacesNotStacks:
+    """스케일이 누적되면 실효 리스크가 설정값의 9%까지 내려가고 주문이
+    거래소 최소액 아래로 떨어진다(dc7fb24). 학습기는 Kelly·건강도를
+    **대체**해야지 그 위에 곱해지면 안 된다.
+
+    소스 문자열이 아니라 `_size_position`의 **계산 결과**로 검증한다 —
+    문자열 검사는 표현만 바뀌어도 실패하고(리팩터링 방해), 표현을 유지한 채
+    의미를 바꾸면 통과한다(진짜 회귀를 놓침). 실제로 이 테스트가 사이징
+    추출 때 그 이유로 깨졌다.
+    """
+
     def test_health_is_bypassed_when_learning(self):
-        """학습기 ON이면 건강도 경로가 비활성이어야 한다 — 같은 근거로
-        두 번 깎으면 주문이 최소액 아래로 내려간다."""
         src = Path(sm.__file__).read_text()
         assert '1.0 if SPOT_LEARN_ENABLED else _get_strategy_health_scale' in src
 
-    def test_kelly_is_replaced_not_multiplied(self):
-        src = Path(sm.__file__).read_text()
-        i = src.index('if SPOT_LEARN_ENABLED:\n        kelly = _get_learn_scale')
-        assert i > 0, '학습 배분이 Kelly 자리를 대신해야 한다'
-        # 곱셈식에 learn 스케일이 추가로 곱해지면 안 된다
-        line = next(l for l in src.splitlines() if 'adj_risk   = SPOT_BASE_RISK_PCT' in l)
-        assert 'learn' not in line, f'누적 곱셈이 생겼다: {line}'
+    # SL 거리를 넓게 잡아 **배분 상한에 걸리지 않는** 구간에서 본다.
+    # 상한에 걸리면 결과가 리스크에 선형이 아니라서 아래 성질을 잴 수 없다.
+    EQ, SL_DIST, PX = 1000.0, 20.0, 100.0
+
+    def test_kelly_slot_is_replaced_not_stacked(self):
+        """학습 배분이 Kelly '자리'를 차지하면 결과는 배수 하나만큼만 변한다.
+        누적이면 두 배수의 곱만큼 변한다 — 그 차이로 판별한다."""
+        learn, kelly = 0.25, 0.40
+        replaced = sm._size_position(self.EQ, self.SL_DIST, self.PX, kelly=learn)[0]
+        stacked = sm._size_position(self.EQ, self.SL_DIST, self.PX,
+                                    kelly=learn * kelly)[0]
+        assert replaced > stacked
+        assert replaced == pytest.approx(cfg.SPOT_BASE_RISK_PCT * learn)
+
+    def test_sizing_multiplies_every_declared_scale(self):
+        """선언된 스케일이 하나라도 무시되면 사이징이 의도와 달라진다."""
+        base = sm._size_position(self.EQ, self.SL_DIST, self.PX)
+        assert base[2] < self.EQ * cfg.SPOT_MAX_ALLOC_PCT, '상한에 걸리지 않아야 한다'
+        for name in ('kelly', 'ratchet', 'regime', 'funding', 'rs', 'health'):
+            half = sm._size_position(self.EQ, self.SL_DIST, self.PX,
+                                     **{name: 0.5})[0]
+            assert half == pytest.approx(base[0] * 0.5), f'{name} 스케일이 무시된다'
+
+    def test_alloc_cap_recomputes_effective_risk(self):
+        """상한에 걸려 수량이 줄면 실효 리스크도 역산돼야 한다.
+        그대로 두면 DB에 부풀린 값이 저장돼 Kelly·학습기 통계를 오염시킨다."""
+        eq, px = 1000.0, 100.0
+        sl_dist = 0.5                      # 매우 좁은 SL → 명목가가 상한 초과
+        adj, qty, cost = sm._size_position(eq, sl_dist, px)
+        assert cost == pytest.approx(eq * cfg.SPOT_MAX_ALLOC_PCT)
+        assert adj == pytest.approx((qty * sl_dist) / eq)
+        assert adj < cfg.SPOT_BASE_RISK_PCT
+
+    def test_degenerate_inputs_are_safe(self):
+        for args in ((0.0, 5.0, 100.0), (1000.0, 0.0, 100.0), (1000.0, 5.0, 0.0)):
+            assert sm._size_position(*args) == (0.0, 0.0, 0.0)
 
     def test_backtest_replaces_too(self):
         src = Path(bt.__file__).read_text()

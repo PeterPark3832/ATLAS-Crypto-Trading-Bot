@@ -221,6 +221,55 @@ def _bt_exit_decision(position: dict, strategy_id: str, df, i: int,
     return None, 0.0
 
 
+def _bt_rs_gate(rs_applies: bool, rank_map, rank_keys: list,
+                symbol: str, date_key: str) -> tuple:
+    """RS Gate 판정. Returns: (리스크 배수 or **None(차단)**, 진단키 or None).
+
+    차단을 `None`으로 돌려주는 이유: 배수 0.0으로 표현하면 호출부에서
+    곱셈에 흘러들어가 '진입은 했는데 수량이 0'인 주문이 된다. 차단과
+    감봉은 다른 사건이므로 타입으로 구분한다.
+
+    라이브 `_get_momentum_rank_pct`와 같은 기본값(0.5)을 쓴다 — 순위를
+    모를 때 하위권으로 취급하면 신규 심볼이 영구 차단된다.
+    """
+    if not rs_applies:
+        return 1.0, None
+    rank_pct = _rank_pct_asof(rank_map, rank_keys, symbol, date_key)
+    if rank_pct is None:
+        rank_pct = 0.5
+    if rank_pct > MOMENTUM_RS_GATE_PCT:
+        return None, 'rs_gate_block'
+    if rank_pct <= MOMENTUM_TOP_TIER_PCT:
+        return MOMENTUM_TOP_RISK_MULT, 'rs_top_tier'
+    return 1.0, None
+
+
+def _bt_entry_filters(sl_dist: float, entry_price: float,
+                      slip: float) -> Optional[str]:
+    """라이브 진입 필터 패리티. 차단되면 진단키를, 통과하면 None을 낸다.
+
+    라이브에만 있고 백테스트에 없으면 성과가 구조적으로 과대평가된다.
+
+    ※ 남아있는 한계 — **포트폴리오 제약은 모델링하지 못한다.**
+      `backtest_strategy`는 (전략 × 심볼) 단위로 독립 실행되므로 동시
+      포지션 수 상한(SPOT_MAX_POSITIONS), 슬롯당 최소 자본
+      (SPOT_EQUITY_PER_SLOT), USDT 예비금(SPOT_RESERVE_PCT), 전략 간
+      자본 경합을 반영할 수 없다. 즉 백테스트는 여전히 라이브보다
+      **낙관적**이며, 특히 신호가 몰리는 구간에서 라이브는 일부 진입을
+      포기한다. 결과를 상한선으로 읽을 것.
+    """
+    sl_pct = sl_dist / entry_price
+    if sl_pct > SPOT_MAX_SL_PCT:
+        return 'sl_too_wide'
+    # 비용 대비 엣지: 왕복비용이 1R을 얼마나 잠식하는지
+    # (라이브 `_cost_edge_ok`와 동일한 부등식. 스프레드는 백테스트에
+    #  호가 데이터가 없어 슬리피지 모델로 근사한다)
+    cost_rate = BT_SPOT_FEE * 2 + slip * 2
+    if cost_rate / sl_pct > SPOT_MAX_COST_PER_R:
+        return 'cost_exceeds_edge'
+    return None
+
+
 def _bt_kelly_scale(trades: list) -> float:
     """Kelly 스케일 — 라이브 `_get_kelly_scale`과 같은 규칙.
 
@@ -451,6 +500,73 @@ def _since_ms(date_str: str) -> int:
 #  성과 지표
 # ══════════════════════════════════════════════════════════════
 
+def _equity_curve(trades: list, initial_equity: float) -> tuple:
+    """거래 순서대로 자본을 굴려 (자본곡선, 최종자본, 최대낙폭)을 낸다.
+
+    복리다 — 각 거래는 **그 시점 자본**의 risk_pct만큼 건다. 그래서 같은
+    거래 집합이라도 순서가 다르면 최종 자본이 달라진다. 이 함수가 순서를
+    보존하는 이유이고, 지표를 거래 목록 평균으로 대신 계산하면 안 되는
+    이유이기도 하다.
+
+    자본에 하한(0.01)을 두는 것은 음수 자본에서 수익률이 발산해 Sharpe가
+    무의미해지는 것을 막기 위해서다.
+    """
+    equity = initial_equity
+    eq_curve = [equity]
+    peak_eq = equity
+    max_dd = 0.0
+    for t in trades:
+        equity += equity * t.risk_pct * t.pnl_r
+        equity = max(equity, 0.01)
+        eq_curve.append(equity)
+        if equity > peak_eq:
+            peak_eq = equity
+        else:
+            max_dd = max(max_dd, (peak_eq - equity) / peak_eq)
+    return eq_curve, equity, max_dd
+
+
+def _cagr_pct(equity: float, initial_equity: float,
+              start_date: str, end_date: str) -> float:
+    """연평균 성장률(%). 날짜가 없거나 파싱 불가면 0.0.
+
+    기간 하한 0.1년: 짧은 구간에서 지수가 폭발해 CAGR이 수천 %로 나오는
+    것을 막는다. 그런 값은 Calmar까지 오염시킨다.
+    """
+    if not start_date or not end_date or equity <= 0:
+        return 0.0
+    try:
+        dt_s = datetime.strptime(start_date, '%Y-%m-%d')
+        dt_e = datetime.strptime(end_date, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return 0.0
+    years = max((dt_e - dt_s).days / 365.25, 0.1)
+    return ((equity / initial_equity) ** (1 / years) - 1) * 100
+
+
+def _risk_ratios(eq_curve: list) -> tuple:
+    """(Sharpe, Sortino) — 자본곡선 수익률 기준, 252일 연율화.
+
+    표본이 2개 미만이거나 표준편차가 0이면 0.0을 낸다. 0으로 나눠 inf가
+    나오면 WFO 합격 판정이 통과해 버린다 — '변동이 없어서' 나온 무한대를
+    '위험 없는 수익'으로 읽는 셈이다.
+    """
+    if len(eq_curve) < 2:
+        return 0.0, 0.0
+    rets = np.array([
+        (eq_curve[i] - eq_curve[i - 1]) / eq_curve[i - 1]
+        for i in range(1, len(eq_curve))
+    ])
+    sharpe = 0.0
+    if len(rets) > 1 and rets.std() > 0:
+        sharpe = float(rets.mean() / rets.std() * math.sqrt(252))
+    sortino = 0.0
+    down = rets[rets < 0]
+    if len(down) > 1 and down.std() > 0:
+        sortino = float(rets.mean() / down.std() * math.sqrt(252))
+    return sharpe, sortino
+
+
 def calc_spot_metrics(trades: list, initial_equity: float = BT_INITIAL_EQ,
                       start_date: str = '', end_date: str = '') -> dict:
     """스팟 거래 목록으로 종합 성과 지표 계산."""
@@ -467,63 +583,10 @@ def calc_spot_metrics(trades: list, initial_equity: float = BT_INITIAL_EQ,
     pf_denom = abs(sum(losses))
     pf       = abs(sum(wins)) / pf_denom if pf_denom > 0 else 999.0
 
-    # 자본 곡선
-    equity     = initial_equity
-    eq_curve   = [equity]
-    peak_eq    = equity
-    max_dd     = 0.0
-    drawdown_durations = []
-    dd_start   = None
-
-    for t in trades:
-        equity += equity * t.risk_pct * t.pnl_r
-        equity = max(equity, 0.01)
-        eq_curve.append(equity)
-        if equity > peak_eq:
-            if dd_start is not None:
-                drawdown_durations.append(len(eq_curve) - dd_start)
-            dd_start = None
-            peak_eq = equity
-        else:
-            if dd_start is None:
-                dd_start = len(eq_curve)
-            dd = (peak_eq - equity) / peak_eq
-            max_dd = max(max_dd, dd)
-
+    eq_curve, equity, max_dd = _equity_curve(trades, initial_equity)
     total_pnl_pct = (equity - initial_equity) / initial_equity * 100
-
-    # CAGR 계산
-    cagr = 0.0
-    if start_date and end_date:
-        try:
-            dt_s = datetime.strptime(start_date, '%Y-%m-%d')
-            dt_e = datetime.strptime(end_date, '%Y-%m-%d')
-            years = max((dt_e - dt_s).days / 365.25, 0.1)
-            if equity > 0:
-                cagr = ((equity / initial_equity) ** (1 / years) - 1) * 100
-        except Exception:
-            pass
-
-    # Sharpe (연율화)
-    rets = np.array([
-        (eq_curve[i] - eq_curve[i - 1]) / eq_curve[i - 1]
-        for i in range(1, len(eq_curve))
-    ])
-    sharpe = 0.0
-    if len(rets) > 1:
-        std = rets.std()
-        if std > 0:
-            sharpe = float(rets.mean() / std * math.sqrt(252))
-
-    # Sortino (하방 변동성만)
-    down_rets = rets[rets < 0]
-    sortino = 0.0
-    if len(down_rets) > 1:
-        down_std = down_rets.std()
-        if down_std > 0:
-            sortino = float(rets.mean() / down_std * math.sqrt(252))
-
-    # Calmar
+    cagr = _cagr_pct(equity, initial_equity, start_date, end_date)
+    sharpe, sortino = _risk_ratios(eq_curve)
     calmar = cagr / (max_dd * 100) if max_dd > 0 else 0.0
 
     hold_hours = [getattr(t, 'hold_hours', 0) for t in trades if hasattr(t, 'hold_hours')]
@@ -729,17 +792,12 @@ def backtest_strategy(
         # 라이브는 모멘텀 하위권 심볼의 돌파 진입을 막고 상위 티어는 리스크를
         # 올린다. 백테스트가 이걸 모르면 MOMENTUM_RS_GATE_PCT는 어떤 값을
         # 넣어도 결과가 같아, WFO가 검증할 수 없는(=검증된 척만 하는) 축이 된다.
-        rs_scale = 1.0
-        if rs_applies:
-            rank_pct = _rank_pct_asof(rank_map, rank_keys, symbol, date_key)
-            if rank_pct is None:
-                rank_pct = 0.5      # 라이브 `_get_momentum_rank_pct` 기본값
-            if rank_pct > MOMENTUM_RS_GATE_PCT:
-                diag['rs_gate_block'] = diag.get('rs_gate_block', 0) + 1
-                continue
-            if rank_pct <= MOMENTUM_TOP_TIER_PCT:
-                rs_scale = MOMENTUM_TOP_RISK_MULT
-                diag['rs_top_tier'] = diag.get('rs_top_tier', 0) + 1
+        rs_scale, rs_flag = _bt_rs_gate(rs_applies, rank_map, rank_keys,
+                                        symbol, date_key)
+        if rs_flag:
+            diag[rs_flag] = diag.get(rs_flag, 0) + 1
+        if rs_scale is None:
+            continue
 
         slip        = _get_slippage(symbol)
         entry_price = float(row['open']) * (1 + slip)  # 현재봉 시가 = 신호봉 다음봉 오픈
@@ -760,17 +818,9 @@ def backtest_strategy(
         #   USDT 예비금(SPOT_RESERVE_PCT), 전략 간 자본 경합을 반영할 수 없다.
         #   즉 백테스트는 여전히 라이브보다 **낙관적**이며, 특히 신호가 몰리는
         #   구간에서 라이브는 일부 진입을 포기한다. 결과를 상한선으로 읽을 것.
-        sl_pct = sl_dist / entry_price
-        if sl_pct > SPOT_MAX_SL_PCT:
-            diag['sl_too_wide'] = diag.get('sl_too_wide', 0) + 1
-            continue
-        # 비용 대비 엣지: 왕복비용이 1R을 얼마나 잠식하는지
-        # (라이브 `_cost_edge_ok`와 동일한 부등식. 스프레드는 백테스트에
-        #  호가 데이터가 없어 슬리피지 모델로 근사한다)
-        cost_rate  = BT_SPOT_FEE * 2 + slip * 2
-        cost_per_r = cost_rate / sl_pct
-        if cost_per_r > SPOT_MAX_COST_PER_R:
-            diag['cost_exceeds_edge'] = diag.get('cost_exceeds_edge', 0) + 1
+        block = _bt_entry_filters(sl_dist, entry_price, slip)
+        if block:
+            diag[block] = diag.get(block, 0) + 1
             continue
 
         # 포지션 크기 계산 (스팟: 레버리지 없음)
