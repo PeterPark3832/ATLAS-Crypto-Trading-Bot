@@ -4,6 +4,9 @@ ATLAS — 지표 계산 모듈
 현물 봇 공유 기술 지표 라이브러리.
 """
 
+import math
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -137,12 +140,50 @@ def calc_oi_change_pct(oi_series: list) -> float:
         return 0.0
 
 
-def calc_dynamic_rr_ma(adx: float, ema_gap_pct: float) -> float:
-    """
-    ADX 강도 + EMA 갭 기반 동적 RR (1.5~3.0).
+# 동적 RR 기여 비중 — ADX가 2/3, EMA 갭이 1/3.
+# (원래 1.5 + adx*1.0 + gap*0.5 로 하드코딩돼 있던 가중치를 이름으로 뽑았다)
+RR_ADX_WEIGHT = 2.0 / 3.0
+RR_GAP_WEIGHT = 1.0 / 3.0
+
+
+def calc_dynamic_rr_ma(adx: float, ema_gap_pct: float,
+                       rr_min: float = 1.5, rr_max: float = 3.0,
+                       rr_fallback: Optional[float] = None) -> float:
+    """ADX 강도 + EMA 갭 기반 동적 RR.
+
     추세 강도가 높을수록 TP를 멀리, 약할수록 조기 이탈.
+
+    ⚠️ 범위를 **인자로 받는다.** 예전에는 1.5~3.0이 이 함수 안에 하드코딩돼
+    있었고, config의 S3/S6/S7_RR_MIN·MAX 6개는 그 값과 우연히 같아서
+    "동작하는 것처럼" 보였다. 실제로는 S6_RR_MAX를 5.0으로 바꿔도 TP가
+    전혀 변하지 않았다 — 튜닝 가능하다고 문서화된 값이 사실은 상수였고,
+    WFO 그리드에 넣었다면 모든 후보가 동점이 되는 그 실패 그대로다.
+
+    호출자는 자기 전략의 상수를 넘겨야 한다. 기본값은 기존 동작과 동일하다.
+
+    ⚠️ **결측(NaN) 처리가 이 함수의 핵심 안전장치다.** 예전에는 NaN이
+    그대로 흘러들어와 `max(0, min(1, nan))`이 1.0을 내놓았다 — 파이썬의
+    min/max는 NaN 비교가 전부 False라 첫 인자를 돌려주기 때문이다.
+    그 결과 **지표 결측이 '최강 추세'로 둔갑해 가장 공격적인 TP**가
+    잡혔다. 데이터가 없을 때 가장 공격적으로 베팅하는 것은 정확히
+    반대로 가는 실패다. 이제 결측이면 `rr_fallback`(전략의 정적 RR)을
+    쓰고, 그것도 없으면 범위 중앙값으로 물러선다.
     """
+    if rr_max < rr_min:
+        rr_min, rr_max = rr_max, rr_min      # 뒤집힌 설정에도 발산하지 않게
+
+    def _bad(v) -> bool:
+        try:
+            return not math.isfinite(float(v))
+        except (TypeError, ValueError):
+            return True
+
+    if _bad(adx) or _bad(ema_gap_pct):
+        fb = rr_fallback if rr_fallback is not None else (rr_min + rr_max) / 2.0
+        return round(max(rr_min, min(rr_max, float(fb))), 2)
+
     adx_norm = max(0.0, min(1.0, (adx - 15.0) / (45.0 - 15.0)))
     gap_norm = max(0.0, min(1.0, (ema_gap_pct - 0.5) / (3.0 - 0.5)))
-    rr = 1.5 + adx_norm * 1.0 + gap_norm * 0.5  # 1.5 ~ 3.0
-    return round(max(1.5, min(3.0, rr)), 2)
+    span = rr_max - rr_min
+    rr = rr_min + span * (adx_norm * RR_ADX_WEIGHT + gap_norm * RR_GAP_WEIGHT)
+    return round(max(rr_min, min(rr_max, rr)), 2)

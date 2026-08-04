@@ -219,8 +219,8 @@ def get_signal_s3(df: pd.DataFrame, i: int) -> dict:
 
     # 동적 RR: ADX 강도 + EMA 갭 비례 (S3_RR_MIN~S3_RR_MAX)
     ema_gap_pct = abs(float(cur['ema_fast']) - float(cur['ema_slow'])) / float(cur['ema_slow']) * 100
-    rr_actual   = calc_dynamic_rr_ma(float(cur['adx']), ema_gap_pct)
-    rr_actual   = max(S3_RR_MIN, min(S3_RR_MAX, rr_actual))
+    rr_actual   = calc_dynamic_rr_ma(float(cur['adx']), ema_gap_pct,
+                                     S3_RR_MIN, S3_RR_MAX, S3_RR)
     tp = entry + (entry - sl) * rr_actual
 
     return {
@@ -400,10 +400,12 @@ def get_signal_s6(df: pd.DataFrame, i: int) -> dict:
         return _no_sig()
 
     # 동적 RR: ADX 강도 비례 (S6_RR_MIN~S6_RR_MAX)
-    adx_val = float(cur['adx']) if 'adx' in cur.index and not pd.isna(cur['adx']) else 0.0
+    # 결측을 0.0으로 바꾸면 '추세 없음'으로 위장된다 — NaN을 그대로
+    # 넘겨 calc_dynamic_rr_ma가 정적 폴백을 쓰게 한다.
+    adx_val = float(cur['adx']) if 'adx' in cur.index else float('nan')
     sl_dist = entry - sl
     ema_gap_pct = 0.0  # S6는 EMA 갭 불필요 — ADX 강도만 반영
-    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct)
+    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct, S6_RR_MIN, S6_RR_MAX, S6_RR)
     tp = entry + sl_dist * rr_actual
 
     rr = (tp - entry) / sl_dist if sl_dist > 0 else 0.0
@@ -474,9 +476,11 @@ def get_signal_s7(df: pd.DataFrame, i: int) -> dict:
         return _no_sig()
 
     # 동적 RR: ADX 강도 비례 (S7_RR_MIN~S7_RR_MAX)
-    adx_val = float(cur['adx']) if 'adx' in cur.index and not pd.isna(cur['adx']) else 0.0
+    # 결측을 0.0으로 바꾸면 '추세 없음'으로 위장된다 — NaN을 그대로
+    # 넘겨 calc_dynamic_rr_ma가 정적 폴백을 쓰게 한다.
+    adx_val = float(cur['adx']) if 'adx' in cur.index else float('nan')
     ema_gap_pct = abs(float(cur['close']) - float(cur['ema_trend'])) / float(cur['ema_trend']) * 100
-    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct)
+    rr_actual = calc_dynamic_rr_ma(adx_val, ema_gap_pct, S7_RR_MIN, S7_RR_MAX, S7_RR)
     tp = entry + (entry - sl) * rr_actual
 
     return {
@@ -614,7 +618,7 @@ def get_signal_s7v4(df, i: int) -> dict:
 
     # 동적 RR: ADX 강도 + EMA 갭 비례
     ema_gap_pct = abs(entry - float(cur['ema_trend'])) / float(cur['ema_trend']) * 100
-    rr_actual = calc_dynamic_rr_ma(adx, ema_gap_pct)
+    rr_actual = calc_dynamic_rr_ma(adx, ema_gap_pct, S7_RR_MIN, S7_RR_MAX, S7_RR)
     tp = entry + (entry - sl) * rr_actual
 
     return {
