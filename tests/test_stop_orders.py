@@ -133,6 +133,49 @@ def _trades(db_file):
 #  _place_stop_loss_order
 # ══════════════════════════════════════════════════════════════
 
+class TestSellableQtyClampsToBalance:
+    """기록 수량이 실제 보유량보다 많으면 보호주문이 영원히 실패한다.
+
+    기초자산으로 수수료가 빠지면(BNB 미사용) 체결량 > 보유량이 되고,
+    그 수량으로 주문하면 -2010(insufficient balance)이 난다.
+    `_protection_impossible`은 NOTIONAL 미달만 구조적 불가로 보므로 이
+    경우는 '일시적 실패'로 분류돼 5분마다 무한 재시도 + 재시작마다 알림이
+    반복된다. 실측 사례: ADA 기록 44.9 / 보유 44.8551 (0.1% taker 수수료).
+    """
+
+    def test_clamps_to_free_balance(self, _fake_ex):
+        _fake_ex.free_balance = {'ADA': 44.8551}
+        assert sm._sellable_qty('ADA/USDT', 44.9) == pytest.approx(44.8551)
+
+    def test_no_clamp_when_balance_sufficient(self, _fake_ex):
+        _fake_ex.free_balance = {'ADA': 100.0}
+        assert sm._sellable_qty('ADA/USDT', 44.9) == pytest.approx(44.9)
+
+    def test_no_clamp_when_free_is_zero(self, _fake_ex):
+        """free=0은 '다른 주문이 물량을 잠근' 상태다.
+
+        0으로 깎으면 NOTIONAL 미달 → 구조적 불가로 분류돼 24시간 조용해진다.
+        사람이 미체결 주문을 확인해야 하는 상황이므로 알림 경로를 유지한다.
+        """
+        _fake_ex.free_balance = {'ADA': 0.0}
+        assert sm._sellable_qty('ADA/USDT', 44.9) == pytest.approx(44.9)
+
+    def test_balance_error_falls_back_to_requested_qty(self, _fake_ex, monkeypatch):
+        def _boom():
+            raise RuntimeError('api down')
+        monkeypatch.setattr(_fake_ex, 'fetch_balance', _boom)
+        assert sm._sellable_qty('ADA/USDT', 44.9) == pytest.approx(44.9)
+
+    def test_stop_order_uses_clamped_qty(self, _fake_ex):
+        """회귀: 보유량보다 많은 수량으로 주문을 내지 않는다."""
+        _fake_ex.free_balance = {'ADA': 44.8551}
+        sm._place_stop_loss_order('S6', 'ADAUSDT', 'ADA/USDT', 44.9, 0.1704)
+        sent = [c for c in _fake_ex.calls if c[0] == 'create_order']
+        assert sent, '스탑주문이 등록되지 않았다'
+        assert sent[0][4] == pytest.approx(44.8551), (
+            f'보유량 44.8551인데 {sent[0][4]}로 주문 — -2010으로 영원히 실패한다')
+
+
 class TestPlaceStopLossOrder:
     def test_places_stop_limit_with_gap(self, _fake_ex):
         oid = sm._place_stop_loss_order('S3', 'BTCUSDT', 'BTC/USDT', 10.0, 95.0)

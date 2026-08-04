@@ -502,11 +502,35 @@ def _net_filled_qty(order: dict, ccxt_sym: str, requested: float) -> float:
 
 
 def _sellable_qty(ccxt_sym: str, qty: float) -> float:
-    """거래소 수량 정밀도로 **내림** 적용 — 보유량 초과 주문 방지."""
+    """실제 free 잔고로 제한한 뒤 거래소 수량 정밀도로 **내림**.
+
+    정밀도만 맞추고 보유량을 보지 않으면, 기록된 수량이 실제 보유량보다
+    조금이라도 많을 때 보호주문이 -2010(insufficient balance)으로 **영원히**
+    실패한다. `_protection_impossible`은 NOTIONAL 미달만 구조적 불가로 보므로
+    이 경우는 '일시적 실패'로 분류돼 5분마다 무한 재시도하고, 재시작마다
+    알림이 반복된다.
+
+    기초자산으로 수수료가 빠지면(BNB 미사용) 체결량보다 보유량이 적어 이
+    상태가 쉽게 만들어진다 — 실측: ADA 기록 44.9 / 보유 44.8551 (0.1% taker).
+    청산 경로(`_spot_sell`)는 이미 같은 클램프를 하고 있었고 여기만 빠져 있었다.
+
+    free 조회 실패나 free=0(다른 주문이 물량을 잠근 상태)일 때는 클램프하지
+    않는다 — 후자는 사람이 미체결 주문을 확인해야 하는 상황이라, 조용히 0으로
+    깎아 '구조적 불가'로 넘기는 대신 기존의 재시도·알림 경로를 그대로 둔다.
+    """
     try:
-        return float(_get_ex().amount_to_precision(ccxt_sym, qty))
-    except Exception:
-        return qty
+        ex   = _get_ex()
+        free = float((ex.fetch_balance()['free'] or {}).get(
+            ccxt_sym.split('/')[0], 0) or 0)
+        if 0 < free < qty:
+            qty = free
+        qty = float(ex.amount_to_precision(ccxt_sym, qty))
+    except Exception as e:
+        # 보정 실패는 치명적이지 않다 — 주문이 거부되면 소프트웨어 SL이 받는다.
+        # 다만 조용히 넘기면 원인 추적이 불가능하므로 흔적은 남긴다.
+        # qty는 여기까지 진행된 보정(클램프)을 그대로 유지한다.
+        log.debug(f'[{ccxt_sym}] 판매수량 보정 실패 — 요청 수량 사용: {e}')
+    return qty
 
 
 def _cancel_orphan_sell_orders(strategy: str, symbol: str, ccxt_sym: str,
