@@ -32,6 +32,137 @@ import reoptimize as ro
 #  이웃 탐색
 # ══════════════════════════════════════════════════════════════
 
+class TestGridEffectiveness:
+    """그리드에는 **백테스트가 실제로 반영하는** 파라미터만 있어야 한다.
+
+    백테스트가 모르는 값을 넣으면 모든 후보가 동점이 되고, 최적화기는 그중
+    첫 값을 '개선'으로 제안한다. 검증된 적 없는 변경이 검증된 것처럼
+    보고되는 셈이라 가장 위험한 실패다.
+
+    실제로 MOMENTUM_RS_GATE_PCT를 넣었다가 이 함정에 걸렸다 — 백테스트에
+    RS Gate 구현이 없어 세 값이 모두 같은 결과를 냈는데도 "OOS PF 2.22 →
+    3.54 개선"으로 제안됐다. 라이브에서는 S6 진입의 2/3를 막는 큰 변경이다.
+    """
+
+    @staticmethod
+    def _referenced_names() -> set:
+        """백테스트 경로가 실제로 읽는 이름들.
+
+        행동 기반 검사(값을 바꿔 결과 비교)는 데이터에 좌우된다 — 표본이
+        적으면 멀쩡히 구현된 파라미터도 '효과 없음'으로 보인다. 그래서
+        **정적으로** "백테스트 경로가 이 이름을 아는가"를 본다.
+        """
+        import atlas_spot_backtest as bt
+        import atlas_spot_strategies as st
+        return set(Path(bt.__file__).read_text().split()) | \
+               set(Path(st.__file__).read_text().split())
+
+    @pytest.mark.parametrize('sid', sorted(ro.GRIDS))
+    def test_every_axis_is_known_to_backtest(self, sid):
+        blob = ' '.join(self._referenced_names())
+        for key in ro.GRIDS[sid]:
+            assert key in blob, (
+                f'{sid}.{key}: 백테스트 경로(백테스트/전략 모듈)가 이 이름을 '
+                f'참조하지 않는다. 값을 바꿔도 결과가 같으므로 모든 후보가 '
+                f'동점이 되고, 최적화기는 그중 첫 값을 "개선"으로 제안한다 — '
+                f'검증된 적 없는 변경이 검증된 것처럼 보고된다.')
+
+    def test_detects_unmodelled_param(self):
+        """가드가 실제로 잡는지 — 백테스트가 모르는 이름은 걸려야 한다.
+
+        (실제 상수를 쓰면 나중에 그게 구현되는 순간 테스트가 조용히
+         무의미해진다. 그래서 영원히 구현될 리 없는 이름을 쓴다)
+        """
+        blob = ' '.join(self._referenced_names())
+        fake = 'SPOT_' + 'NEVER_IMPLEMENTED_PARAM'
+        assert fake not in blob
+        grid = dict(ro.GRIDS['S6'])
+        grid[fake] = [1, 2]
+        unknown = [k for k in grid if k not in blob]
+        assert unknown == [fake], '모델링되지 않은 축만 걸려야 한다'
+
+    def test_rs_gate_back_in_grid_now_that_backtest_models_it(self):
+        """RS Gate는 백테스트가 구현했으므로 그리드에 있어야 한다.
+
+        구현해 놓고 그리드에 넣지 않으면, MOMENTUM_RS_GATE_PCT는 여전히
+        '데이터가 아니라 감으로 정한 값'으로 남는다. 지금 값(0.99)은
+        아무것도 막지 않는 무의미한 기본값이라 특히 그렇다.
+        """
+        assert 'MOMENTUM_RS_GATE_PCT' in ro.GRIDS['S6']
+
+    def test_rs_gate_axis_changes_backtest_behaviour(self):
+        """이름 참조만이 아니라 **진입 판정이 실제로 갈리는지** 확인."""
+        import atlas_spot_backtest as bt
+        rank_map = {'2024-01-01': {'AUSDT': 0.9}, '2024-01-02': {'AUSDT': 0.9}}
+        keys = sorted(rank_map)
+        pct = bt._rank_pct_asof(rank_map, keys, 'AUSDT', '2024-01-03')
+        assert pct == 0.9
+        assert pct > 0.33 and pct > 0.67 and not pct > 0.99, (
+            '그리드 세 값이 이 심볼에 대해 서로 다른 판정을 내려야 한다')
+
+
+class TestGlobalParamOverride:
+    """추적 손절 같은 **실행 규칙**은 전략 모듈이 아니라 라이브·백테스트
+    양쪽 전역에 있다. 한쪽만 바꾸면 검증이 실제 동작과 어긋난다."""
+
+    def test_patches_both_live_and_backtest(self):
+        import atlas_spot_backtest as bt
+        import atlas_spot_main as sm
+        before = (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        with ro.override_params({'SPOT_TRAIL_ENABLED': True}):
+            assert sm.SPOT_TRAIL_ENABLED is True
+            assert bt.SPOT_TRAIL_ENABLED is True
+        assert (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED) == before
+
+    def test_strategy_constants_still_work(self):
+        before = ro.strat.S3_ADX_MIN
+        with ro.override_params({'S3_ADX_MIN': 99}):
+            assert ro.strat.S3_ADX_MIN == 99
+        assert ro.strat.S3_ADX_MIN == before
+
+    def test_restores_on_exception(self):
+        before = ro.strat.S3_ADX_MIN
+        with pytest.raises(RuntimeError):
+            with ro.override_params({'S3_ADX_MIN': 77}):
+                raise RuntimeError('중단')
+        assert ro.strat.S3_ADX_MIN == before, '예외가 나도 원복돼야 한다'
+
+    def test_unknown_param_raises(self):
+        with pytest.raises(KeyError):
+            with ro.override_params({'NOT_A_REAL_PARAM': 1}):
+                pass
+
+    def test_current_params_reads_right_module(self):
+        cur = ro.current_params('S3')
+        assert 'SPOT_TRAIL_ENABLED' in cur
+        import atlas_spot_main as sm
+        assert cur['SPOT_TRAIL_ENABLED'] == sm.SPOT_TRAIL_ENABLED
+
+
+class TestPlateauExclusion:
+    """고원 개념은 '파라미터 표면이 매끄러운가'라서 순서 있는 수치 축에만
+    의미가 있다. ON/OFF 토글은 이웃이 항상 반대값이라, 효과가 클수록
+    오히려 '고립된 피크'로 오판된다."""
+
+    def test_toggle_axis_excluded_from_neighbors(self):
+        combo = {'S3_ADX_MIN': 25, 'S3_ATR_SL': 2.5, 'SPOT_TRAIL_ENABLED': True}
+        ns = ro._neighbors(combo, ro.GRIDS['S3'])
+        assert ns, '수치 축 이웃은 있어야 한다'
+        assert all(n['SPOT_TRAIL_ENABLED'] is True for n in ns), (
+            '토글 축을 흔들면 그 기능의 효과가 곧 고립 피크로 오판된다')
+
+    def test_excluded_axis_declared(self):
+        assert 'SPOT_TRAIL_ENABLED' in ro.PLATEAU_EXCLUDE
+
+    def test_trailing_only_in_trend_strategies(self):
+        """평균회귀(S4·S5)는 되돌림을 먹는 구조라 조기 청산 위험이 크고,
+        축을 늘릴수록 다중검정 인플레만 커진다."""
+        assert 'SPOT_TRAIL_ENABLED' in ro.GRIDS['S3']
+        assert 'SPOT_TRAIL_ENABLED' in ro.GRIDS['S6']
+        assert 'SPOT_TRAIL_ENABLED' not in ro.GRIDS['S4']
+        assert 'SPOT_TRAIL_ENABLED' not in ro.GRIDS['S5']
+
+
 class TestNeighbors:
     def test_moves_one_axis_at_a_time(self):
         grid = {'a': [1, 2, 3], 'b': [10, 20, 30]}

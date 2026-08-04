@@ -31,6 +31,13 @@ ExecStart=/usr/bin/python3 -u monthly_wfo_report.py
 Environment=PYTHONUNBUFFERED=1
 # OOS 미달 전략 발견 시 재최적화 제안 잡을 순차 트리거하도록 허용
 Environment=WFO_AUTO_REOPT=1
+# 전 전략이 통과 중이어도 재최적화를 돌리려면 아래 주석을 해제한다.
+#   재최적화기는 '실패 구제'뿐 아니라 **신규 기능 검증 통로**이기도 하다
+#   (추적 손절 ON/OFF 등이 그리드에 있음). 실패했을 때만 돌면 정상 상태에서는
+#   그 검증이 영원히 일어나지 않는다.
+#   다만 이 서버는 RAM 951MB / vCPU 1개라 매달 추가 실행이 부담일 수 있다.
+#   권장: 평소엔 끄고, 분기 1회 `systemctl start atlas-wfo-reopt.service` 수동 실행.
+# Environment=WFO_REOPT_ALWAYS=1
 # ── 리소스 격리 ──
 MemoryMax=420M
 MemorySwapMax=600M

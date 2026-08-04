@@ -61,6 +61,8 @@ from atlas_spot_config import (
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
     SPOT_EDGE_MIN_TRADES,
+    SPOT_TRAIL_ENABLED, SPOT_TRAIL_ACTIVATE_R, SPOT_TRAIL_MULT,
+    SPOT_TRAIL_REARM_FRAC,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
@@ -72,9 +74,11 @@ from atlas_spot_config import (
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
     STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    LIVE_STRATEGIES,
     WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
     MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT, MOMENTUM_RS_GATE_STRATS,
+    MOMENTUM_RS_GATE_PCT,
     FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
     S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
@@ -320,6 +324,7 @@ def init_spot_db():
             sl_order_id  TEXT DEFAULT '',
             tp_order_id  TEXT DEFAULT '',
             entry_slip_pct REAL DEFAULT 0,
+            orig_sl      REAL DEFAULT 0,
             PRIMARY KEY (strategy, symbol)
         );
 
@@ -378,6 +383,10 @@ def init_spot_db():
         if 'entry_slip_pct' not in pcols:
             conn.execute('ALTER TABLE spot_positions ADD COLUMN entry_slip_pct REAL DEFAULT 0')
             log.info('[DB] spot_positions.entry_slip_pct 컬럼 추가 (마이그레이션)')
+        if 'orig_sl' not in pcols:
+            conn.execute('ALTER TABLE spot_positions ADD COLUMN orig_sl REAL DEFAULT 0')
+            conn.execute('UPDATE spot_positions SET orig_sl=sl WHERE orig_sl=0')
+            log.info('[DB] spot_positions.orig_sl 컬럼 추가 (마이그레이션)')
     log.info('[DB] atlas_spot.db 초기화 완료')
 
 
@@ -401,11 +410,11 @@ def _save_position(strategy: str, symbol: str, entry_price: float, sl: float,
         INSERT OR REPLACE INTO spot_positions
         (strategy, symbol, entry_price, sl, tp, qty_tokens, cost_usdt,
          risk_pct, exit_type, max_hold_bars, bars_held, peak_price, entry_ts, regime,
-         entry_slip_pct)
-        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+         entry_slip_pct, orig_sl)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)
         """, (strategy, symbol, entry_price, sl, tp, qty, cost,
               risk_pct, exit_type, max_hold, entry_price,
-              datetime.now(timezone.utc).isoformat(), regime, entry_slip_pct))
+              datetime.now(timezone.utc).isoformat(), regime, entry_slip_pct, sl))
 
 
 def _load_position(strategy: str, symbol: str) -> Optional[dict]:
@@ -440,6 +449,9 @@ def _update_position_tp(strategy: str, symbol: str, new_tp: float):
 
 
 def _delete_position(strategy: str, symbol: str):
+    # 자가복구 재시도 기록도 함께 버린다 — 남겨두면 종료된 포지션의 항목이
+    # 계속 쌓이고, 같은 심볼에 재진입했을 때 옛 실패 횟수를 물려받는다.
+    _rearm_attempts.pop((strategy, symbol), None)
     with _db_lock, _db_conn() as conn:
         conn.execute(
             'DELETE FROM spot_positions WHERE strategy=? AND symbol=?',
@@ -1111,6 +1123,170 @@ def _detect_fee_rate() -> float:
     return _fee_rate['taker']
 
 
+def trailing_sl(entry: float, cur_sl: float, peak: float,
+                sl_dist: float) -> float:
+    """추적 손절 계산. 순수 함수 — 라이브/백테스트가 공유한다.
+
+    peak가 entry + sl_dist × ACTIVATE_R 를 넘은 뒤부터
+    `peak − sl_dist × TRAIL_MULT` 로 손절을 따라 올린다(내리지 않음).
+    SL 거리를 기준으로 하므로 심볼·변동성에 무관하게 스케일이 맞고,
+    ACTIVATE_R = TRAIL_MULT 이면 활성화 시점이 자연스럽게 본전 이동이 된다.
+    """
+    if not SPOT_TRAIL_ENABLED or sl_dist <= 0:
+        return cur_sl
+    if peak < entry + sl_dist * SPOT_TRAIL_ACTIVATE_R:
+        return cur_sl                       # 아직 활성화 전
+    return max(cur_sl, peak - sl_dist * SPOT_TRAIL_MULT)
+
+
+_NO_TRADE_ALERT_HOURS = 6      # 이 시간 넘게 전 전략이 막히면 알린다
+
+
+def check_no_trade_regime(regime: str, now: float) -> None:
+    """전 전략이 차단되는 레짐이 길어지면 운영자에게 알린다.
+
+    CRISIS·MICRO_RANGING·UNKNOWN은 REGIME_STRATEGY_MAP이 빈 목록이라 그
+    구간에는 어떤 신호도 진입으로 이어지지 않는다. 로그에는 `regime_block`
+    카운터만 조용히 쌓여서, 봇이 멀쩡히 도는데 며칠째 거래가 없어도
+    운영자는 "장이 없나 보다"라고 넘기게 된다. 지속 시간을 재서 알린다.
+    """
+    blocked = not REGIME_STRATEGY_MAP.get(regime, [])
+    with _state_lock:
+        since = _state.get('no_trade_since')
+        alerted = _state.get('no_trade_alerted', False)
+        if not blocked:
+            _state['no_trade_since'] = None
+            _state['no_trade_alerted'] = False
+        elif since is None:
+            _state['no_trade_since'] = now
+            return
+    if not blocked:
+        if since is not None and alerted:
+            _tg(f'✅ 레짐이 {regime}(으)로 회복 — 거래 재개')
+        return
+    hours = (now - since) / 3600
+    if hours >= _NO_TRADE_ALERT_HOURS and not alerted:
+        with _state_lock:
+            _state['no_trade_alerted'] = True
+        _tg(f'⏸️ {hours:.0f}시간째 거래 정지 상태입니다.\n'
+            f'   레짐: {regime} — 이 레짐에 배정된 전략이 없습니다.\n'
+            f'   봇은 정상 동작 중이며, 레짐이 바뀌면 자동으로 재개합니다.\n'
+            f'   (의도한 정지가 아니라면 REGIME_STRATEGY_MAP을 확인하세요)')
+
+
+def validate_active_strategies(strategies: list[str]) -> tuple[list, list]:
+    """활성 전략 목록을 검증한다. 반환: (실행 가능한 목록, 문제 설명 목록).
+
+    `--strategies`는 아무 문자열이나 받는데 검증이 없어서, 오타 하나로
+    봇이 **아무것도 거래하지 않으면서 "정상 기동"을 보고**하는 상태가 됐다.
+    죽는 방식이 세 가지라 각각 구분해서 알린다:
+      · STRATEGY_TIMEFRAMES에 없음  → 어느 루프에도 배정되지 않아 완전 침묵
+      · 전략 함수 없음               → 매 심볼 예외 후 조용히 무시
+      · REGIME_STRATEGY_MAP에 없음   → 모든 봉에서 레짐 차단, 신호 0
+    """
+    ok, problems = [], []
+    for s in strategies:
+        if s not in STRATEGY_TIMEFRAMES:
+            problems.append(f'{s}: 타임프레임 미정의 — 어느 루프에도 배정되지 '
+                            f'않아 완전히 동작하지 않음 (대소문자 확인)')
+        elif s not in CALC_FUNCS or s not in SIGNAL_FUNCS:
+            problems.append(f'{s}: 전략 함수 없음 — 신호 계산 불가')
+        elif not any(s in ss for ss in REGIME_STRATEGY_MAP.values()):
+            problems.append(f'{s}: 어느 레짐에도 배정되지 않음 — 모든 봉에서 '
+                            f'차단되어 진입이 0건')
+        else:
+            ok.append(s)
+    return ok, problems
+
+
+def _typical_sl_pct() -> float:
+    """실제 거래에서 관측된 SL 거리 중앙값. 표본이 없으면 보수적 기본값.
+
+    사이징 진단은 '전형적인 신호'를 가정해야 의미가 있으므로 상수보다
+    실측값을 쓴다.
+    """
+    try:
+        with _db_lock, _db_conn() as conn:
+            rows = conn.execute(
+                'SELECT entry_price, pnl_r, pnl_usdt, qty_tokens FROM spot_trades '
+                'WHERE COALESCE(dry_run,0)=0 AND pnl_r != 0 AND entry_price > 0 '
+                'AND qty_tokens > 0 ORDER BY id DESC LIMIT 200'
+            ).fetchall()
+        vals = []
+        for r in rows:
+            # pnl_r = pnl_usdt / (sl_dist * qty)  →  sl_dist = pnl_usdt / (pnl_r * qty)
+            sl_dist = abs(float(r['pnl_usdt']) / (float(r['pnl_r']) * float(r['qty_tokens'])))
+            pct = sl_dist / float(r['entry_price'])
+            if 0.002 < pct < 0.5:
+                vals.append(pct)
+        if len(vals) >= 10:
+            return float(np.median(vals))
+    except Exception as e:
+        log.debug(f'[진단] SL 중앙값 계산 실패: {e}')
+    return 0.05          # 관측치가 없을 때의 대표값 (ATR 기반 전략들의 통상 범위)
+
+
+def _diagnose_sizing_capability(equity: float) -> list[dict]:
+    """전략 × 레짐 조합별로 **실제로 진입 가능한지** 점검한다.
+
+    사이징은 여러 스케일의 곱이라(기본 × Kelly × 래칫 × 레짐 × 건강도)
+    작은 값들이 겹치면 주문금액이 거래소 최소치($5) 아래로 내려간다.
+    그러면 그 조합은 **신호가 나와도 영원히 체결되지 않는데**, 로그에만
+    한 줄 남아 운영자는 '전략이 돌고 있다'고 믿게 된다. 소액 계좌에서
+    하락장 커버리지가 통째로 죽는 것이 대표적인 경우다.
+    기동 시 한 번 계산해 죽은 조합을 명시적으로 알린다.
+    """
+    sl_pct = _typical_sl_pct()
+    out = []
+    for regime, strats in REGIME_STRATEGY_MAP.items():
+        if regime == 'WEAK_TREND':
+            r_scale = WEAK_TREND_RISK_SCALE
+        elif regime == 'TRENDING_DOWN':
+            r_scale = TRENDING_DOWN_RISK_SCALE
+        else:
+            r_scale = 1.0
+        for sid in strats:
+            kelly  = _get_kelly_scale(sid)
+            health = _get_strategy_health_scale(sid)
+            risk   = SPOT_BASE_RISK_PCT * kelly * r_scale * health
+            cost   = (equity * risk / sl_pct) if sl_pct > 0 else 0.0
+            cost   = min(cost, equity * SPOT_MAX_ALLOC_PCT)
+            out.append({
+                'strategy': sid, 'regime': regime,
+                'risk_pct': risk, 'cost_usdt': cost,
+                'tradable': cost >= SPOT_MIN_ORDER_USDT,
+                'kelly': kelly, 'health': health, 'regime_scale': r_scale,
+            })
+    return out
+
+
+def _report_sizing_capability(equity: float) -> None:
+    """진단 결과를 로그·텔레그램으로 알린다."""
+    try:
+        rows = _diagnose_sizing_capability(equity)
+    except Exception as e:
+        log.warning(f'[진단] 사이징 점검 실패(무시): {e}')
+        return
+    sl_pct = _typical_sl_pct()
+    dead = [r for r in rows if not r['tradable']]
+    log.info(f'[진단] 사이징 점검 (자산 ${equity:,.2f}, 전형 SL {sl_pct*100:.1f}%)')
+    for r in rows:
+        mark = '  ' if r['tradable'] else '✗ '
+        log.info(f'  {mark}{r["strategy"]}/{r["regime"]:<14} '
+                 f'리스크 {r["risk_pct"]*100:5.3f}% '
+                 f'(설정 {SPOT_BASE_RISK_PCT*100:.1f}% 대비 '
+                 f'{r["risk_pct"]/SPOT_BASE_RISK_PCT*100:3.0f}%) '
+                 f'→ 주문 ${r["cost_usdt"]:6.2f}')
+    if dead:
+        lines = '\n'.join(
+            f'   • {r["strategy"]} / {r["regime"]} — 주문 ${r["cost_usdt"]:.2f}'
+            for r in dead)
+        _tg(f'⚠️ 진입 불가 조합 {len(dead)}건 (주문금액이 거래소 최소 '
+            f'${SPOT_MIN_ORDER_USDT:.0f} 미달)\n{lines}\n'
+            f'   신호가 나와도 체결되지 않습니다. 자본을 늘리거나 해당 레짐의 '
+            f'리스크 스케일을 조정해야 실제로 동작합니다.')
+
+
 def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
     """(왕복 비용률, 스프레드율) 추정.
 
@@ -1401,6 +1577,10 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     cost_usdt   = float(pos['cost_usdt'])
     risk_pct    = float(pos['risk_pct'])
     sl          = float(pos['sl'])
+    # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로 sl이 올라간
+    # 뒤 그 값을 분모로 쓰면 R이 부풀고, 그 pnl_r이 Kelly·건강도·avg_r과
+    # 비용 가드까지 연쇄 오염시킨다.
+    orig_sl     = float(pos.get('orig_sl') or 0) or sl
     entry_ts    = pos['entry_ts']
     regime      = pos.get('regime', '')
 
@@ -1428,7 +1608,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
                 _pnl_u = (price - entry_price) * qty
                 _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                _sl_d = abs(entry_price - sl)
+                _sl_d = abs(entry_price - orig_sl)
                 _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                 _delete_position(strategy, symbol)
                 _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
@@ -1464,7 +1644,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                         _delete_position(strategy, symbol)
                         _pnl_u = (price - entry_price) * qty
                         _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                        _sl_d = abs(entry_price - sl)
+                        _sl_d = abs(entry_price - orig_sl)
                         _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
                         _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
                                           _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
@@ -1503,7 +1683,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             if not sold_ok:
                 return
 
-    sl_dist   = abs(entry_price - sl)
+    sl_dist   = abs(entry_price - orig_sl)
     pnl_usdt  = (exit_price - entry_price) * qty
     pnl_pct   = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl_r     = pnl_usdt / (sl_dist * qty) if sl_dist > 0 else 0
@@ -1565,7 +1745,9 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
         qty         = float(order.get('filled') or pos['qty_tokens'])
         fallback_px = float(pos['sl']) if reason == 'SL' else float(pos.get('tp') or pos['sl'])
         exit_price  = float(order.get('average') or order.get('price') or fallback_px)
-        sl_dist     = abs(entry_price - float(pos['sl']))
+        # R배수 분모는 진입 시점의 위험 (추적 손절로 sl이 올라가도 불변)
+        sl_dist     = abs(entry_price - (float(pos.get('orig_sl') or 0)
+                                         or float(pos['sl'])))
         pnl_usdt    = (exit_price - entry_price) * qty
         pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
         pnl_r       = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
@@ -1617,6 +1799,46 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
 _rearm_attempts: dict = {}          # (strategy, symbol) → (마지막 시도 시각, 횟수)
 _REARM_INTERVAL = 300               # 자가복구 시도 간격(초)
 _REARM_ALERT_AFTER = 3              # 이 횟수를 넘기면 운영자에게 알린다
+_REARM_GIVEUP = 86400               # 구조적 불가 시 재시도 보류 기간(초)
+
+
+def _rearm_trailing_stop(strategy: str, symbol: str, ccxt_sym: str,
+                         pos: dict, new_sl: float) -> None:
+    """추적 손절로 SL이 올라갔을 때 거래소 보호주문도 새 가격으로 재등록.
+
+    갱신하지 않으면 거래소에는 원래(더 낮은) 손절만 남아, 봇이 멈춘 사이
+    추적으로 확보한 이익이 보호되지 않는다. 다만 주문 취소·재등록은
+    API 비용이 있으므로 **의미 있게 움직였을 때만** 수행한다.
+    """
+    if _state.get('dry_run') or not SPOT_EXCHANGE_STOP:
+        return
+    old_sl = float(pos.get('sl') or 0)
+    sl_dist = abs(float(pos['entry_price']) - old_sl)
+    if sl_dist <= 0 or (new_sl - old_sl) < sl_dist * SPOT_TRAIL_REARM_FRAC:
+        return                                  # 미세 이동 — 주문 churn 방지
+    try:
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
+        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
+        tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
+        sl_id, tp_id = _place_protective_orders(
+            strategy, symbol, ccxt_sym, float(pos['qty_tokens']), new_sl, tp_for_oco)
+        _update_position_order_id(strategy, symbol, sl_id, tp_id)
+        if not sl_id:
+            log.warning(f'[{strategy}] {symbol} 추적 손절 재등록 실패 — '
+                        f'소프트웨어 SL만 작동 (자가복구가 재시도한다)')
+    except Exception as e:
+        log.warning(f'[{strategy}] {symbol} 추적 손절 재등록 오류(무시): {e}')
+
+
+def _protection_impossible(ccxt_sym: str, qty: float, sl_price: float) -> bool:
+    """거래소 보호주문이 **구조적으로** 불가능한가.
+
+    주문 금액이 거래소 최소치에 못 미치면 재시도해도 영원히 실패한다.
+    (소액 계좌에서 흔하다 — `_diagnose_sizing_capability` 참조)
+    일시적 실패와 구분하지 않으면 5분마다 무한 재시도하며 API만 낭비한다.
+    """
+    q = _sellable_qty(ccxt_sym, qty)
+    return q <= 0 or q * sl_price * (1 - SPOT_STOP_LIMIT_GAP) < SPOT_MIN_ORDER_USDT
 
 
 def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
@@ -1630,6 +1852,15 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
     now = time.time()
     last, cnt = _rearm_attempts.get(key, (0.0, 0))
     if now - last < _REARM_INTERVAL:
+        return
+    # 구조적 불가(주문금액 < 거래소 최소치)면 재시도해도 영원히 실패한다.
+    # 소프트웨어 SL이 유일한 보호라는 사실만 1회 알리고 재시도를 멈춘다.
+    if _protection_impossible(ccxt_sym, float(pos['qty_tokens']), float(pos['sl'])):
+        if cnt == 0:
+            _tg(f'ℹ️ [{strategy}] {symbol} 거래소 보호주문 불가 — 주문금액이 '
+                f'최소치(${SPOT_MIN_ORDER_USDT:.0f}) 미만입니다.\n'
+                f'   소프트웨어 SL만 작동합니다(봇이 멈추면 손절되지 않음).')
+        _rearm_attempts[key] = (now + _REARM_GIVEUP, max(cnt, 1))
         return
     tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
     sl_id, tp_id = _place_protective_orders(strategy, symbol, ccxt_sym,
@@ -1750,9 +1981,16 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
             _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'BB_MID')
             return
 
-    # Peak 업데이트
+    # Peak 갱신 + 추적 손절
+    # (기존에는 peak만 기록하고 sl은 그대로 다시 써서 효과가 0이었다)
     if price > peak:
-        _update_position_sl(strategy, symbol, sl, price)
+        peak = price
+        new_sl = trailing_sl(entry, sl, peak, abs(entry - float(pos['sl'])))
+        _update_position_sl(strategy, symbol, new_sl, peak)
+        if new_sl > sl:
+            log.info(f'[{strategy}] {symbol} 추적 손절 {sl:,.4f} → {new_sl:,.4f} '
+                     f'(최고 {peak:,.4f})')
+            _rearm_trailing_stop(strategy, symbol, ccxt_sym, pos, new_sl)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1829,8 +2067,17 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     i         = len(df) - 1
                     price     = _get_price(ccxt_sym)
 
+                    # 지표 판정은 **완성된 마지막 봉**으로 한다.
+                    # 거래소가 돌려주는 마지막 봉(i)은 형성 중이라 BB·EMA가
+                    # 폴링마다 흔들린다. 그 값으로 청산하면
+                    #   ① 봉 마감 시점의 값과 달라 백테스트가 검증한 적 없는
+                    #      동작이 되고(신호는 이미 i-1을 쓰므로 내부 불일치),
+                    #   ② 봉 중간에 잠깐 뒤집힌 크로스에 휩쓸려 조기 청산된다.
+                    # 가격 비교(SL/TP)는 여전히 실시간 price로 한다.
+                    i_closed  = max(0, len(df) - 2)
+
                     # 포지션 관리 (매 폴링마다)
-                    _manage_position(strategy_id, symbol, ccxt_sym, df, i)
+                    _manage_position(strategy_id, symbol, ccxt_sym, df, i_closed)
 
                     # 유니버스 밖 심볼은 관리 전용 — 신규 진입 금지.
                     # (유니버스에서 탈락했다는 건 거래량·모멘텀 기준을 더는
@@ -1923,10 +2170,12 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                                 continue
                     # ────────────────────────────────────────────────────────
 
-                    # RS Gate: S6/S7은 모멘텀 하위 67% 심볼 진입 차단
+                    # RS Gate: 모멘텀 하위권 심볼 진입 차단
+                    # (임계값이 인라인 `*3`이라 사실상 무차단이었다 —
+                    #  config의 MOMENTUM_RS_GATE_PCT 주석 참조)
                     if strategy_id in MOMENTUM_RS_GATE_STRATS:
                         rank_pct = _get_momentum_rank_pct(symbol)
-                        if rank_pct > MOMENTUM_TOP_TIER_PCT * 3:
+                        if rank_pct > MOMENTUM_RS_GATE_PCT:
                             log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
                             continue
 
@@ -1983,6 +2232,11 @@ def _balance_poller(stop_event: threading.Event) -> None:
             # 60초마다 보존 — 피크와 당일 PnL 모두 최대 60초 이내 최신 상태로
             # 남으므로, 급작스러운 종료에도 리스크 기준점을 거의 잃지 않는다.
             _persist_risk_state()
+            # 전 전략이 막히는 레짐이 길어지면 알린다(조용한 정지 방지)
+            try:
+                check_no_trade_regime(get_cached_regime().regime, time.time())
+            except Exception as _e:
+                log.debug(f'[레짐] 정지 감시 실패(무시): {_e}')
             log.debug(f'[잔고] 총자산 ${total:,.2f} (USDT ${usdt:,.2f})')
         except Exception as e:
             log.warning(f'[잔고폴러] 오류: {e}')
@@ -2196,7 +2450,24 @@ def main():
         return
 
     _state['dry_run'] = args.dry_run
-    _state['active_strategies'] = [s.strip().upper() for s in args.strategies.split(',')]
+    _requested = [s.strip().upper() for s in args.strategies.split(',') if s.strip()]
+    _valid, _problems = validate_active_strategies(_requested)
+    if _problems:
+        for p in _problems:
+            log.error(f'[기동] 실행 불가 전략 — {p}')
+        _tg('⚠️ 실행되지 않는 전략이 지정됐습니다:\n'
+            + '\n'.join(f'   • {p}' for p in _problems)
+            + f'\n실제 가동: {_valid or "없음"}')
+    if not _valid:
+        # 전략이 하나도 없으면 봇은 살아만 있고 아무 거래도 하지 않는다.
+        # "정상 기동"으로 보고하면 운영자가 몇 주를 그대로 흘려보낸다.
+        log.error(f'[기동] 실행 가능한 전략이 없습니다 (요청: {_requested}). '
+                  f'선택 가능: {sorted(LIVE_STRATEGIES)}')
+        _tg(f'🚨 실행 가능한 전략이 없어 기동을 중단합니다.\n'
+            f'   요청: {_requested}\n   선택 가능: {sorted(LIVE_STRATEGIES)}')
+        _tg_flush()
+        return
+    _state['active_strategies'] = _valid
 
     log.info(f'{"=" * 60}')
     log.info('  ATLAS Spot Trading Bot 시작')
@@ -2216,6 +2487,7 @@ def main():
     _restore_risk_state(total)
     if not _state['dry_run']:
         _detect_fee_rate()      # 실제 요율 반영 + BNB 할인 미적용 시 안내
+        _report_sizing_capability(total)   # 진입 불가 조합 사전 경고
     log.info(f'[초기] 총자산 ${total:,.2f} (USDT ${usdt:,.2f}) '
              f'| 피크 ${_state["peak_equity"]:,.2f}')
 
