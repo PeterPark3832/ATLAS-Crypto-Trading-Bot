@@ -68,16 +68,17 @@ class TestRsGate:
         monkeypatch.setattr(sm, '_state', {'universe_ranked': ['AUSDT']})
         assert sm._get_momentum_rank_pct('ZUSDT') == 0.5
 
-    def test_not_in_wfo_grid_until_backtest_models_it(self):
-        """WFO 그리드에 넣었다가 뺐다.
+    def test_in_wfo_grid_now_that_backtest_models_it(self):
+        """WFO 그리드에 넣었다가 뺐다가, 다시 넣었다.
 
-        백테스트에 RS Gate 구현이 없어서 세 값이 **모두 같은 결과**를 냈고,
-        최적화기는 동점 중 첫 값(0.33)을 "OOS PF 2.22 → 3.54 개선"으로
-        제안했다. 라이브에서는 S6 진입의 2/3를 막는 큰 변경인데 검증된 적이
-        없는 것이다. 백테스트가 RS Gate를 모델링하게 되면 그때 넣는다.
+        처음엔 백테스트에 RS Gate 구현이 없어서 세 값이 **모두 같은 결과**를
+        냈고, 최적화기는 동점 중 첫 값(0.33)을 "OOS PF 2.22 → 3.54 개선"으로
+        제안했다 — 검증된 적 없는 변경이 검증된 척한 것이다. 그래서 뺐다.
+        지금은 백테스트가 순위맵으로 게이트를 재현하므로, 임계값을 감이 아니라
+        데이터가 고르게 하려고 되돌려 놓았다.
         """
         import reoptimize as ro
-        assert 'MOMENTUM_RS_GATE_PCT' not in ro.GRIDS['S6']
+        assert 'MOMENTUM_RS_GATE_PCT' in ro.GRIDS['S6']
 
     def test_grid_can_patch_it(self):
         import reoptimize as ro
@@ -140,8 +141,149 @@ class TestUniverseParityGap:
         src = Path(uni.__file__).read_text()
         assert '선행편향' in src or '생존' in src
 
-    def test_live_ranking_not_used_by_backtest(self):
-        """백테스트가 rank_by_momentum을 쓰지 않는다는 사실을 고정한다.
-        (나중에 쓰게 되면 이 테스트가 실패하며 문서 갱신을 강제한다)"""
+    def test_symbol_selection_still_unvalidated(self):
+        """RS Gate는 백테스트가 재현하지만, **종목 선정** 자체는 아니다.
+
+        백테스트는 고정 유니버스 안에서 순위를 매길 뿐이고, 라이브는 4시간
+        마다 유니버스 자체를 갈아끼운다. 이 간극은 남아 있으므로 결과를
+        '라이브 그대로'로 읽으면 안 된다.
+        """
         import atlas_spot_backtest as bt
-        assert 'rank_by_momentum' not in Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text()
+        assert 'get_backtest_universe' in src or 'BT_TIER1_SYMBOLS' in src
+
+
+# ══════════════════════════════════════════════════════════════
+#  ④ 백테스트 RS Gate — 이제 데이터가 임계값을 고를 수 있다
+# ══════════════════════════════════════════════════════════════
+
+class TestBacktestRankMap:
+    """`build_momentum_rank_map`은 라이브 랭킹을 시계열로 재현한다.
+
+    이게 없으면 MOMENTUM_RS_GATE_PCT는 어떤 값을 넣어도 백테스트 결과가
+    같아서, WFO가 '검증했다'고 보고해도 실제로는 아무것도 검증하지 않는다.
+    """
+
+    @pytest.fixture
+    def data(self):
+        return {
+            'STRONGUSDT': _series(200, 0.004, 0.01, seed=2),
+            'WEAKUSDT':   _series(200, 0.000, 0.01, seed=3),
+            'MIDUSDT':    _series(200, 0.002, 0.01, seed=5),
+        }
+
+    def test_builds_daily_map(self, data):
+        import atlas_spot_backtest as bt
+        m = bt.build_momentum_rank_map(data)
+        assert m, '순위맵이 비어 있으면 게이트가 조용히 꺼진다'
+        day = sorted(m)[-1]
+        assert set(m[day]) == set(data)
+
+    def test_percentile_matches_live_ordering(self, data):
+        """같은 데이터에서 라이브 랭킹과 순서가 일치해야 패리티다."""
+        import atlas_spot_backtest as bt
+        m = bt.build_momentum_rank_map(data)
+        day = sorted(m)[-1]
+        bt_order = sorted(m[day], key=lambda s: m[day][s])
+        live_order = uni.rank_by_momentum(list(data), data)
+        assert bt_order == live_order
+
+    def test_percentile_range(self, data):
+        import atlas_spot_backtest as bt
+        m = bt.build_momentum_rank_map(data)
+        for day, row in m.items():
+            for sym, pct in row.items():
+                assert 0.0 <= pct < 1.0, f'{day} {sym} {pct}'
+
+    def test_too_few_symbols_returns_empty(self):
+        """1종목으로는 상대강도가 성립하지 않는다 — 조용히 1등을 주면 안 된다."""
+        import atlas_spot_backtest as bt
+        assert bt.build_momentum_rank_map({'AUSDT': _series(200, 0.003, 0.01)}) == {}
+
+    def test_lookup_uses_prior_day_only(self):
+        """당일 종가로 만든 순위를 당일 시가 진입에 쓰면 선행편향이다."""
+        import atlas_spot_backtest as bt
+        rank_map = {'2024-01-01': {'A': 0.1}, '2024-01-02': {'A': 0.9}}
+        keys = sorted(rank_map)
+        assert bt._rank_pct_asof(rank_map, keys, 'A', '2024-01-02') == 0.1
+        assert bt._rank_pct_asof(rank_map, keys, 'A', '2024-01-03') == 0.9
+
+    def test_lookup_before_history_is_none(self):
+        import atlas_spot_backtest as bt
+        rank_map = {'2024-01-05': {'A': 0.1}}
+        assert bt._rank_pct_asof(rank_map, ['2024-01-05'], 'A', '2024-01-01') is None
+
+    def test_lookup_without_map_is_none(self):
+        import atlas_spot_backtest as bt
+        assert bt._rank_pct_asof({}, [], 'A', '2024-01-01') is None
+
+
+class TestBacktestRsGateApplied:
+    """게이트가 실제로 진입을 막고 리스크를 키우는지 — 행동 검증."""
+
+    @staticmethod
+    def _run(strategy_id, rank_map, monkeypatch=None):
+        import atlas_spot_backtest as bt
+        ohlcv = _breakout_series()
+        return bt.backtest_strategy(
+            strategy_id, 'AUSDT', ohlcv,
+            {}, '2021-01-01', '2022-12-31', rank_map=rank_map)
+
+    def test_gate_blocks_bottom_ranked(self):
+        import atlas_spot_backtest as bt
+        gate = bt.MOMENTUM_RS_GATE_PCT
+        try:
+            bt.MOMENTUM_RS_GATE_PCT = 0.33
+            low = {d: {'AUSDT': 0.90} for d in _date_keys()}
+            _, diag = self._run('S6', low)
+            assert diag.get('rs_gate_block', 0) > 0, (
+                '하위권 심볼인데 한 번도 차단되지 않았다 — 게이트가 꺼져 있다')
+        finally:
+            bt.MOMENTUM_RS_GATE_PCT = gate
+
+    def test_top_tier_gets_risk_boost(self):
+        import atlas_spot_backtest as bt
+        top = {d: {'AUSDT': 0.01} for d in _date_keys()}
+        trades, diag = self._run('S6', top)
+        if not trades:
+            pytest.skip('합성 데이터에서 S6 진입 없음')
+        assert diag.get('rs_top_tier', 0) > 0
+        base, _ = self._run('S6', None)
+        if base:
+            assert trades[0].risk_pct > base[0].risk_pct, (
+                f'주도주 부스트({bt.MOMENTUM_TOP_RISK_MULT}배)가 반영되지 않았다')
+
+    def test_non_gate_strategy_unaffected(self):
+        """RS Gate는 추세돌파 계열만 — S4(평균회귀)는 영향받지 않아야 한다."""
+        import atlas_spot_backtest as bt
+        assert 'S4' not in bt.MOMENTUM_RS_GATE_STRATS
+        low = {d: {'AUSDT': 0.99} for d in _date_keys()}
+        _, diag = self._run('S4', low)
+        assert diag.get('rs_gate_block', 0) == 0
+
+    def test_no_rank_map_disables_gate(self):
+        """순위맵을 안 넘기면 게이트가 꺼진다(기존 호출부 호환)."""
+        _, diag = self._run('S6', None)
+        assert diag.get('rs_gate_block', 0) == 0
+        assert diag.get('rs_top_tier', 0) == 0
+
+
+def _date_keys():
+    from datetime import datetime, timedelta
+    d = datetime(2020, 12, 1)
+    return [(d + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(900)]
+
+
+def _breakout_series(n=600, seed=11):
+    """돌파가 자주 나오는 합성 일봉 — S6 진입을 유도한다."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    px, out, ts = 100.0, [], 1606780800000   # 2020-12-01
+    for i in range(n):
+        o = px
+        drift = 0.02 if (i // 20) % 2 == 0 else -0.005
+        px *= (1 + drift + rng.normal(0, 0.02))
+        px = max(px, 1.0)
+        out.append([ts + i * 86400000, o, max(o, px) * 1.01,
+                    min(o, px) * 0.99, px, 1e6 * (2.5 if drift > 0 else 1.0)])
+    return out

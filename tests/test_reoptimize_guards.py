@@ -68,16 +68,37 @@ class TestGridEffectiveness:
                 f'검증된 적 없는 변경이 검증된 것처럼 보고된다.')
 
     def test_detects_unmodelled_param(self):
-        """가드가 실제로 잡는지 — 백테스트가 모르는 이름은 걸려야 한다."""
-        blob = ' '.join(self._referenced_names())
-        assert 'MOMENTUM_RS_GATE_PCT' not in blob, (
-            '백테스트가 RS Gate를 구현했다면 그리드에 다시 넣고 이 테스트를 갱신할 것')
+        """가드가 실제로 잡는지 — 백테스트가 모르는 이름은 걸려야 한다.
 
-    def test_removed_rs_gate_from_grid(self):
-        """백테스트가 모델링하지 못하는 RS Gate는 그리드에 없어야 한다."""
-        for sid, grid in ro.GRIDS.items():
-            assert 'MOMENTUM_RS_GATE_PCT' not in grid, (
-                f'{sid}: 백테스트에 RS Gate 구현이 없어 검증 불가')
+        (실제 상수를 쓰면 나중에 그게 구현되는 순간 테스트가 조용히
+         무의미해진다. 그래서 영원히 구현될 리 없는 이름을 쓴다)
+        """
+        blob = ' '.join(self._referenced_names())
+        fake = 'SPOT_' + 'NEVER_IMPLEMENTED_PARAM'
+        assert fake not in blob
+        grid = dict(ro.GRIDS['S6'])
+        grid[fake] = [1, 2]
+        unknown = [k for k in grid if k not in blob]
+        assert unknown == [fake], '모델링되지 않은 축만 걸려야 한다'
+
+    def test_rs_gate_back_in_grid_now_that_backtest_models_it(self):
+        """RS Gate는 백테스트가 구현했으므로 그리드에 있어야 한다.
+
+        구현해 놓고 그리드에 넣지 않으면, MOMENTUM_RS_GATE_PCT는 여전히
+        '데이터가 아니라 감으로 정한 값'으로 남는다. 지금 값(0.99)은
+        아무것도 막지 않는 무의미한 기본값이라 특히 그렇다.
+        """
+        assert 'MOMENTUM_RS_GATE_PCT' in ro.GRIDS['S6']
+
+    def test_rs_gate_axis_changes_backtest_behaviour(self):
+        """이름 참조만이 아니라 **진입 판정이 실제로 갈리는지** 확인."""
+        import atlas_spot_backtest as bt
+        rank_map = {'2024-01-01': {'AUSDT': 0.9}, '2024-01-02': {'AUSDT': 0.9}}
+        keys = sorted(rank_map)
+        pct = bt._rank_pct_asof(rank_map, keys, 'AUSDT', '2024-01-03')
+        assert pct == 0.9
+        assert pct > 0.33 and pct > 0.67 and not pct > 0.99, (
+            '그리드 세 값이 이 심볼에 대해 서로 다른 판정을 내려야 한다')
 
 
 class TestGlobalParamOverride:

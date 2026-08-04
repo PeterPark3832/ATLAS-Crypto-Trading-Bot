@@ -21,6 +21,7 @@ ATLAS Spot — 백테스트 + Walk-Forward 프레임워크
 """
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -46,6 +47,9 @@ from atlas_spot_config import (
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
     SPOT_MAX_SL_PCT, SPOT_MAX_COST_PER_R,
+    UNIVERSE_MOMENTUM_DAYS,
+    MOMENTUM_RS_GATE_STRATS, MOMENTUM_RS_GATE_PCT,
+    MOMENTUM_TOP_TIER_PCT, MOMENTUM_TOP_RISK_MULT,
     SPOT_TRAIL_ENABLED,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_PF_HARD,
     SPOT_HEALTH_SOFT_SCALE,
@@ -165,6 +169,63 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
         regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct,
                                                adx_4h, adx_slope)
     return regime_map
+
+
+def build_momentum_rank_map(ohlcv_by_symbol: dict,
+                            momentum_days: int | None = None,
+                            vol_days: int = 30) -> dict:
+    """날짜 → {심볼: 모멘텀 순위 백분위(0=최상위)} 맵.
+
+    라이브 `rank_by_momentum`과 **같은 산식**을 시계열로 재현한다:
+        점수 = (N일 수익률) / (30일 수익률 표준편차)
+    각 날짜에서 그 시점까지의 데이터만 쓰므로 선행편향이 없다.
+
+    이게 없으면 RS Gate와 주도주 리스크 부스트를 백테스트가 모델링할 수
+    없고, 그 파라미터들은 영영 검증되지 않은 채로 남는다.
+    """
+    if momentum_days is None:
+        momentum_days = UNIVERSE_MOMENTUM_DAYS
+    closes = {}
+    for sym, ohlcv in (ohlcv_by_symbol or {}).items():
+        if not ohlcv or len(ohlcv) < momentum_days + vol_days:
+            continue
+        df = _ohlcv_to_df(ohlcv)
+        s = pd.Series(df['close'].values,
+                      index=df['ts'].dt.date.astype(str).values)
+        closes[sym] = s[~s.index.duplicated(keep='last')]
+    if len(closes) < 2:
+        return {}
+
+    px = pd.DataFrame(closes).sort_index()
+    mom = px / px.shift(momentum_days) - 1.0
+    vol = px.pct_change().rolling(vol_days).std()
+    score = mom / vol.replace(0, np.nan)
+    # 높을수록 상위 → 내림차순 순위(0-based)를 심볼 수로 나눠 백분위화
+    ranks = score.rank(axis=1, ascending=False, method='first', na_option='bottom')
+    pct = (ranks - 1).div(score.shape[1])
+
+    out: dict = {}
+    for date, row in pct.iterrows():
+        vals = {s: float(v) for s, v in row.items() if v == v}
+        if vals:
+            out[date] = vals
+    return out
+
+
+def _rank_pct_asof(rank_map: dict, rank_keys: list, symbol: str,
+                   date_key: str) -> Optional[float]:
+    """`date_key` **직전**에 확정된 순위 백분위. 없으면 None.
+
+    직전을 쓰는 이유: 순위는 그날 종가로 계산되므로, 같은 날 시가에
+    진입하는 봉에서 그 값을 쓰면 미래를 보는 것이 된다(선행편향).
+    4H 전략도 같은 날짜의 일봉 종가는 아직 모른다 — 그래서 '<'로 자른다.
+    """
+    if not rank_keys or not date_key:
+        return None
+    i = bisect.bisect_left(rank_keys, date_key) - 1
+    if i < 0:
+        return None
+    return rank_map.get(rank_keys[i], {}).get(symbol)
 
 
 @dataclass
@@ -388,15 +449,25 @@ def backtest_strategy(
     end_date:     str,
     risk_pct:     float = SPOT_BASE_RISK_PCT,
     initial_equity: float = BT_INITIAL_EQ,
+    rank_map:     Optional[dict] = None,
 ) -> tuple[list, dict]:
     """
     단일 전략 × 단일 심볼 bar-by-bar 시뮬레이션.
+
+    Args:
+        rank_map: `build_momentum_rank_map()` 결과. 넘기면 RS Gate와
+                  주도주 리스크 부스트가 라이브와 동일하게 적용된다.
+                  None이면 두 규칙 모두 비활성 — 그 경우 백테스트는
+                  라이브보다 낙관적이다(막혔을 진입까지 체결로 센다).
 
     Returns:
         (trades: list[SpotTrade], diagnostics: dict)
     """
     if len(ohlcv) < 50:
         return [], {}
+
+    rank_keys = sorted(rank_map) if rank_map else []
+    rs_applies = bool(rank_keys) and strategy_id in MOMENTUM_RS_GATE_STRATS
 
     # 시작/종료 타임스탬프 필터
     ts_start = _since_ms(start_date)
@@ -556,6 +627,22 @@ def backtest_strategy(
         if sig['signal'] != 1:
             continue
 
+        # ── RS Gate / 주도주 부스트 (라이브 진입 경로 패리티) ──────────
+        # 라이브는 모멘텀 하위권 심볼의 돌파 진입을 막고 상위 티어는 리스크를
+        # 올린다. 백테스트가 이걸 모르면 MOMENTUM_RS_GATE_PCT는 어떤 값을
+        # 넣어도 결과가 같아, WFO가 검증할 수 없는(=검증된 척만 하는) 축이 된다.
+        rs_scale = 1.0
+        if rs_applies:
+            rank_pct = _rank_pct_asof(rank_map, rank_keys, symbol, date_key)
+            if rank_pct is None:
+                rank_pct = 0.5      # 라이브 `_get_momentum_rank_pct` 기본값
+            if rank_pct > MOMENTUM_RS_GATE_PCT:
+                diag['rs_gate_block'] = diag.get('rs_gate_block', 0) + 1
+                continue
+            if rank_pct <= MOMENTUM_TOP_TIER_PCT:
+                rs_scale = MOMENTUM_TOP_RISK_MULT
+                diag['rs_top_tier'] = diag.get('rs_top_tier', 0) + 1
+
         slip        = _get_slippage(symbol)
         entry_price = float(row['open']) * (1 + slip)  # 현재봉 시가 = 신호봉 다음봉 오픈
         sl          = sig['sl']
@@ -630,7 +717,7 @@ def backtest_strategy(
             if _pf < SPOT_HEALTH_PF_SOFT:
                 health_scale = SPOT_HEALTH_SOFT_SCALE
 
-        adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale
+        adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale * rs_scale
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
         cost_usdt    = qty * entry_price
@@ -756,7 +843,11 @@ def run_spot_backtest(
             if data:
                 ohlcv_4h[sym] = data
 
-    if need_1d:
+    # 모멘텀 순위는 **일봉**으로 계산한다(라이브와 동일). RS Gate 전략이
+    # 4H여도 일봉이 필요하므로, 게이트 대상이 하나라도 있으면 1D를 받는다.
+    need_rank = any(s in MOMENTUM_RS_GATE_STRATS for s in strategies)
+
+    if need_1d or need_rank:
         print(f'\n[데이터] 1D 심볼 로드 ({len(symbols)}개)...')
         for sym in symbols:
             if sym in ohlcv_1d:
@@ -765,6 +856,12 @@ def run_spot_backtest(
             if data:
                 ohlcv_1d[sym] = data
 
+    rank_map: dict = {}
+    if need_rank:
+        rank_map = build_momentum_rank_map(ohlcv_1d)
+        print(f'  모멘텀 순위맵: {len(rank_map)}일 × {len(ohlcv_1d)}심볼'
+              + ('' if rank_map else ' — 데이터 부족, RS Gate 미적용'))
+
     # 백테스트 실행
     results = {}
     for strategy_id in strategies:
@@ -772,6 +869,7 @@ def run_spot_backtest(
         ohlcv_d = ohlcv_4h if tf == '4h' else ohlcv_1d
         results[strategy_id] = {}
         all_trades = []
+        rs_stat = {'block': 0, 'top': 0}
 
         print(f'\n[{strategy_id}] {STRATEGY_NAMES[strategy_id]} 백테스트 ({tf})...')
         for sym in symbols:
@@ -780,7 +878,8 @@ def run_spot_backtest(
                 continue
             trades, diag = backtest_strategy(
                 strategy_id, sym, ohlcv, regime_map,
-                start_date, end_date, risk_pct
+                start_date, end_date, risk_pct,
+                rank_map=rank_map or None,
             )
             metrics = calc_spot_metrics(trades, BT_INITIAL_EQ, start_date, end_date)
             results[strategy_id][sym] = {
@@ -789,6 +888,8 @@ def run_spot_backtest(
                 'diag':    diag,
             }
             all_trades.extend(trades)
+            rs_stat['block'] += diag.get('rs_gate_block', 0)
+            rs_stat['top']   += diag.get('rs_top_tier', 0)
             n = len(trades)
             pnl = metrics.get('total_pnl_pct', 0)
             wr  = metrics.get('win_rate', 0)
@@ -801,6 +902,12 @@ def run_spot_backtest(
               f'PnL {combined.get("total_pnl_pct", 0):+.1f}%  '
               f'Sharpe {combined.get("sharpe", 0):.2f}  '
               f'MDD {combined.get("max_dd_pct", 0):.1f}%')
+        # 게이트가 몇 건을 실제로 막았는지 보이지 않으면, 아무것도 막지 않는
+        # 임계값(현재 기본 0.99)이 '동작 중인 필터'로 오해된다.
+        if strategy_id in MOMENTUM_RS_GATE_STRATS and rank_map:
+            print(f'     RS Gate(≤{MOMENTUM_RS_GATE_PCT:.2f}): '
+                  f'{rs_stat["block"]}건 차단, 주도주 부스트 {rs_stat["top"]}건'
+                  + ('  ← 차단 0건: 임계값이 사실상 무효' if not rs_stat['block'] else ''))
 
     return results
 

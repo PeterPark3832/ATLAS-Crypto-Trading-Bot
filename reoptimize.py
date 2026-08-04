@@ -45,11 +45,12 @@ import atlas_spot_backtest as _bt_mod
 import atlas_spot_main as _live_mod
 import atlas_spot_strategies as strat
 from atlas_spot_backtest import (
-    _since_ms, _load_or_fetch, build_regime_map,
+    _since_ms, _load_or_fetch, build_regime_map, build_momentum_rank_map,
     backtest_strategy, calc_spot_metrics,
 )
 from atlas_spot_config import (
     STRATEGY_TIMEFRAMES, STRATEGY_NAMES, LIVE_STRATEGIES,
+    MOMENTUM_RS_GATE_STRATS,
     WF_IS_START, WF_IS_END, WF_OOS_START, WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR, BT_INITIAL_EQ, SPOT_BASE_RISK_PCT,
 )
@@ -67,7 +68,8 @@ GRIDS: dict[str, dict[str, list]] = {
     'S4': {'S4_RSI_ENTRY': [25, 30, 35], 'S4_ATR_SL': [1.5, 2.0, 2.5], 'S4_RR': [1.5, 2.0]},
     'S5': {'S5_BB_SIGMA': [2.0, 2.2, 2.5], 'S5_RSI_CONFIRM': [25, 30, 35], 'S5_ATR_SL': [1.0, 1.2, 1.5]},
     'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5], 'S6_ATR_SL': [1.5, 2.0, 2.5],
-           'SPOT_TRAIL_ENABLED': [False, True]},
+           'SPOT_TRAIL_ENABLED': [False, True],
+           'MOMENTUM_RS_GATE_PCT': [0.33, 0.67, 0.99]},
 }
 # 추적 손절은 추세추종(S3·S6)에만 그리드에 넣는다. 평균회귀(S4·S5)는
 # 되돌림을 먹는 구조라 조기 청산으로 손해 볼 가능성이 크고, 축을 늘릴수록
@@ -77,9 +79,11 @@ GRIDS: dict[str, dict[str, list]] = {
 #    백테스트가 모르는 값을 넣으면 모든 후보가 동점이 되고, 최적화기는
 #    그중 첫 값을 "개선"으로 제안한다. 검증된 적 없는 변경이 검증된 것처럼
 #    보고되는 셈이라 가장 위험한 실패다.
-#    (실제로 MOMENTUM_RS_GATE_PCT를 넣었다가 이 함정에 걸렸다 — 백테스트에
+#    (실제로 MOMENTUM_RS_GATE_PCT를 넣었다가 이 함정에 걸렸다 — 당시 백테스트에
 #     RS Gate 구현이 없어 세 값이 모두 같은 결과를 냈다. 라이브에서는 S6
-#     진입의 2/3를 막는 큰 변경인데도 "OOS 개선"으로 제안됐다)
+#     진입의 2/3를 막는 큰 변경인데도 "OOS 개선"으로 제안됐다.
+#     지금은 `build_momentum_rank_map` + `backtest_strategy(rank_map=…)`로
+#     백테스트가 이 축을 실제로 반영하므로 그리드에 되돌려 놓았다)
 #    tests/test_reoptimize_guards.py 의 TestGridEffectiveness 가 이를 막는다.
 
 # 고원(plateau) 판정에서 제외할 축.
@@ -177,7 +181,11 @@ def current_params(sid: str) -> dict:
 
 
 def load_symbol_data(sid: str, symbols: list[str], data_dir: Path):
-    """전략 타임프레임 데이터 + BTC 1D 레짐맵을 1회 로드 (IS·OOS 재사용)."""
+    """전략 타임프레임 데이터 + BTC 1D 레짐맵 + 모멘텀 순위맵을 1회 로드.
+
+    (IS·OOS 재사용. 순위맵은 내부적으로 롤링 계산이라 전 구간을 한 번에
+     만들어도 각 시점은 그 시점까지의 데이터만 본다 — 선행편향 없음)
+    """
     since_ms = _since_ms(WF_IS_START)
     tf = STRATEGY_TIMEFRAMES.get(sid, '1d')
     btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir)
@@ -188,11 +196,21 @@ def load_symbol_data(sid: str, symbols: list[str], data_dir: Path):
         data = _load_or_fetch(sym, tf, since_ms, data_dir)
         if data:
             ohlcv[sym] = data
-    return ohlcv, regime_map
+
+    # RS Gate 대상 전략이면 순위맵도 만든다. 없으면 게이트가 꺼진 채로
+    # 돌아 MOMENTUM_RS_GATE_PCT 그리드가 전부 동점이 된다(= 가짜 개선).
+    rank_map: dict = {}
+    if sid in MOMENTUM_RS_GATE_STRATS:
+        daily = ohlcv if tf == '1d' else {
+            sym: d for sym in symbols
+            if (d := _load_or_fetch(sym, '1d', since_ms, data_dir))
+        }
+        rank_map = build_momentum_rank_map(daily)
+    return ohlcv, regime_map, rank_map
 
 
 def run_window(sid: str, symbols: list[str], ohlcv: dict, regime_map: dict,
-               start: str, end: str) -> dict:
+               start: str, end: str, rank_map: dict | None = None) -> dict:
     """주어진 파라미터(현재 모듈 상태) + 기간으로 전략 합산 지표 계산."""
     all_trades = []
     for sym in symbols:
@@ -200,7 +218,8 @@ def run_window(sid: str, symbols: list[str], ohlcv: dict, regime_map: dict,
         if not data:
             continue
         trades, _ = backtest_strategy(sid, sym, data, regime_map,
-                                      start, end, SPOT_BASE_RISK_PCT)
+                                      start, end, SPOT_BASE_RISK_PCT,
+                                      rank_map=rank_map or None)
         all_trades.extend(trades)
     return calc_spot_metrics(all_trades, BT_INITIAL_EQ, start, end)
 
@@ -213,21 +232,21 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
               for vals in itertools.product(*grid.values())]
     print(f'\n[{sid}] {STRATEGY_NAMES.get(sid, sid)} — {len(combos)}개 조합 그리드')
 
-    ohlcv, regime_map = load_symbol_data(sid, symbols, data_dir)
+    ohlcv, regime_map, rank_map = load_symbol_data(sid, symbols, data_dir)
     if not ohlcv:
         return {'sid': sid, 'accepted': False, 'reason': '데이터 없음'}
 
     cur = current_params(sid)
     # 현재값 기준선 (IS·OOS)
     with override_params(cur):
-        base_is  = run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END)
-        base_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end)
+        base_is  = run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END, rank_map)
+        base_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end, rank_map)
 
     # ── IS 로만 후보 선택 (OOS 미열람) ──
     best = None
     for combo in combos:
         with override_params(combo):
-            m_is = run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END)
+            m_is = run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END, rank_map)
         if m_is.get('total_trades', 0) < MIN_TRADES:
             continue
         score = (m_is.get('profit_factor', 0), m_is.get('sharpe', 0))
@@ -248,7 +267,7 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
     for n in _neighbors(best['combo'], grid):
         with override_params(n):
             neigh_scores.append(_is_score(
-                run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END)))
+                run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END, rank_map)))
     plateau = (sum(neigh_scores) / len(neigh_scores)) if neigh_scores else 0.0
     isolated = bool(peak_score > 0 and plateau < peak_score * PLATEAU_MIN_RATIO)
     print(f'  [{sid}] IS 최고점 {peak_score:.2f} / 이웃평균 {plateau:.2f}'
@@ -256,7 +275,7 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
 
     # ── 선택된 IS-최적 조합을 OOS 로 검증 ──
     with override_params(best['combo']):
-        cand_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end)
+        cand_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end, rank_map)
 
     cand_pf   = cand_oos.get('profit_factor', 0)
     base_pf   = base_oos.get('profit_factor', 0)
