@@ -174,6 +174,100 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
     return regime_map
 
 
+def _bt_exit_decision(position: dict, strategy_id: str, df, i: int,
+                      exit_fn, slip: float,
+                      cur_high: float, cur_low: float, cur_close: float,
+                      bars_held: int, max_hold: int) -> tuple:
+    """이 봉에서 청산되는가. Returns: (사유 or None, 청산가).
+
+    **판정 순서가 곧 우선순위다** — SL이 TP보다 먼저 온다. 한 봉 안에서
+    고가와 저가를 모두 건드렸을 때 어느 쪽이 먼저 체결됐는지는 일봉·4시간봉
+    데이터로 알 수 없으므로, 불리한 쪽(SL)을 택해 성과를 과대평가하지 않는다.
+
+    추적 손절 갱신은 **여기서 하지 않는다.** 이 봉의 판정이 끝난 뒤에 해야
+    같은 봉 고가로 올린 손절이 같은 봉 저가에 걸리는 선행편향이 없다.
+    """
+    # SL — bar 저가가 손절선을 이탈
+    if cur_low <= position['sl']:
+        return 'SL', min(position['sl'], cur_close) * (1 - slip)
+
+    # TP — bar 고가가 목표가 도달
+    if position['tp'] > 0 and cur_high >= position['tp']:
+        return 'TP', position['tp'] * (1 - slip)
+
+    # 전략별 추가 청산 조건(크로스 등)
+    if exit_fn is not None:
+        try:
+            should_exit = (exit_fn(df, i, position['entry_price'])
+                           if strategy_id == 'S6' else exit_fn(df, i))
+            if should_exit:
+                return 'CROSS', cur_close * (1 - slip)
+        except Exception:
+            # 지표 결측 등으로 청산 함수가 실패해도 봉 루프를 멈추면 안 된다.
+            # SL/TP는 이미 위에서 확인했으므로 보호는 유지된다.
+            pass
+
+    # 시간 기반 청산
+    if max_hold > 0 and bars_held >= max_hold:
+        return 'TIME', cur_close * (1 - slip)
+
+    return None, 0.0
+
+
+def _bt_kelly_scale(trades: list) -> float:
+    """Kelly 스케일 — 라이브 `_get_kelly_scale`과 같은 규칙.
+
+    `backtest_strategy`에서 뽑아낸 순수함수다. 인라인이던 시절에는 이 로직만
+    따로 시험할 수 없어서, 라이브와 어긋나도 알아채기 어려웠다.
+    """
+    if len(trades) < SPOT_KELLY_MIN_TRADES:
+        return 1.0
+    recent   = trades[-200:]
+    wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
+    losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
+    if not wins_r:
+        # 전패 구간 — 라이브와 동일하게 최소 스케일로. (1.0을 유지하면
+        # 연패 중에도 정상 사이즈로 베팅하는 낙관 편향이 생긴다)
+        return SPOT_KELLY_SCALE_MIN
+    if not losses_r:
+        return 1.0
+    wr = len(wins_r) / len(recent)
+    b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
+    # half-Kelly (라이브와 패리티 유지)
+    kelly_raw = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
+    # 조건부 상한: WR·PF가 모두 좋을 때만 KELLY_SCALE_MAX까지 허용
+    gross_w = sum(abs(r) for r in wins_r)
+    gross_l = sum(abs(r) for r in losses_r)
+    pf = gross_w / gross_l if gross_l > 0 else 0.0
+    k_max = (SPOT_KELLY_SCALE_MAX
+             if (wr >= SPOT_KELLY_WR_THRESH and pf >= SPOT_KELLY_PF_THRESH)
+             else 1.50)
+    return max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
+
+
+def _bt_health_scale(trades: list) -> Optional[float]:
+    """전략 건강도 스케일 — 라이브 `_get_strategy_health_scale` 패리티.
+
+    Returns:
+        스케일(float), 또는 **차단이면 None**. 차단과 '스케일 0.0'을 같은
+        값으로 돌려주면 호출부에서 곱셈으로 흘러들어가 조용히 0 사이즈
+        주문이 된다 — 명시적으로 구분한다.
+    """
+    if len(trades) < SPOT_HEALTH_MIN_TRADES:
+        return 1.0
+    recent = trades[-200:]
+    # 손익 기여도 = R배수 × 그 거래의 리스크 비중(자본 대비).
+    # 라이브는 USD net PF를 쓰지만 백테스트에는 거래별 USD 손익이 없으므로
+    # 비율로 근사한다 — 판정 자체의 패리티가 목적이다.
+    nets = [t.pnl_r * t.risk_pct for t in recent]
+    gw = sum(n for n in nets if n > 0)
+    gl = abs(sum(n for n in nets if n < 0))
+    pf = gw / gl if gl > 0 else float('inf')
+    if pf < SPOT_HEALTH_PF_HARD:
+        return None
+    return SPOT_HEALTH_SOFT_SCALE if pf < SPOT_HEALTH_PF_SOFT else 1.0
+
+
 def _bt_learn_config():
     """config 상수 → LearnConfig (라이브 `_learn_config`와 동일 값)."""
     import atlas_learning as _L
@@ -537,41 +631,10 @@ def backtest_strategy(
             max_hold  = position.get('max_hold', 0)
             # exit_type은 기록용 메타데이터 — 청산 분기는 EXIT_CHECK_FUNCS가 한다
 
-            reason    = None
-
             slip = _get_slippage(symbol)
-
-            # 추적 손절 (라이브 `trailing_sl`과 동일 규칙 — 패리티)
-            # 순서 주의: **이번 봉의 SL 판정 전에** 갱신하면 같은 봉의 고가로
-            # 올린 손절이 같은 봉 저가에 걸리는 선행편향이 생긴다.
-            # 따라서 갱신은 이 봉의 청산 판정이 끝난 뒤(아래)에 수행한다.
-            # SL 체크 (bar 저가로 SL 이탈)
-            if cur_low <= position['sl']:
-                reason    = 'SL'
-                exit_price = min(position['sl'], cur_close) * (1 - slip)
-
-            # TP 체크 (bar 고가로 TP 도달)
-            elif position['tp'] > 0 and cur_high >= position['tp']:
-                reason    = 'TP'
-                exit_price = position['tp'] * (1 - slip)
-
-            # 추가 청산 조건 체크 (크로스 등)
-            elif exit_fn is not None:
-                try:
-                    if strategy_id == 'S6':
-                        should_exit = exit_fn(df, i, position['entry_price'])
-                    else:
-                        should_exit = exit_fn(df, i)
-                    if should_exit:
-                        reason = 'CROSS'
-                        exit_price = cur_close * (1 - slip)
-                except Exception:
-                    pass
-
-            # 시간 기반 청산
-            if reason is None and max_hold > 0 and bars_held >= max_hold:
-                reason    = 'TIME'
-                exit_price = cur_close * (1 - slip)
+            reason, exit_price = _bt_exit_decision(
+                position, strategy_id, df, i, exit_fn, slip,
+                cur_high, cur_low, cur_close, bars_held, max_hold)
 
             if reason is not None:
                 entry_price = position['entry_price']
@@ -704,46 +767,11 @@ def backtest_strategy(
             continue
 
         # 포지션 크기 계산 (스팟: 레버리지 없음)
-        # Kelly 스케일링 (SPOT_KELLY_MIN_TRADES 건 이후부터 적용)
-        kelly_scale = 1.0
-        if len(trades) >= SPOT_KELLY_MIN_TRADES:
-            recent = trades[-200:]
-            wins_r   = [t.pnl_r for t in recent if t.pnl_r > 0]
-            losses_r = [t.pnl_r for t in recent if t.pnl_r <= 0]
-            if not wins_r:
-                # 전패 구간 — 라이브와 동일하게 최소 스케일로 (기존에는 1.0을
-                # 유지해 연패 중에도 정상 사이즈로 베팅하는 낙관 편향이 있었다)
-                kelly_scale = SPOT_KELLY_SCALE_MIN
-            if wins_r and losses_r:
-                wr = len(wins_r) / len(recent)
-                b  = abs(float(np.mean(wins_r))) / abs(float(np.mean(losses_r)))
-                # half-Kelly (라이브 _get_kelly_scale과 패리티 유지)
-                kelly_raw = (wr - (1 - wr) / b) * SPOT_KELLY_FRACTION if b > 0 else 0.0
-                # 조건부 상한: WR>55% AND PF>1.5 시 KELLY_SCALE_MAX(2.0), 아니면 1.50
-                gross_w = sum(abs(r) for r in wins_r)
-                gross_l = sum(abs(r) for r in losses_r)
-                pf = gross_w / gross_l if gross_l > 0 else 0.0
-                k_max = SPOT_KELLY_SCALE_MAX if (wr >= SPOT_KELLY_WR_THRESH and
-                                                  pf >= SPOT_KELLY_PF_THRESH) else 1.50
-                kelly_scale = max(SPOT_KELLY_SCALE_MIN, min(k_max, kelly_raw))
-        # 전략 건강도 자기교정 (라이브 `_get_strategy_health_scale` 패리티)
-        # 최근 실적의 net PF가 나쁘면 감봉/차단된다. 이걸 빼면 백테스트는
-        # 라이브가 실제로는 걸러냈을 구간까지 정상 사이즈로 거래한 셈이 된다.
-        health_scale = 1.0
-        if len(trades) >= SPOT_HEALTH_MIN_TRADES:
-            _recent_h = trades[-200:]
-            # 손익 기여도 = R배수 × 그 거래의 리스크 비중 (자본 대비 비율).
-            # 라이브는 USD net PF를 쓰지만 백테스트에는 거래별 USD 손익이
-            # 없으므로 비율로 근사한다 — 판정 자체의 패리티가 목적이다.
-            _nets = [t.pnl_r * t.risk_pct for t in _recent_h]
-            _gw = sum(n for n in _nets if n > 0)
-            _gl = abs(sum(n for n in _nets if n < 0))
-            _pf = _gw / _gl if _gl > 0 else float('inf')
-            if _pf < SPOT_HEALTH_PF_HARD:
-                diag['health_blocked'] = diag.get('health_blocked', 0) + 1
-                continue
-            if _pf < SPOT_HEALTH_PF_SOFT:
-                health_scale = SPOT_HEALTH_SOFT_SCALE
+        kelly_scale  = _bt_kelly_scale(trades)
+        health_scale = _bt_health_scale(trades)
+        if health_scale is None:          # net PF가 하드 임계 미만 → 진입 차단
+            diag['health_blocked'] = diag.get('health_blocked', 0) + 1
+            continue
 
         # 학습기 ON이면 Kelly·건강도 자리를 학습 배분이 대신한다(라이브와 동일).
         if learn_cfg is not None:
