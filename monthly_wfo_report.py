@@ -168,18 +168,36 @@ def save_latest(rows: list[dict], wf_results: dict, meta: dict) -> None:
 
 
 def maybe_trigger_reopt(failing: list[str]) -> None:
-    """OOS 미달 전략이 있고 WFO_AUTO_REOPT=1 이면 재최적화 제안 잡을 순차 트리거.
+    """재최적화 제안 잡을 순차 트리거한다.
+
+    트리거 조건 (WFO_AUTO_REOPT=1 전제):
+      · OOS 미달 전략이 있을 때  — 원래 목적: 망가진 전략 구제
+      · WFO_REOPT_ALWAYS=1 일 때 — 전 전략이 통과 중이어도 실행
+
+    ⚠️ 두 번째 조건이 필요한 이유:
+       재최적화기는 '실패 구제' 도구로 만들어졌지만, 지금은 **신규 기능의
+       검증 통로**이기도 하다(추적 손절 ON/OFF 등이 그리드에 있다).
+       실패했을 때만 돌면 전 전략이 통과 중인 정상 상태에서는 그 검증이
+       **영원히 일어나지 않는다** — 기능을 넣어두고 데이터가 판단하게
+       하겠다는 계획이 그대로 멈춘다.
+       서버가 RAM 951MB / vCPU 1개라 매달 추가 실행이 부담일 수 있어
+       기본값은 끄고, 운영자가 켜도록 했다(권장: 분기 1회 수동 실행).
 
     리포트 프로세스 종료 후 별도 cgroup(oneshot)에서 실행되도록 --no-block 사용.
     로컬/수동 실행(WFO_AUTO_REOPT 미설정)에서는 아무것도 하지 않는다."""
-    if not failing or os.getenv('WFO_AUTO_REOPT') != '1':
+    if os.getenv('WFO_AUTO_REOPT') != '1':
         return
+    always = os.getenv('WFO_REOPT_ALWAYS') == '1'
+    if not failing and not always:
+        return
+    reason = (', '.join(failing) if failing
+              else '전 전략 통과 — WFO_REOPT_ALWAYS로 정기 검증')
     try:
         subprocess.run(
             ['systemctl', 'start', '--no-block', 'atlas-wfo-reopt.service'],
             check=False, timeout=15,
         )
-        print(f'[트리거] atlas-wfo-reopt.service 시작 요청 (대상: {", ".join(failing)})')
+        print(f'[트리거] atlas-wfo-reopt.service 시작 요청 (대상: {reason})')
     except Exception as e:
         print(f'[트리거 실패] {e}')
 
