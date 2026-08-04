@@ -137,7 +137,13 @@ class LearnConfig:
                                     # 상대 모드에서는 분모 하한으로만 쓴다
     explore_floor:   float = 0.25   # 배분 하한 — 흡수상태 방지
     max_scale:       float = 1.50   # 배분 상한. explore_floor 이상이어야 한다
-    unproven_scale:  float = 1.00   # 표본 부족 팔의 배분(운영자 결정 사항)
+    unproven_scale:  float = 0.25   # 표본 부족 팔의 배분.
+                                    # 운영자 결정: 증명 전엔 작게, 증거가
+                                    # 쌓이면 키운다. 1.00이면 격리 해제 직후
+                                    # 0.00 → 1.00으로 점프하는 구간이 생긴다.
+                                    # ⚠️ 소액 계좌에서는 주문이 거래소 최소액
+                                    # 아래로 내려갈 수 있다 — capital_plan.py로
+                                    # 문턱을 확인하고 켤 것
     cost_per_r:      float = 0.04   # 수수료가 1R에서 차지하는 비중.
                                     # ⚠️ 슬리피지·스프레드는 **넣지 말 것** —
                                     # pnl_r은 실제 체결가로 계산되므로 이미
@@ -539,8 +545,8 @@ def load_observations(db_path: Optional[Path] = None,
     """거래 DB에서 관측을 읽는다. 드라이런은 제외한다."""
     import sqlite3
     if db_path is None:
-        from atlas_spot_config import SPOT_DB_PATH
-        db_path = Path(SPOT_DB_PATH)
+        from atlas_spot_config import SPOT_DB_FILE
+        db_path = Path(SPOT_DB_FILE)
     if not Path(db_path).exists():
         return []
     since = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()

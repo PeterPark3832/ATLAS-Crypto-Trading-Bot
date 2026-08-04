@@ -53,6 +53,9 @@ from atlas_spot_config import (
     SPOT_TRAIL_ENABLED,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_PF_HARD,
     SPOT_HEALTH_SOFT_SCALE,
+    SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
+    SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
+    SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_SHARPE, WF_OOS_MIN_PF,
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
@@ -169,6 +172,20 @@ def build_regime_map(btc_1d_ohlcv: list, btc_4h_ohlcv: list | None = None) -> di
         regime_map[date_key] = classify_regime(adx, btc_px, ema_val, atr_pct,
                                                adx_4h, adx_slope)
     return regime_map
+
+
+def _bt_learn_config():
+    """config 상수 → LearnConfig (라이브 `_learn_config`와 동일 값)."""
+    import atlas_learning as _L
+    return _L.LearnConfig(
+        half_life_days=SPOT_LEARN_HALF_LIFE_DAYS,
+        min_info=SPOT_LEARN_MIN_INFO,
+        unproven_scale=SPOT_LEARN_UNPROVEN_SCALE,
+        explore_floor=SPOT_LEARN_FLOOR,
+        max_scale=SPOT_LEARN_MAX_SCALE,
+        gain=SPOT_LEARN_GAIN,
+        cost_per_r=SPOT_LEARN_COST_PER_R,
+    )
 
 
 def build_momentum_rank_map(ohlcv_by_symbol: dict,
@@ -488,6 +505,12 @@ def backtest_strategy(
 
     trades   = []
     equity   = initial_equity
+    # 자기주도 학습 상태 — 라이브가 학습 배분을 쓰면 백테스트도 같은 규칙을
+    # 써야 한다. 안 그러면 검증한 사이징과 실계좌 사이징이 갈라진다.
+    learn_obs:   list = []      # 청산된 거래 → 관측
+    learn_res:   dict = {}
+    learn_at             = None   # 마지막 학습 시각(시뮬레이션 시계)
+    learn_cfg = _bt_learn_config() if SPOT_LEARN_ENABLED else None
     position = None      # 현재 포지션 dict or None
     cooldown = 0         # 쿨다운 카운터 (S3용)
     diag     = defaultdict(int)
@@ -581,6 +604,12 @@ def backtest_strategy(
                     cost_usdt  = round(cost_usdt, 2),
                 )
                 trades.append(t)
+                if learn_cfg is not None:
+                    import atlas_learning as _L
+                    learn_obs.append(_L.Observation(
+                        strategy_id, position.get('regime', '') or 'UNKNOWN',
+                        float(pnl_r), row['ts'].to_pydatetime()
+                        if hasattr(row['ts'], 'to_pydatetime') else datetime.now(timezone.utc)))
                 position = None
                 if strategy_id == 'S3':
                     cooldown = S3_COOLDOWN
@@ -716,6 +745,31 @@ def backtest_strategy(
                 continue
             if _pf < SPOT_HEALTH_PF_SOFT:
                 health_scale = SPOT_HEALTH_SOFT_SCALE
+
+        # 학습기 ON이면 Kelly·건강도 자리를 학습 배분이 대신한다(라이브와 동일).
+        if learn_cfg is not None:
+            import atlas_learning as _L
+            _now_dt = (row['ts'].to_pydatetime() if hasattr(row['ts'], 'to_pydatetime')
+                       else None)
+            if _now_dt is not None:
+                if _now_dt.tzinfo is None:
+                    _now_dt = _now_dt.replace(tzinfo=timezone.utc)
+                # 라이브와 같은 주기로만 재계산한다 — 매 진입마다 전체를 다시
+                # 학습하면 O(n²)이 된다.
+                # ※ 현 전략들은 4H·1D봉이라 진입 간격이 항상 30분을 넘는다.
+                #   즉 이 스로틀은 **지금은 한 번도 걸리지 않는다**(성능 방어용).
+                #   분봉 전략을 추가하면 그때부터 의미가 생긴다.
+                if (learn_at is None or
+                        (_now_dt - learn_at).total_seconds() >= SPOT_LEARN_REFRESH_MIN * 60):
+                    learn_res = _L.learn(learn_obs, now=_now_dt, cfg=learn_cfg)
+                    learn_at = _now_dt
+                learn_scale = _L.scale_for(learn_res, strategy_id, regime, learn_cfg)
+            else:
+                learn_scale = learn_cfg.unproven_scale
+            kelly_scale, health_scale = learn_scale, 1.0
+            if learn_scale <= 0:
+                diag['learn_blocked'] = diag.get('learn_blocked', 0) + 1
+                continue
 
         adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale * rs_scale
         risk_usd     = equity * adj_risk_pct

@@ -68,6 +68,9 @@ from atlas_spot_config import (
     SPOT_EXCHANGE_STOP, SPOT_STOP_LIMIT_GAP, SPOT_EXCHANGE_OCO,
     SPOT_KELLY_FRACTION, SPOT_EQUITY_PER_SLOT,
     SPOT_HEALTH_MIN_TRADES, SPOT_HEALTH_PF_SOFT, SPOT_HEALTH_SOFT_SCALE, SPOT_HEALTH_PF_HARD,
+    SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
+    SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
+    SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     SPOT_HEALTH_WINDOW_DAYS,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
@@ -1061,6 +1064,57 @@ def _get_strategy_health_scale(strategy: str) -> float:
     return 1.0
 
 
+_learn_cache: dict = {'at': 0.0, 'result': {}, 'cfg': None}
+
+
+def _learn_config():
+    """config 상수 → LearnConfig. 매 호출 검증되므로 오설정은 여기서 걸린다."""
+    import atlas_learning as _L
+    return _L.LearnConfig(
+        half_life_days=SPOT_LEARN_HALF_LIFE_DAYS,
+        min_info=SPOT_LEARN_MIN_INFO,
+        unproven_scale=SPOT_LEARN_UNPROVEN_SCALE,
+        explore_floor=SPOT_LEARN_FLOOR,
+        max_scale=SPOT_LEARN_MAX_SCALE,
+        gain=SPOT_LEARN_GAIN,
+        cost_per_r=SPOT_LEARN_COST_PER_R,
+    )
+
+
+def _get_learn_result(force: bool = False) -> dict:
+    """학습 결과(캐시). 진입마다 DB 전체를 훑으면 전략 루프가 느려진다.
+
+    실패 시 **빈 dict**를 돌려준다 — 호출자는 그걸 '미검증'으로 해석해
+    중립 배분을 쓴다. 학습기가 죽었다고 봇이 멈추면 안 된다.
+    """
+    now = time.time()
+    if (not force and _learn_cache['result']
+            and now - _learn_cache['at'] < SPOT_LEARN_REFRESH_MIN * 60):
+        return _learn_cache['result']
+    try:
+        import atlas_learning as _L
+        obs = _L.load_observations(SPOT_DB_FILE)
+        res = _L.learn(obs, cfg=_learn_config())
+    except Exception as e:
+        log.warning(f'[학습] 계산 실패(중립 배분으로 진행): {e}')
+        res = {}
+    _learn_cache['at'] = now
+    _learn_cache['result'] = res
+    return res
+
+
+def _get_learn_scale(strategy: str, regime: str) -> float:
+    """(전략 × 레짐) 배분 배수. 학습기가 꺼져 있으면 1.0(무개입)."""
+    if not SPOT_LEARN_ENABLED:
+        return 1.0
+    try:
+        import atlas_learning as _L
+        return _L.scale_for(_get_learn_result(), strategy, regime, _learn_config())
+    except Exception as e:
+        log.warning(f'[학습] 배분 조회 실패(중립): {e}')
+        return 1.0
+
+
 def _get_spot_funding(sym: str) -> float:
     """Binance 선물 펀딩비 조회 (현물 추세추종 진입 필터용). 실패 시 0.0 반환."""
     try:
@@ -1400,7 +1454,9 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         return False
 
     # 전략 건강도 자기교정: 실계좌 net PF 기준 감봉/차단
-    health = _get_strategy_health_scale(strategy)
+    # 학습기를 켜면 이 경로는 **비활성**이다 — 같은 일(성과 기반 감봉)을
+    # 레짐까지 나눠서 하므로, 둘 다 걸면 같은 근거로 두 번 깎는 셈이다.
+    health = 1.0 if SPOT_LEARN_ENABLED else _get_strategy_health_scale(strategy)
     if health <= 0:
         log.warning(f'[{strategy}] {symbol} 매수 차단: 실계좌 net PF < '
                     f'{SPOT_HEALTH_PF_HARD} (표본 {SPOT_HEALTH_MIN_TRADES}건+)')
@@ -1411,7 +1467,14 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
         return False
     _state.pop(f'health_blocked_{strategy}', None)
 
-    kelly    = _get_kelly_scale(strategy)
+    # 학습기 ON이면 Kelly 자리를 학습 배분이 대신한다(곱하지 않는다).
+    # 스케일을 겹겹이 곱하면 주문이 거래소 최소액 아래로 내려가는 문제가
+    # 있었고(실효 리스크가 설정값의 9%까지 내려갔다), 학습기는 Kelly가
+    # 하려던 일을 레짐까지 나눠서 더 정교하게 한다.
+    if SPOT_LEARN_ENABLED:
+        kelly = _get_learn_scale(strategy, regime)
+    else:
+        kelly = _get_kelly_scale(strategy)
     ratchet  = _get_ratchet_scale()
     if regime == REGIME_WEAK_TREND:
         r_scale = WEAK_TREND_RISK_SCALE
