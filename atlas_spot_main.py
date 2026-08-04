@@ -1950,6 +1950,84 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
             f'   거래소 잔고/미체결 주문을 확인해 주세요.')
 
 
+def _s5_safety_block(symbol: str) -> Optional[str]:
+    """S5 전용 안전 필터. 차단 사유를 반환하고, 통과하면 None.
+
+    (전문가 회의 결론 2026-06-04)
+      [1] SL 쿨다운 — 같은 종목에서 손절 직후 재진입하면 같은 하락에
+          연속으로 맞는다. 평균회귀 전략이라 '더 싸졌으니 또 산다'가
+          되기 쉬운 구조다.
+      [2] BTC 상관 그룹 한도 — 상관이 높은 종목에 동시 진입하면 분산이
+          아니라 같은 베팅을 여러 번 하는 것이다.
+    """
+    with _db_lock, _db_conn() as c:
+        row = c.execute(
+            "SELECT exit_ts FROM spot_trades "
+            "WHERE strategy='S5' AND symbol=? AND reason='SL' "
+            "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
+        ).fetchone()
+    if row:
+        try:
+            hours = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(row[0])).total_seconds() / 3600
+        except (ValueError, TypeError) as e:
+            log.warning(f'[S5] {symbol} SL 시각 파싱 실패 — 쿨다운 미적용: {e}')
+            hours = None
+        if hours is not None:
+            limit_h = S5_SL_COOLDOWN_BARS * 24
+            if hours < limit_h:
+                log.info(f'[S5] {symbol} SL쿨다운: {hours:.0f}h 전 SL ({limit_h:.0f}h 대기)')
+                return 'sl_cooldown'
+
+    if symbol in S5_BTC_CORR_SYMBOLS:
+        syms = tuple(S5_BTC_CORR_SYMBOLS)
+        with _db_lock, _db_conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
+                f"AND symbol IN ({','.join('?' * len(syms))})", syms
+            ).fetchone()[0]
+        if n >= S5_CORR_MAX_POS:
+            log.info(f'[S5] {symbol} BTC상관 한도: {n}/{S5_CORR_MAX_POS}개 진입중')
+            return 'btc_corr_limit'
+    return None
+
+
+def _rs_gate_scale(strategy_id: str, symbol: str) -> Optional[float]:
+    """모멘텀 RS Gate + 주도주 부스트. 차단이면 **None**.
+
+    차단(None)과 감봉(작은 배수)을 타입으로 구분한다 — 0.0으로 표현하면
+    곱셈에 흘러들어가 '수량 0 주문'이 된다.
+
+    백테스트 `_bt_rs_gate`와 같은 규칙이다. 두 함수가 갈라지면 WFO가
+    검증한 임계값이 실계좌에서 다르게 동작한다.
+    """
+    if strategy_id not in MOMENTUM_RS_GATE_STRATS:
+        return 1.0
+    rank_pct = _get_momentum_rank_pct(symbol)
+    if rank_pct > MOMENTUM_RS_GATE_PCT:
+        log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
+        return None
+    return MOMENTUM_TOP_RISK_MULT if rank_pct <= MOMENTUM_TOP_TIER_PCT else 1.0
+
+
+def _funding_scale(strategy_id: str, symbol: str) -> Optional[float]:
+    """펀딩비 기반 리스크 배수. 롱 과밀이면 **None**(진입 차단).
+
+    ⚠️ 백테스트는 이 필터를 모델링하지 않는다 — 과거 펀딩비 데이터를
+    받지 않기 때문이다. 즉 백테스트는 라이브가 실제로는 걸렀을 구간까지
+    거래한 것으로 계산한다(낙관 편향).
+    """
+    if strategy_id not in FUNDING_APPLY_STRATS:
+        return 1.0
+    funding = _get_spot_funding(symbol)
+    if funding >= FUNDING_LONG_BLOCK:
+        log.info(f'[펀딩 차단] {symbol} funding={funding*100:.3f}%/8h — 롱 과밀')
+        return None
+    if funding <= FUNDING_SHORT_BOOST:
+        return 1.20      # 숏 스퀴즈 기대 구간 +20%
+    return 1.0
+
+
 def _size_position(equity: float, sl_dist: float, entry_price: float, *,
                    kelly: float = 1.0, ratchet: float = 1.0,
                    regime: float = 1.0, funding: float = 1.0,
@@ -2277,60 +2355,18 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                     if sig['signal'] != 1:
                         continue
 
-                    # ── S5 전용 안전 필터 (전문가 회의 결론 2026-06-04) ──────
-                    if strategy_id == 'S5':
-                        # [1] SL 쿨다운: 같은 종목 SL 후 N 바 재진입 금지
-                        with _db_lock, _db_conn() as _c:
-                            _sl_row = _c.execute(
-                                "SELECT exit_ts FROM spot_trades "
-                                "WHERE strategy='S5' AND symbol=? AND reason='SL' "
-                                "ORDER BY exit_ts DESC LIMIT 1", (symbol,)
-                            ).fetchone()
-                        if _sl_row:
-                            _sl_h = (datetime.now(timezone.utc) -
-                                     datetime.fromisoformat(_sl_row[0])).total_seconds() / 3600
-                            _limit_h = S5_SL_COOLDOWN_BARS * 24
-                            if _sl_h < _limit_h:
-                                log.info(f'[S5] {symbol} SL쿨다운: {_sl_h:.0f}h 전 SL ({_limit_h:.0f}h 대기)')
-                                continue
+                    if strategy_id == 'S5' and _s5_safety_block(symbol):
+                        continue
 
-                        # [2] BTC 상관 그룹 동시 포지션 한도
-                        if symbol in S5_BTC_CORR_SYMBOLS:
-                            _syms = tuple(S5_BTC_CORR_SYMBOLS)
-                            with _db_lock, _db_conn() as _c:
-                                _corr_n = _c.execute(
-                                    "SELECT COUNT(*) FROM spot_positions WHERE strategy='S5' "
-                                    f"AND symbol IN ({','.join('?'*len(_syms))})", _syms
-                                ).fetchone()[0]
-                            if _corr_n >= S5_CORR_MAX_POS:
-                                log.info(f'[S5] {symbol} BTC상관 한도: {_corr_n}/{S5_CORR_MAX_POS}개 진입중')
-                                continue
-                    # ────────────────────────────────────────────────────────
-
-                    # RS Gate: 모멘텀 하위권 심볼 진입 차단
-                    # (임계값이 인라인 `*3`이라 사실상 무차단이었다 —
-                    #  config의 MOMENTUM_RS_GATE_PCT 주석 참조)
-                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
-                        rank_pct = _get_momentum_rank_pct(symbol)
-                        if rank_pct > MOMENTUM_RS_GATE_PCT:
-                            log.debug(f'[RS Gate] {symbol} 모멘텀 하위권({rank_pct:.0%}) — {strategy_id} 차단')
-                            continue
+                    # 모멘텀 RS Gate + 주도주 부스트
+                    rs_scale = _rs_gate_scale(strategy_id, symbol)
+                    if rs_scale is None:
+                        continue
 
                     # 펀딩비 필터: 추세추종 전략 롱 과밀 구간 차단
-                    funding_scale = 1.0
-                    if strategy_id in FUNDING_APPLY_STRATS:
-                        funding = _get_spot_funding(symbol)
-                        if funding >= FUNDING_LONG_BLOCK:
-                            log.info(f'[펀딩 차단] {symbol} funding={funding*100:.3f}%/8h — 롱 과밀')
-                            continue
-                        if funding <= FUNDING_SHORT_BOOST:
-                            funding_scale = 1.20   # 숏 스퀴즈 기대 구간 +20%
-
-                    # 모멘텀 주도주 티어 리스크 부스트
-                    rs_scale = 1.0
-                    if strategy_id in MOMENTUM_RS_GATE_STRATS:
-                        if _get_momentum_rank_pct(symbol) <= MOMENTUM_TOP_TIER_PCT:
-                            rs_scale = MOMENTUM_TOP_RISK_MULT
+                    funding_scale = _funding_scale(strategy_id, symbol)
+                    if funding_scale is None:
+                        continue
 
                     # sig에 스케일 반영 (risk는 _spot_buy에서 SPOT_BASE_RISK_PCT 기반이므로 플래그 전달)
                     sig['_funding_scale'] = funding_scale
