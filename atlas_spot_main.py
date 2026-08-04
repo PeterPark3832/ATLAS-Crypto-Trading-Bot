@@ -607,16 +607,23 @@ def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
         try:
             ex = _get_ex()
 
+            # 정밀도 포맷 폴백. 거래소 메타데이터를 못 읽으면 수동 포맷으로
+            # 물러난다 — 기능이 사라지는 건 아니지만, 반복되면 주문이 거부될
+            # 수 있으므로 흔적은 남긴다(디버그 레벨: 주문마다 호출된다).
             def _p(v):
                 try:
                     return ex.price_to_precision(ccxt_sym, v)
-                except Exception:
+                except Exception as e:
+                    log.debug(f'[{strategy}] {symbol} 가격 정밀도 조회 실패, '
+                              f'수동 포맷 사용: {e}')
                     return f'{v:.8f}'.rstrip('0').rstrip('.')
 
             def _a(v):
                 try:
                     return ex.amount_to_precision(ccxt_sym, v)
-                except Exception:
+                except Exception as e:
+                    log.debug(f'[{strategy}] {symbol} 수량 정밀도 조회 실패, '
+                              f'수동 포맷 사용: {e}')
                     return f'{v:.8f}'.rstrip('0').rstrip('.')
 
             # Binance Spot OCO (POST /api/v3/orderList/oco) — SELL:
@@ -929,8 +936,12 @@ def _get_spot_equity() -> tuple[float, float]:
                 ticker = ex.fetch_ticker(sym)
                 price = float(ticker['last'] or 0)
                 total += qty * price
-            except Exception:
-                pass
+            except Exception as e:
+                # 이 자산이 총자산에서 **누락**된다. 총자산은 사이징·드로다운
+                # 래칫·일일 손실한도의 기준이므로, 과소평가되면 그만큼
+                # 작게 베팅하고 래칫이 잘못 발동한다. 조용히 넘기면 안 된다.
+                log.warning(f'[자산평가] {currency} 시세 조회 실패 — '
+                            f'총자산에서 제외됨(과소평가): {e}')
         return total, usdt
     except Exception as e:
         log.warning(f'[잔고] 조회 실패: {e}')
@@ -1604,8 +1615,13 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
                 try:
                     emergency_sl = _place_stop_loss_order(strategy, symbol, ccxt_sym,
                                                           qty, sl_final)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # DB 저장이 이미 실패한 상태에서 비상 손절까지 실패하면
+                    # **아무 보호도 없는 포지션**이 남는다. 아래 알림은 DB
+                    # 실패만 알리므로, 이걸 삼키면 운영자는 손절이 걸린 줄 안다.
+                    log.error(f'[{strategy}] {symbol} 비상 손절 주문 실패 — '
+                              f'무보호 포지션: {e}')
+                    emergency_sl = ''
             _tg(f'🚨 [{strategy}] {symbol} **포지션 DB 저장 실패** — 봇이 추적하지 못하는 '
                 f'보유분이 생겼습니다. 수동 확인 필요.\n'
                 f'   수량 {qty:.6f} @ {fill_price:,.4f} / SL {sl_final:,.4f}\n'
@@ -1990,8 +2006,10 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
             with _db_lock, _db_conn() as conn:
                 conn.execute('UPDATE spot_positions SET bars_held=? WHERE strategy=? AND symbol=?',
                              (bars_held, strategy, symbol))
-    except Exception:
+    except Exception as e:
+        # 보유 봉수가 어긋나면 시간 기반 청산(max_hold) 시점이 밀린다.
         bars_held = int(pos.get('bars_held', 0))
+        log.debug(f'[{strategy}] {symbol} 보유봉수 계산 실패, DB값 사용: {e}')
     peak      = float(pos.get('peak_price', entry))
 
     # S5: BB_upper를 실시간 TP로 업데이트 (DB도 갱신하여 대시보드 정확도 향상)
@@ -2029,8 +2047,12 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
             if should_exit:
                 _spot_sell(strategy, symbol, ccxt_sym, pos, price, 'CROSS')
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            # 청산 함수가 죽으면 그 봉의 청산 신호가 **사라진다**. SL/TP는
+            # 별도로 살아 있으므로 즉시 위험하진 않지만, 반복되면 전략이
+            # 의도한 청산 규칙 없이 도는 셈이다.
+            log.warning(f'[{strategy}] {symbol} 청산 조건 평가 실패 '
+                        f'(이번 봉 CROSS 청산 건너뜀): {e}')
 
     # 시간 기반 청산
     if max_hold > 0 and bars_held >= max_hold:
@@ -2084,8 +2106,11 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
         try:
             _pass_syms += [p['symbol'].replace('USDT', '/USDT')
                            for p in _load_all_positions()]
-        except Exception:
-            pass
+        except Exception as e:
+            # 보유 심볼이 프리페치에서 빠지면 그 포지션의 SL/TP 판정이
+            # 시세 없이 돌아 이번 사이클을 건너뛴다.
+            log.warning(f'[시세] 보유 심볼 목록 조회 실패 — 일부 포지션 '
+                        f'판정이 지연될 수 있음: {e}')
         _prefetch_prices(_pass_syms)
 
         # 유니버스에서 빠진 심볼도 '보유 중이면' 계속 순회한다.
@@ -2098,8 +2123,11 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
         try:
             _held = [p['symbol'] for p in _load_all_positions()
                      if p['strategy'] in strategies]
-        except Exception:
-            pass
+        except Exception as e:
+            # 보유 목록이 비면 관리 대상에서 빠져 **이번 사이클 청산 판정이
+            # 통째로 누락**된다. 유니버스 밖으로 나간 심볼이 특히 위험하다.
+            log.error(f'[관리] 보유 포지션 목록 조회 실패 — 이번 사이클 '
+                      f'청산 판정 누락 위험: {e}')
         _uni_set  = set(universe)
         scan_syms = list(universe) + [s for s in dict.fromkeys(_held)
                                       if s not in _uni_set]

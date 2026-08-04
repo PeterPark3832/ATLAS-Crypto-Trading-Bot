@@ -12,6 +12,7 @@ BTC 1D 기준 ADX + EMA200 + ATR/Price 로 5가지 장세 분류.
 """
 
 import logging
+from typing import Any
 import threading
 import time
 import pandas as pd
@@ -117,7 +118,7 @@ def classify_regime(adx: float, btc_price: float,
     return REGIME_WEAK_TREND
 
 
-def update_regime(ex, candle_cache=None) -> RegimeState:
+def update_regime(ex: Any, candle_cache: Any = None) -> RegimeState:
     """
     BTC 1D OHLCV를 조회해 레짐을 갱신한다.
     candle_cache: CandleCache 인스턴스 (있으면 캐시 사용)
@@ -157,11 +158,14 @@ def update_regime(ex, candle_cache=None) -> RegimeState:
         adx = calc_adx(ohlcv[-REGIME_BTC_LOOKBACK:], period=14)
 
         # ADX 기울기: 직전 3봉 ADX 시계열로 추세 소멸 조기 감지
-        adx_series_raw = []
-        for k in range(3, 0, -1):
-            adx_series_raw.append(
-                calc_adx(ohlcv[-(REGIME_BTC_LOOKBACK + k):-(k if k else None)], period=14)
-            )
+        # k는 3,2,1이므로 항상 양수다. 예전에는 `-(k if k else None)`로 써
+        # k=0(끝까지)을 처리하는 것처럼 보였지만 그 분기는 도달할 수 없었고,
+        # 타입만 `int | None`이 되어 None에 단항 마이너스를 적용하는 형태가
+        # 됐다(mypy가 잡았다). 실제로는 언제나 `-k`다.
+        adx_series_raw = [
+            calc_adx(ohlcv[-(REGIME_BTC_LOOKBACK + k):-k], period=14)
+            for k in range(3, 0, -1)
+        ]
         adx_slope = (adx_series_raw[-1] - adx_series_raw[0]) if len(adx_series_raw) == 3 else 0.0
 
         # 4H BTC ADX (마이크로 레짐 판별)
@@ -195,7 +199,7 @@ def update_regime(ex, candle_cache=None) -> RegimeState:
         return get_cached_regime()
 
 
-def regime_loop(stop_event=None, candle_cache=None):
+def regime_loop(stop_event: Any = None, candle_cache: Any = None) -> None:
     """
     백그라운드 스레드: 1시간마다 레짐 갱신.
     stop_event: threading.Event — set되면 루프 종료 (graceful shutdown).

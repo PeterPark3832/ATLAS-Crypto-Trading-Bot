@@ -99,7 +99,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
     os.environ.setdefault(_k, 'LEARN')
@@ -151,7 +151,7 @@ class LearnConfig:
                                     # 슬리피지를 두 번 세어 엣지를 과소평가한다
     quarantine:      bool  = True   # 손실이 확실한 팔을 0으로 격리할지
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """오설정을 조용히 통과시키지 않는다.
 
         학습기의 잘못된 설정은 예외를 던지지 않고 **그냥 돈을 잃는다**.
@@ -574,7 +574,7 @@ def load_observations(db_path: Optional[Path] = None,
     return out
 
 
-def _parse_ts(raw) -> Optional[datetime]:
+def _parse_ts(raw: Any) -> Optional[datetime]:
     """ISO 문자열 → tz-aware datetime. 실패하면 None(조용히 버린다)."""
     if not raw:
         return None

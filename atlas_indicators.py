@@ -5,7 +5,7 @@ ATLAS — 지표 계산 모듈
 """
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -91,7 +91,7 @@ def calc_adx(ohlcv: list, period: int = 14) -> float:
         tr = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
         trs.append(tr)
 
-    def _wilder(lst, p):
+    def _wilder(lst: list, p: int) -> list:
         result = []
         s = sum(lst[:p])
         result.append(s)
@@ -172,7 +172,7 @@ def calc_dynamic_rr_ma(adx: float, ema_gap_pct: float,
     if rr_max < rr_min:
         rr_min, rr_max = rr_max, rr_min      # 뒤집힌 설정에도 발산하지 않게
 
-    def _bad(v) -> bool:
+    def _bad(v: Any) -> bool:
         try:
             return not math.isfinite(float(v))
         except (TypeError, ValueError):

@@ -87,3 +87,25 @@ omit = ["tests/*", "*/site-packages/*"]
 [tool.coverage.report]
 # 실계좌를 다루는 모듈은 커버리지가 떨어지면 즉시 알아야 한다.
 exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]
+
+# ══════════════════════════════════════════════════════════════
+#  mypy — 점진 도입
+# ══════════════════════════════════════════════════════════════
+#  전면 strict는 8,700줄 기존 코드에서 수백 건이 쏟아져 아무도 안 보게 된다.
+#  **금액·수량 계산이 있는 모듈부터** 좁게 켜고 넓혀 간다.
+#  잡으려는 것: None 전파(가격 조회 실패 → None × qty), 숫자/문자열 혼동,
+#  Optional 반환을 그대로 산술에 쓰는 실수.
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true       # ccxt·fastmcp 등 스텁 없는 외부 패키지
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false          # 미주석 함수까지 검사하면 노이즈가 압도한다
+exclude = ['^tests/', '^state/', '^results/']
+
+[[tool.mypy.overrides]]
+# 금액·수량이 흐르는 모듈 — 여기부터 조인다
+module = ["atlas_indicators", "atlas_learning", "atlas_regime", "capital_plan"]
+disallow_untyped_defs = true
+warn_return_any = true

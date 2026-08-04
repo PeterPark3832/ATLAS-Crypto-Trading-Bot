@@ -205,7 +205,7 @@ def bnb_saving(sl_pct: float = DEFAULT_SL_PCT) -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def breakeven(sl_pct: float = DEFAULT_SL_PCT, bnb: bool = False,
-              payoffs=(1.0, 1.5, 2.0, 3.0)) -> list[dict]:
+              payoffs: tuple = (1.0, 1.5, 2.0, 3.0)) -> list[dict]:
     """손익비별 손익분기 승률.
 
     비용을 넣은 식:  WR × b − (1 − WR) × 1 − cost_per_r = 0

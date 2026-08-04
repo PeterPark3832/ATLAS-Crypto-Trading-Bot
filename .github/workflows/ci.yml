@@ -33,10 +33,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff bandit pytest-cov
+          pip install ruff bandit pytest-cov mypy
 
       - name: 린트 (버그 탐지기로 취급 — 실패 시 중단)
         run: ruff check .
+
+      - name: 타입 체크 (핵심 모듈 — 점진 도입)
+        # 전면 strict는 노이즈가 압도하므로 금액·수량이 흐르는 모듈부터
+        # 조인다. 실제로 여기서 `int | None`에 단항 마이너스를 적용하던
+        # 도달 불가 분기를 찾았다.
+        run: mypy atlas_indicators.py atlas_learning.py atlas_regime.py capital_plan.py
 
       - name: 보안 스캔 (HIGH만 차단)
         # MEDIUM 이하는 대부분 오탐이라 리포트만 남긴다.
