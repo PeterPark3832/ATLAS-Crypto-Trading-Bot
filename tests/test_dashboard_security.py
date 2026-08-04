@@ -10,7 +10,6 @@ BOT_START_ARGS 기동 인자 보존을 검증합니다.
 
 import os
 import sys
-import time
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):

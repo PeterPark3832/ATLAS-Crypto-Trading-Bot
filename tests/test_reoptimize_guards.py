@@ -112,20 +112,20 @@ class TestGlobalParamOverride:
         with ro.override_params({'SPOT_TRAIL_ENABLED': True}):
             assert sm.SPOT_TRAIL_ENABLED is True
             assert bt.SPOT_TRAIL_ENABLED is True
-        assert (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED) == before
+        assert before == (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
 
     def test_strategy_constants_still_work(self):
         before = ro.strat.S3_ADX_MIN
         with ro.override_params({'S3_ADX_MIN': 99}):
             assert ro.strat.S3_ADX_MIN == 99
-        assert ro.strat.S3_ADX_MIN == before
+        assert before == ro.strat.S3_ADX_MIN
 
     def test_restores_on_exception(self):
         before = ro.strat.S3_ADX_MIN
         with pytest.raises(RuntimeError):
             with ro.override_params({'S3_ADX_MIN': 77}):
                 raise RuntimeError('중단')
-        assert ro.strat.S3_ADX_MIN == before, '예외가 나도 원복돼야 한다'
+        assert before == ro.strat.S3_ADX_MIN, '예외가 나도 원복돼야 한다'
 
     def test_unknown_param_raises(self):
         with pytest.raises(KeyError):

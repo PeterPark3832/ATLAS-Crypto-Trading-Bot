@@ -104,10 +104,10 @@ def calc_adx(ohlcv: list, period: int = 14) -> float:
     dmp_w  = _wilder(dm_plus,  period)
     dmm_w  = _wilder(dm_minus, period)
 
-    di_plus  = [100 * d / t if t else 0 for d, t in zip(dmp_w, tr_w)]
-    di_minus = [100 * d / t if t else 0 for d, t in zip(dmm_w, tr_w)]
+    di_plus  = [100 * d / t if t else 0 for d, t in zip(dmp_w, tr_w, strict=True)]
+    di_minus = [100 * d / t if t else 0 for d, t in zip(dmm_w, tr_w, strict=True)]
     dx_list  = [abs(p - m) / (p + m) * 100 if (p + m) else 0
-                for p, m in zip(di_plus, di_minus)]
+                for p, m in zip(di_plus, di_minus, strict=True)]
 
     if len(dx_list) < period:
         return 0.0

@@ -1,0 +1,99 @@
+# ATLAS CI
+#
+# 이 저장소에서 CI의 목적은 "스타일 통일"이 아니라 **조용한 회귀 차단**이다.
+# 실제로 이번 감사에서 나온 결함들은 전부 "코드는 돌고 테스트도 통과하지만
+# 기능이 죽어 있는" 종류였고, 그중 하나는 ruff의 미사용 import 경고
+# 하나에서 시작됐다. 그래서 린트를 경고가 아니라 **실패**로 다룬다.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff bandit pytest-cov
+
+      - name: 린트 (버그 탐지기로 취급 — 실패 시 중단)
+        run: ruff check .
+
+      - name: 보안 스캔 (HIGH만 차단)
+        # MEDIUM 이하는 대부분 오탐이라 리포트만 남긴다.
+        # (FastAPI가 int로 강제 변환하는 쿼리 파라미터를 SQL 주입으로 보는 등)
+        run: bandit -r . -x ./tests -lll
+
+      - name: 테스트 + 커버리지
+        env:
+          BINANCE_API_KEY: CI
+          BINANCE_API_SECRET: CI
+          TG_TOKEN: CI
+          TG_CHAT_ID: CI
+        run: pytest tests/ --cov --cov-report=term-missing:skip-covered --cov-fail-under=78
+        # 78%는 **현재 실측치**다. 목표치가 아니라 '여기서 더 내려가면
+        # 실패' 라는 래칫이다. 커버리지 게이트를 실제보다 높게 잡으면
+        # CI가 늘 빨간 상태가 되고, 그러면 아무도 CI를 보지 않게 된다.
+        # 약한 곳: reoptimize 48%, monthly_wfo 62%, weekly_report 70%.
+
+      - name: 라이브 진입 경로 커버리지 하한
+        # 주문을 내는 모듈은 전체 평균보다 높은 기준을 따로 건다.
+        # 여기가 무너지면 '테스트 통과'가 실계좌 안전을 보장하지 못한다.
+        env:
+          BINANCE_API_KEY: CI
+          BINANCE_API_SECRET: CI
+          TG_TOKEN: CI
+          TG_CHAT_ID: CI
+        run: |
+          pytest tests/ -q --cov=atlas_spot_main --cov=atlas_learning \
+                 --cov=atlas_indicators --cov=atlas_regime \
+                 --cov-report=term --cov-fail-under=88
+        # 주문을 내는 경로는 전체 평균(78%)보다 높은 88%를 요구한다.
+        # 실측 90% — 여기가 무너지면 '테스트 통과'가 실계좌 안전을
+        # 보장하지 못한다는 뜻이므로 별도 게이트로 둔다.
+
+  guard:
+    # 실계좌 안전 스위치가 실수로 켜진 채 병합되는 것을 막는다.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 위험 기본값 검사
+        run: |
+          python - <<'PY'
+          import re, sys, pathlib
+          src = pathlib.Path('atlas_spot_config.py').read_text()
+          problems = []
+          # 실거래 사이징을 바꾸는 기능은 기본 OFF여야 한다.
+          for name in ('SPOT_LEARN_ENABLED', 'SPOT_TRAIL_ENABLED'):
+              m = re.search(rf'^{name}\s*=\s*(\S+)', src, re.M)
+              if not m:
+                  problems.append(f'{name} 상수를 찾을 수 없다')
+              elif m.group(1) != 'False':
+                  problems.append(f'{name} = {m.group(1)} — 검증 전 기능은 기본 OFF여야 한다')
+          if problems:
+              print('\n'.join('✗ ' + p for p in problems)); sys.exit(1)
+          print('✓ 위험 기본값 검사 통과')
+          PY

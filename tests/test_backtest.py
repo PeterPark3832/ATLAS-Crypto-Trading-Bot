@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from collections import defaultdict
 from datetime import datetime, timezone
 
-import numpy as np
 import pandas as pd
 import pytest
 

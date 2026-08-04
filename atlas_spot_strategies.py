@@ -36,8 +36,7 @@ from atlas_indicators import _ohlcv_to_df, _calc_atr, _calc_rsi, calc_dynamic_rr
 from atlas_spot_config import (
     S2_SMA_FAST, S2_SMA_SLOW, S2_ATR_PERIOD, S2_ATR_SL,
     S3_EMA_FAST, S3_EMA_SLOW, S3_EMA_TREND, S3_ADX_PERIOD, S3_ADX_MIN,
-    S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_RR_MIN, S3_RR_MAX, S3_COOLDOWN,
-    S4_RSI_PERIOD, S4_RSI_ENTRY, S4_BB_PERIOD, S4_BB_SIGMA,
+    S3_ATR_PERIOD, S3_ATR_SL, S3_RR, S3_RR_MIN, S3_RR_MAX, S4_RSI_PERIOD, S4_RSI_ENTRY, S4_BB_PERIOD, S4_BB_SIGMA,
     S4_ATR_PERIOD, S4_ATR_SL, S4_RR, S4_MAX_HOLD,
     S5_BB_PERIOD, S5_BB_SIGMA, S5_RSI_CONFIRM, S5_ATR_PERIOD, S5_ATR_SL, S5_MAX_HOLD,
     S6_ENTRY_PERIOD, S6_EXIT_PERIOD, S6_VOL_MA, S6_VOL_MULT, S6_VOL_VWAP_CONFIRM,
@@ -547,7 +546,6 @@ from atlas_spot_config import (
     S7_EMA_TREND as _S7V4_EMA_TREND,
     S7_ATR_PERIOD as _S7V4_ATR_PERIOD,
     S7_ATR_SL    as _S7V4_ATR_SL,
-    S7_RR        as _S7V4_RR,
 )
 
 def calc_s7v4(ohlcv: list):

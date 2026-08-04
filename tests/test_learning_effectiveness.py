@@ -19,7 +19,6 @@ ATLAS — 학습기가 **실제로 돈을 더 버는가**
   python tests/test_learning_effectiveness.py        # 성과 비교표 출력
 """
 
-import math
 import os
 import random
 import sys

@@ -5,7 +5,7 @@ ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC crontab 실행
 
 import os
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -102,7 +102,7 @@ def main():
     total = load_trades(9999)
 
     w = calc(week)
-    m = calc(month)
+    m = calc(month)      # 30일 — 주간의 잡음과 누적의 둔감함 사이를 메운다
     t = calc(total)
 
     if not t:
@@ -116,10 +116,20 @@ def main():
         f"  주간 MDD: {w['mdd']:.1f}%"
     ) if w else "이번주: 거래 없음"
 
+    # 30일 구간 — 예전에는 계산해 놓고 리포트에 넣지 않아 매주 버려졌다.
+    # 주간은 표본이 적어 잡음이 크고 누적은 최근 변화에 둔감하므로,
+    # 그 사이를 메우는 이 구간이 실제 판단에 가장 쓸모 있다.
+    month_str = (
+        f"최근 30일 ({m['total']}건):\n"
+        f"  PnL: ${m['pnl']:+.2f}  WR: {m['wr']:.0f}%  PF: {m['pf']:.2f}\n"
+        f"  MDD: {m['mdd']:.1f}%  avgR: {m['avg_r']:+.3f}"
+    ) if m else "최근 30일: 거래 없음"
+
     msg = (
         f"📊 ATLAS Spot 주간 리포트 ({now.strftime('%Y-%m-%d')})\n"
         f"{'─'*30}\n"
         f"{week_str}\n\n"
+        f"{month_str}\n\n"
         f"전략별 (7일):\n{strategy_summary(week)}\n\n"
         f"누적 전체 ({t['total']}건):\n"
         f"  PnL: ${t['pnl']:+.2f}  WR: {t['wr']:.0f}%  PF: {t['pf']:.2f}\n"

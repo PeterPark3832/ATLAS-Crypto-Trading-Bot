@@ -96,7 +96,7 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -259,11 +259,11 @@ def weighted_stats(values: Sequence[float],
     s1 = sum(weights)
     if s1 <= 0:
         return 0.0, 0.0, 0.0
-    mean = sum(v * w for v, w in zip(values, weights)) / s1
+    mean = sum(v * w for v, w in zip(values, weights, strict=True)) / s1
     ess = effective_sample_size(weights)
     if ess <= 1.0:
         return float(mean), 0.0, float(ess)
-    var = sum(w * (v - mean) ** 2 for v, w in zip(values, weights)) / s1
+    var = sum(w * (v - mean) ** 2 for v, w in zip(values, weights, strict=True)) / s1
     var *= ess / (ess - 1.0)          # 불편보정
     return float(mean), float(math.sqrt(max(var, 0.0))), float(ess)
 

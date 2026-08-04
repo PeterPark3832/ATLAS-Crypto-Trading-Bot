@@ -59,8 +59,8 @@ class TestNoRegression:
 
     def test_weights_preserve_original_split(self):
         """ADX 2/3, 갭 1/3 — 원래 (1.0, 0.5) 배분과 같아야 한다."""
-        assert ind.RR_ADX_WEIGHT * 1.5 == pytest.approx(1.0)
-        assert ind.RR_GAP_WEIGHT * 1.5 == pytest.approx(0.5)
+        assert pytest.approx(1.0) == ind.RR_ADX_WEIGHT * 1.5
+        assert pytest.approx(0.5) == ind.RR_GAP_WEIGHT * 1.5
 
 
 # ══════════════════════════════════════════════════════════════
@@ -202,7 +202,6 @@ class TestStrategyWiring:
 
 def _s6_frame(adx=30.0, n=80):
     """S6 진입 조건을 만족하는 최소 DataFrame."""
-    import numpy as np
     import pandas as pd
     df = pd.DataFrame({
         'ts':       pd.date_range('2024-01-01', periods=n, freq='1D', tz='UTC'),

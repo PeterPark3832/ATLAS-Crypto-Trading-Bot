@@ -17,7 +17,6 @@ Binance 현물 마켓에서 유동성 기준으로 거래 대상 심볼을 동�
 import argparse
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +24,6 @@ for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
     os.environ.setdefault(_k, 'UNIVERSE')
 
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (

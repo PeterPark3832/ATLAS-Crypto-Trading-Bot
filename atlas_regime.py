@@ -18,7 +18,7 @@ import pandas as pd
 import ccxt
 from dataclasses import dataclass
 from atlas_spot_config import BINANCE_API_KEY, BINANCE_API_SECRET
-from atlas_indicators import adx_min_bars, calc_adx, _ohlcv_to_df, _calc_atr
+from atlas_indicators import adx_min_bars, calc_adx, _ohlcv_to_df
 
 # ── 레짐 분류 임계값 ─────────────────────────────────────────
 REGIME_ADX_TREND    = 25      # ADX >= 25 → 추세 구간

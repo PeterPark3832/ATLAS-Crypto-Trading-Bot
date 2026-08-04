@@ -97,8 +97,8 @@ class TestConfigParity:
         fee_only = cfg.BT_SPOT_FEE * 2 / sl_pct
         full = (cfg.BT_SPOT_FEE * 2 + cfg.SPOT_DEFAULT_SPREAD_PCT
                 + cfg.SPOT_ASSUMED_SLIP_PCT * 2) / sl_pct
-        assert cfg.SPOT_LEARN_COST_PER_R == pytest.approx(fee_only, rel=0.05)
-        assert cfg.SPOT_LEARN_COST_PER_R < full
+        assert pytest.approx(fee_only, rel=0.05) == cfg.SPOT_LEARN_COST_PER_R
+        assert full > cfg.SPOT_LEARN_COST_PER_R
 
 
 # ══════════════════════════════════════════════════════════════
@@ -242,7 +242,7 @@ class TestBacktestPath:
                                         '2021-01-01', '2022-12-31')
         if not short:
             pytest.skip('거래 없음')
-        for a, b in zip(short, long_):
+        for a, b in zip(short, long_, strict=False):
             assert a.risk_pct == pytest.approx(b.risk_pct), (
                 '기간을 늘렸더니 과거 거래의 사이징이 바뀌었다 — 선행편향')
 

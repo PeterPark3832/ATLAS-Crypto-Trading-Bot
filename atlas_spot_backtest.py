@@ -29,7 +29,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +41,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (
-    BT_SPOT_FEE, BT_SPOT_SLIPPAGE, BT_INITIAL_EQ,
+    BT_SPOT_FEE, BT_INITIAL_EQ,
     BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
     SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
@@ -69,7 +69,7 @@ from atlas_spot_strategies import (
 from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
-from atlas_regime import classify_regime, REGIME_ADX_TREND, REGIME_ADX_WEAK, REGIME_CRISIS_ATR
+from atlas_regime import classify_regime
 
 
 # ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
@@ -535,7 +535,7 @@ def backtest_strategy(
         if position is not None:
             bars_held = i - position['entry_bar']
             max_hold  = position.get('max_hold', 0)
-            exit_type = position.get('exit_type', 'sl_tp')
+            # exit_type은 기록용 메타데이터 — 청산 분기는 EXIT_CHECK_FUNCS가 한다
 
             reason    = None
 
@@ -580,7 +580,6 @@ def backtest_strategy(
                 # 그 pnl_r이 Kelly·건강도·avg_r을 오염시킨다.
                 sl_dist     = abs(entry_price - position.get('orig_sl', position['sl']))
                 pnl_r       = (exit_price - entry_price) / sl_dist if sl_dist > 0 else 0.0
-                pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
                 fee_cost    = exit_price * position['qty'] * BT_SPOT_FEE
                 cost_usdt   = position['cost_usdt']
 
@@ -835,8 +834,6 @@ def _backtest_buyhold(symbol, df, ts_start, ts_end,
 
     entry_price = float(df_filt.iloc[0]['close'])
     exit_price  = float(df_filt.iloc[-1]['close'])
-    pnl_r       = (exit_price - entry_price) / (entry_price * 0.1) if entry_price > 0 else 0
-    hold_days   = (df_filt.index[-1] - df_filt.index[0])
 
     t = SpotTrade(
         symbol     = symbol, strategy = 'S1',
@@ -1024,7 +1021,7 @@ def print_comparison_report(results: dict, start_date: str, end_date: str,
 
     headers = ['전략', '심볼수', '거래수', 'WR%', 'PF', 'MDD%', 'Sharpe', 'Sortino', 'CAGR%', '총PnL%']
     col_w   = [22, 6, 6, 6, 5, 6, 7, 7, 7, 7]
-    header  = '  ' + '  '.join(h.ljust(w) for h, w in zip(headers, col_w))
+    header  = '  ' + '  '.join(h.ljust(w) for h, w in zip(headers, col_w, strict=False))
     print(header)
     print(f'  {"─" * (sum(col_w) + len(col_w) * 2)}')
 
@@ -1046,7 +1043,7 @@ def print_comparison_report(results: dict, start_date: str, end_date: str,
             f"{combined.get('cagr_pct', 0):+.1f}",
             f"{combined.get('total_pnl_pct', 0):+.1f}",
         ]
-        line = '  ' + '  '.join(v.ljust(w) for v, w in zip(row, col_w))
+        line = '  ' + '  '.join(v.ljust(w) for v, w in zip(row, col_w, strict=False))
         print(line)
 
     print(f'{"═" * w}\n')

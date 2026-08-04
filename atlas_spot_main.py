@@ -43,7 +43,6 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -57,7 +56,7 @@ except ImportError:
 
 from atlas_spot_config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, TG_TOKEN, TG_CHAT_ID,
-    SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_DATA_DIR, SPOT_KILL_SWITCH,
+    SPOT_DB_FILE, SPOT_LOG_DIR, SPOT_KILL_SWITCH,
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
     SPOT_EDGE_MIN_TRADES,
@@ -76,7 +75,7 @@ from atlas_spot_config import (
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
     SPOT_RATCHET_DD_THRESH, SPOT_RATCHET_DD_HARD, SPOT_RATCHET_RECOVER,
     SPOT_CANDLE_4H, SPOT_CANDLE_1D, SPOT_CANDLE_CACHE_TTL, SPOT_PRICE_POLL_SEC,
-    STRATEGY_TIMEFRAMES, STRATEGY_NAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
+    STRATEGY_TIMEFRAMES, REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,
     LIVE_STRATEGIES,
     WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     BT_SPOT_FEE,
@@ -89,9 +88,9 @@ from atlas_spot_config import (
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
 from atlas_regime import (
-    get_cached_regime, update_regime, regime_loop,
-    REGIME_CRISIS, REGIME_RANGING, REGIME_WEAK_TREND,
-    REGIME_TRENDING_UP, REGIME_TRENDING_DOWN,
+    get_cached_regime, regime_loop,
+    REGIME_CRISIS, REGIME_WEAK_TREND,
+    REGIME_TRENDING_DOWN,
 )
 
 
@@ -1638,7 +1637,6 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
     entry_price = float(pos['entry_price'])
     qty         = float(pos['qty_tokens'])
     cost_usdt   = float(pos['cost_usdt'])
-    risk_pct    = float(pos['risk_pct'])
     sl          = float(pos['sl'])
     # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로 sl이 올라간
     # 뒤 그 값을 분모로 쓰면 R이 부풀고, 그 pnl_r이 Kelly·건강도·avg_r과
@@ -1977,7 +1975,9 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
 
     sl        = float(pos['sl'])
     tp        = float(pos['tp'])
-    exit_type = pos.get('exit_type', 'sl_tp')
+    # exit_type은 **기록용 메타데이터**다. 실제 청산 분기는
+    # EXIT_CHECK_FUNCS(전략별 청산 함수)가 담당하므로 여기서 읽지 않는다.
+    # (읽고 버리면 이 값이 동작을 제어한다고 오해하게 된다)
     max_hold  = int(pos.get('max_hold_bars', 0))
     # bars_held: 실제 보유시간 기반으로 계산 후 DB에 라이트백
     _tf = STRATEGY_TIMEFRAMES.get(strategy, '1d')
@@ -2326,6 +2326,8 @@ def _daily_reset_loop(stop_event: threading.Event) -> None:
             _state['day_pnl']      = 0.0
             _state['day_start_eq'] = equity
             _state['daily_loss_alerted'] = False
+        # 리셋 전 값은 그날의 최종 손익이다 — 버리면 사후에 재구성할 수 없다.
+        log.info(f'[일일 리셋] 전일 손익 ${day_pnl:+,.2f} → 새 기준 자본 ${equity:,.2f}')
         _persist_risk_state()   # 리셋 직후 재시작해도 새 기준점이 유지되도록
 
         # 일간 브리핑

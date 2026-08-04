@@ -20,6 +20,7 @@ Vultr 서버에 SSH로 접속해 DB와 로그를 읽어옵니다.
   .env 파일에 VULTR_HOST, VULTR_USER, VULTR_KEY_PATH 설정
 """
 
+import logging
 import os
 import sqlite3
 import tempfile
@@ -48,13 +49,33 @@ mcp = FastMCP("ATLAS Spot")
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────
 
+# 미등록 SSH 호스트를 자동 신뢰할지. 기본 거부(MITM 방어).
+# 최초 1회 등록이 필요하면 ssh-keyscan을 쓰거나 잠시 이 값을 1로 둔다.
+log = logging.getLogger("atlas_mcp")
+
+MCP_SSH_TRUST_NEW = os.getenv('MCP_SSH_TRUST_NEW', '') == '1'
+
+
 def _ssh_connect() -> paramiko.SSHClient:
     """SSH 클라이언트 연결 반환."""
     if not SSH_HOST:
         raise RuntimeError(".env에 VULTR_HOST가 설정되지 않았습니다.")
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    kwargs: dict = dict(hostname=SSH_HOST, port=SSH_PORT, username=SSH_USER)
+    # 알려진 호스트 키를 먼저 읽는다. AutoAddPolicy는 **처음 보는 서버를
+    # 무조건 신뢰**하므로, 중간자가 끼어들어도 그대로 붙는다 — 이 세션은
+    # 거래 봇을 제어하고 API 키가 있는 서버에 접속하므로 위험이 크다.
+    try:
+        client.load_system_host_keys()
+    except Exception as e:          # 파일 손상 등 — 아래 정책 결정으로 넘어간다
+        log.warning(f'known_hosts 로드 실패: {e}')
+    if MCP_SSH_TRUST_NEW:
+        # 최초 1회 등록용 탈출구. 켜 두면 MITM 방어가 사라지므로 기본은 꺼짐.
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # nosec B507 — 기본 거부이며 opt-in 탈출구
+    else:
+        # 미등록 호스트면 연결을 거부한다.
+        #   등록: ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    kwargs: dict = {'hostname': SSH_HOST, 'port': SSH_PORT, 'username': SSH_USER}
     if SSH_KEY_PATH:
         kwargs['key_filename'] = SSH_KEY_PATH
     elif SSH_PASSWORD:
