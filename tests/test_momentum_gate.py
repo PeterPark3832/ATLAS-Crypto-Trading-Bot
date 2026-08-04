@@ -68,11 +68,16 @@ class TestRsGate:
         monkeypatch.setattr(sm, '_state', {'universe_ranked': ['AUSDT']})
         assert sm._get_momentum_rank_pct('ZUSDT') == 0.5
 
-    def test_in_wfo_grid(self):
-        """데이터가 판단하도록 WFO 그리드에 올라가 있어야 한다."""
+    def test_not_in_wfo_grid_until_backtest_models_it(self):
+        """WFO 그리드에 넣었다가 뺐다.
+
+        백테스트에 RS Gate 구현이 없어서 세 값이 **모두 같은 결과**를 냈고,
+        최적화기는 동점 중 첫 값(0.33)을 "OOS PF 2.22 → 3.54 개선"으로
+        제안했다. 라이브에서는 S6 진입의 2/3를 막는 큰 변경인데 검증된 적이
+        없는 것이다. 백테스트가 RS Gate를 모델링하게 되면 그때 넣는다.
+        """
         import reoptimize as ro
-        assert 'MOMENTUM_RS_GATE_PCT' in ro.GRIDS['S6']
-        assert cfg.MOMENTUM_RS_GATE_PCT in ro.GRIDS['S6']['MOMENTUM_RS_GATE_PCT']
+        assert 'MOMENTUM_RS_GATE_PCT' not in ro.GRIDS['S6']
 
     def test_grid_can_patch_it(self):
         import reoptimize as ro

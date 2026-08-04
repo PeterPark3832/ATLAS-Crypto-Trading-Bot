@@ -32,6 +32,54 @@ import reoptimize as ro
 #  이웃 탐색
 # ══════════════════════════════════════════════════════════════
 
+class TestGridEffectiveness:
+    """그리드에는 **백테스트가 실제로 반영하는** 파라미터만 있어야 한다.
+
+    백테스트가 모르는 값을 넣으면 모든 후보가 동점이 되고, 최적화기는 그중
+    첫 값을 '개선'으로 제안한다. 검증된 적 없는 변경이 검증된 것처럼
+    보고되는 셈이라 가장 위험한 실패다.
+
+    실제로 MOMENTUM_RS_GATE_PCT를 넣었다가 이 함정에 걸렸다 — 백테스트에
+    RS Gate 구현이 없어 세 값이 모두 같은 결과를 냈는데도 "OOS PF 2.22 →
+    3.54 개선"으로 제안됐다. 라이브에서는 S6 진입의 2/3를 막는 큰 변경이다.
+    """
+
+    @staticmethod
+    def _referenced_names() -> set:
+        """백테스트 경로가 실제로 읽는 이름들.
+
+        행동 기반 검사(값을 바꿔 결과 비교)는 데이터에 좌우된다 — 표본이
+        적으면 멀쩡히 구현된 파라미터도 '효과 없음'으로 보인다. 그래서
+        **정적으로** "백테스트 경로가 이 이름을 아는가"를 본다.
+        """
+        import atlas_spot_backtest as bt
+        import atlas_spot_strategies as st
+        return set(Path(bt.__file__).read_text().split()) | \
+               set(Path(st.__file__).read_text().split())
+
+    @pytest.mark.parametrize('sid', sorted(ro.GRIDS))
+    def test_every_axis_is_known_to_backtest(self, sid):
+        blob = ' '.join(self._referenced_names())
+        for key in ro.GRIDS[sid]:
+            assert key in blob, (
+                f'{sid}.{key}: 백테스트 경로(백테스트/전략 모듈)가 이 이름을 '
+                f'참조하지 않는다. 값을 바꿔도 결과가 같으므로 모든 후보가 '
+                f'동점이 되고, 최적화기는 그중 첫 값을 "개선"으로 제안한다 — '
+                f'검증된 적 없는 변경이 검증된 것처럼 보고된다.')
+
+    def test_detects_unmodelled_param(self):
+        """가드가 실제로 잡는지 — 백테스트가 모르는 이름은 걸려야 한다."""
+        blob = ' '.join(self._referenced_names())
+        assert 'MOMENTUM_RS_GATE_PCT' not in blob, (
+            '백테스트가 RS Gate를 구현했다면 그리드에 다시 넣고 이 테스트를 갱신할 것')
+
+    def test_removed_rs_gate_from_grid(self):
+        """백테스트가 모델링하지 못하는 RS Gate는 그리드에 없어야 한다."""
+        for sid, grid in ro.GRIDS.items():
+            assert 'MOMENTUM_RS_GATE_PCT' not in grid, (
+                f'{sid}: 백테스트에 RS Gate 구현이 없어 검증 불가')
+
+
 class TestGlobalParamOverride:
     """추적 손절 같은 **실행 규칙**은 전략 모듈이 아니라 라이브·백테스트
     양쪽 전역에 있다. 한쪽만 바꾸면 검증이 실제 동작과 어긋난다."""
