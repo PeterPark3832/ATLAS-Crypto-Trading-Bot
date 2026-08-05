@@ -16,6 +16,7 @@ ATLAS — 비용 대비 엣지 가드 / 슬리피지 계측
 
 import os
 import sys
+import time
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
@@ -109,7 +110,7 @@ def _insert(pnl_r, strategy='S3', n=1, dry=0):
 class TestFeeRateDetection:
     @pytest.fixture(autouse=True)
     def _reset(self, monkeypatch):
-        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': False})
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': False, 'at': 0.0})
 
     def test_uses_actual_discounted_rate(self, monkeypatch):
         class _E:
@@ -146,7 +147,8 @@ class TestFeeRateDetection:
         monkeypatch.setattr(sm, '_get_ex', lambda: _E())
         assert sm._detect_fee_rate() == sm.BT_SPOT_FEE
 
-    def test_probed_only_once(self, monkeypatch):
+    def test_probed_once_within_ttl(self, monkeypatch):
+        """TTL 안에서는 다시 묻지 않는다(API 낭비 방지)."""
         calls = {'n': 0}
 
         class _E:
@@ -157,11 +159,40 @@ class TestFeeRateDetection:
         sm._detect_fee_rate(); sm._detect_fee_rate(); sm._detect_fee_rate()
         assert calls['n'] == 1
 
+    def test_rechecks_after_ttl(self, monkeypatch):
+        """수수료율은 실제로 바뀐다 — BNB를 채우면 할인이 살아나고,
+        비면 사라진다. 영원히 캐시하면 봇의 비용 모델이 현실과 벌어지고,
+        그 값으로 진입 가드가 판정한다."""
+        calls = {'n': 0}
+
+        class _E:
+            def fetch_trading_fee(self, s):
+                calls['n'] += 1
+                return {'taker': 0.00075}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        sm._detect_fee_rate()
+        assert calls['n'] == 1
+        monkeypatch.setattr(sm, '_fee_rate',
+                            {'taker': 0.001, 'checked': True,
+                             'at': time.time() - sm.SPOT_FEE_RECHECK_SEC - 1})
+        assert sm._detect_fee_rate() == pytest.approx(0.00075)
+        assert calls['n'] == 2, 'TTL이 지나면 다시 물어야 한다'
+
+    def test_survives_legacy_cache_shape(self, monkeypatch):
+        """타임스탬프 없는 옛 캐시에서도 죽지 않아야 한다 —
+        여기서 예외가 나면 진입 가드 전체가 멈춘다."""
+        class _E:
+            def fetch_trading_fee(self, s):
+                return {'taker': 0.00075}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _E())
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': 0.001, 'checked': True})
+        assert sm._detect_fee_rate() > 0
+
     def test_discount_relaxes_cost_guard(self, monkeypatch):
         """할인이 적용되면 같은 SL에서도 비용/R이 낮아져 통과 범위가 넓어진다."""
         monkeypatch.setattr(sm, '_get_ex', lambda: _Ex())
         base, _ = sm._estimate_round_trip_cost('BTC/USDT')
-        monkeypatch.setattr(sm, '_fee_rate', {'taker': 0.00075, 'checked': True})
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': 0.00075, 'checked': True, 'at': time.time()})
         disc, _ = sm._estimate_round_trip_cost('BTC/USDT')
         assert disc < base
 
@@ -169,7 +200,7 @@ class TestFeeRateDetection:
 class TestCostEstimate:
     @pytest.fixture(autouse=True)
     def _fixed_fee(self, monkeypatch):
-        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True, 'at': time.time()})
 
     def test_uses_live_spread(self, _ex):
         cost, spread = sm._estimate_round_trip_cost('BTC/USDT')
@@ -201,7 +232,7 @@ class TestCostEstimate:
 class TestCostEdgeGuard:
     @pytest.fixture(autouse=True)
     def _fixed_fee(self, monkeypatch):
-        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True, 'at': time.time()})
 
     def test_tight_stop_rejected(self, _ex):
         """SL 1% → 비용률 0.004/0.01 = 0.40R 잠식 → 차단."""
@@ -282,7 +313,7 @@ class TestCostEdgeGuard:
 class TestSlippageTracking:
     @pytest.fixture(autouse=True)
     def _fixed_fee(self, monkeypatch):
-        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True})
+        monkeypatch.setattr(sm, '_fee_rate', {'taker': sm.BT_SPOT_FEE, 'checked': True, 'at': time.time()})
 
     def test_entry_slippage_recorded(self, _state, monkeypatch):
         """신호가보다 비싸게 체결되면 양수로 기록된다."""
