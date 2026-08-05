@@ -1398,6 +1398,60 @@ def _get_momentum_rank_pct(sym: str) -> float:
 _fee_rate: dict = {'taker': BT_SPOT_FEE, 'checked': False, 'at': 0.0}
 
 
+BNB_FEE_DISCOUNT = 0.75      # BNB로 수수료 결제 시 25% 할인
+_bnb_off_alert = {'at': 0.0}
+
+
+def _bnb_discount_active() -> bool:
+    """최근 체결의 수수료가 **BNB로** 결제됐는가.
+
+    바이낸스 API(`tradeFee`, `commissionRates`)는 VIP 등급 기본 요율만
+    돌려주고 **BNB 할인을 반영하지 않는다.** 할인은 체결 시점에 적용되며,
+    그 흔적은 개별 체결의 `commissionAsset`에만 남는다.
+
+    그래서 요율 응답만 보고 '할인이 꺼져 있다'고 판단하면 **항상 오탐**이다
+    — 실제로 운영자가 토글을 켜 둔 상태에서 경고가 반복 발송됐다.
+
+    최근 거래한 심볼의 체결 내역을 보고 판정한다. 거래 이력이 없으면
+    판단 근거가 없으므로 False(모름)를 돌려주되, 호출부의 경고에는
+    자체 발송 간격이 걸려 있어 소음이 되지 않는다.
+    """
+    try:
+        with _db_lock, _db_conn() as conn:
+            row = conn.execute(
+                'SELECT symbol FROM spot_trades WHERE COALESCE(dry_run,0)=0 '
+                'ORDER BY id DESC LIMIT 1').fetchone()
+        if not row or not row[0]:
+            return False
+        ccxt_sym = str(row[0]).replace('USDT', '/USDT')
+        fills = _get_ex().fetch_my_trades(ccxt_sym, limit=10) or []
+    except Exception as e:
+        log.debug(f'[수수료] BNB 결제 여부 확인 실패: {e}')
+        return False
+    for f in reversed(fills):
+        asset = ((f.get('fee') or {}).get('currency')
+                 or (f.get('info') or {}).get('commissionAsset') or '')
+        if asset:
+            return str(asset).upper() == 'BNB'
+    return False
+
+
+def _warn_bnb_discount_off() -> None:
+    """BNB 할인이 실제로 꺼져 있을 때만 알린다(발송 간격 제한).
+
+    예전에는 이 경고에 간격 제한이 없어서, 수수료율 재확인 주기(6시간)마다
+    반복 발송됐다. 반복되는 알림은 곧 무시되는 알림이다.
+    """
+    now = time.time()
+    if now - _bnb_off_alert['at'] < SPOT_BNB_ALERT_HOURS * 3600:
+        return
+    _bnb_off_alert['at'] = now
+    _tg('💡 수수료 절감 여지: 최근 체결에서 수수료가 BNB로 결제되지 않았습니다.\n'
+        '   "Use BNB to pay fees"가 켜져 있어도 **BNB 잔고가 비면** '
+        '기초자산에서 차감됩니다.\n'
+        '   왕복 수수료 25% 절감 + 보호주문 거부 방지 — BNB 잔고를 확인하세요.')
+
+
 def _detect_fee_rate() -> float:
     """계정의 실제 taker 수수료율을 조회해 비용 계산에 반영.
 
@@ -1440,11 +1494,17 @@ def _detect_fee_rate() -> float:
             saved = (BT_SPOT_FEE - taker) / BT_SPOT_FEE * 100
             log.info(f'[수수료] 실제 taker {taker*100:.4f}% '
                      f'(기준 {BT_SPOT_FEE*100:.3f}% 대비 {saved:+.0f}%)')
-            if taker >= BT_SPOT_FEE * 0.99:
-                _tg('💡 수수료 절감 여지: BNB 수수료 결제가 꺼져 있는 것 같습니다.\n'
-                    '   계좌에 소량의 BNB를 두고 "Use BNB for fees"를 켜면 '
-                    '왕복 수수료가 25% 줄어듭니다.\n'
-                    '   (SL 5% 기준 거래당 1R의 약 1%p 절감 — 코드 변경 없이 얻는 확정 이득)')
+            # ⚠️ 위 API 응답은 **VIP 등급 기본 요율**이다. BNB 할인은 체결
+            # 시점에 적용되므로 여기에 **절대 반영되지 않는다** — 토글을 켜도
+            # 영원히 0.1%로 답한다. 그래서 이 값만 보고 "꺼져 있다"고 알리면
+            # 항상 오탐이다(실제로 운영자가 켜 둔 상태에서 반복 발송됐다).
+            # 판정은 실제 체결의 수수료 자산으로 한다.
+            if _bnb_discount_active():
+                _fee_rate['taker'] = taker * BNB_FEE_DISCOUNT
+                log.info(f'[수수료] BNB 할인 확인 — 실효 taker '
+                         f'{_fee_rate["taker"]*100:.4f}%')
+            elif taker >= BT_SPOT_FEE * 0.99:
+                _warn_bnb_discount_off()
     except Exception as e:
         log.info(f'[수수료] 실제 요율 조회 실패 — 기본값 {BT_SPOT_FEE*100:.3f}% 사용: {e}')
     return _fee_rate['taker']
