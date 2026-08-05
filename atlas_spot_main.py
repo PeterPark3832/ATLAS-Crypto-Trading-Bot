@@ -70,7 +70,8 @@ from atlas_spot_config import (
     SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
     SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
     SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
-    SPOT_BNB_MIN_USD, SPOT_BNB_ALERT_HOURS,
+    SPOT_BNB_MIN_USD, SPOT_BNB_ALERT_HOURS, SPOT_BNB_MIN_DAYS,
+    SPOT_BNB_PRICE_TTL_SEC, SPOT_BNB_MAX_BUY_PCT,
     SPOT_BNB_AUTO_REFILL, SPOT_BNB_TARGET_MONTHS, SPOT_BNB_MAX_BUY_USD,
     SPOT_BNB_MIN_BUY_USD, SPOT_BNB_REFILL_COOLDOWN_H,
     SPOT_HEALTH_WINDOW_DAYS,
@@ -945,6 +946,34 @@ def _rebase_peak_on_capital_flow(total: float) -> None:
 
 _bnb_alert = {'at': 0.0}
 _bnb_refill = {'at': 0.0}
+_bnb_price = {'usd': 0.0, 'at': 0.0}
+_bnb_capacity_alert = {'at': 0.0}
+
+
+def _bnb_price_usd() -> float:
+    """BNB 시세(캐시). 잔고폴러가 60초마다 도는데 매번 티커를 치면
+    하루 1,440회를 낭비한다. 수수료 잔고 판정에 초 단위 정확도는 필요 없다."""
+    now = time.time()
+    if _bnb_price['usd'] > 0 and now - _bnb_price['at'] < SPOT_BNB_PRICE_TTL_SEC:
+        return _bnb_price['usd']
+    px = float(_get_ex().fetch_ticker('BNB/USDT')['last'] or 0)
+    if px > 0:
+        _bnb_price.update({'usd': px, 'at': now})
+    return px
+
+
+def _bnb_alert_threshold(monthly_usd: float) -> float:
+    """경고 임계값(USD) — **소모일수 기준**.
+
+    고정 달러로 잡으면 자본이 커질수록 무의미해진다. 자본 $10,000에서
+    $5는 하루치라, 경고를 받아도 반응할 시간이 없다. 자본이 10배면
+    명목가도 10배고 수수료도 10배이므로 기준도 함께 커져야 한다.
+
+    소액 계좌에서는 소모량이 작아 임계값이 몇 센트가 되므로,
+    `SPOT_BNB_MIN_USD`를 하한으로 둔다.
+    """
+    daily = max(monthly_usd, 0.0) / 30.0
+    return max(SPOT_BNB_MIN_USD, daily * SPOT_BNB_MIN_DAYS)
 
 
 def _estimate_monthly_bnb_usd() -> float:
@@ -998,7 +1027,12 @@ def _bnb_refill_amount(current_usd: float, usdt_free: float,
         need = SPOT_BNB_MIN_BUY_USD
     else:
         need = monthly * SPOT_BNB_TARGET_MONTHS - current_usd
-    need = min(need, SPOT_BNB_MAX_BUY_USD)            # ① 1회 매수 상한
+    # ① 1회 매수 상한 — 소모량에 맞춰 커지되 자산 비율로 최종 제한.
+    #    고정 $30이면 대형 계좌에서 보충이 소모를 못 따라간다(아래 용량 점검).
+    cap = max(SPOT_BNB_MAX_BUY_USD, monthly * SPOT_BNB_TARGET_MONTHS)
+    cap = min(cap, equity * SPOT_BNB_MAX_BUY_PCT) if equity > 0 else SPOT_BNB_MAX_BUY_USD
+    cap = max(cap, SPOT_BNB_MAX_BUY_USD)   # 소액 계좌에서 하한 아래로 내려가지 않게
+    need = min(need, cap)
     if need < SPOT_BNB_MIN_BUY_USD:
         return 0.0, f'필요액 ${need:.2f} < 최소 ${SPOT_BNB_MIN_BUY_USD:.0f}'
 
@@ -1009,6 +1043,45 @@ def _bnb_refill_amount(current_usd: float, usdt_free: float,
         return 0.0, (f'예비금 보호: 가용 ${max(spendable, 0.0):.2f} < '
                      f'필요 ${need:.2f}')
     return float(need), f'월 소모 추정 ${monthly:.2f} × {SPOT_BNB_TARGET_MONTHS:.0f}개월'
+
+
+def _bnb_refill_capacity(monthly_usd: float, equity: float) -> tuple:
+    """(일일 보충 한도, 일일 소모, 따라갈 수 있는가).
+
+    자동 충전에는 **속도 상한**이 있다 — 1회 상한 ÷ 쿨다운. 자본이 커지면
+    소모 속도가 이걸 넘어서고, 그러면 아무리 충전해도 잔고가 계속 줄어
+    결국 바닥난다. 그 지점을 조용히 지나치면 "자동 충전을 켜 뒀는데도"
+    보호주문이 깨진다 — 켜 뒀다는 사실이 오히려 방심을 만든다.
+
+    한계에 도달하면 쿨다운을 줄이거나 상한 비율을 올려야 한다.
+    """
+    daily_use = max(monthly_usd, 0.0) / 30.0
+    cap = max(SPOT_BNB_MAX_BUY_USD, monthly_usd * SPOT_BNB_TARGET_MONTHS)
+    if equity > 0:
+        cap = max(min(cap, equity * SPOT_BNB_MAX_BUY_PCT), SPOT_BNB_MAX_BUY_USD)
+    cooldown_days = max(SPOT_BNB_REFILL_COOLDOWN_H, 1) / 24.0
+    daily_cap = cap / cooldown_days
+    return daily_cap, daily_use, daily_cap >= daily_use
+
+
+def _warn_if_refill_cannot_keep_up(monthly_usd: float, equity: float) -> None:
+    """보충 속도가 소모 속도를 못 따라가면 알린다(24시간에 한 번)."""
+    if not SPOT_BNB_AUTO_REFILL or monthly_usd <= 0:
+        return
+    daily_cap, daily_use, ok = _bnb_refill_capacity(monthly_usd, equity)
+    if ok:
+        return
+    now = time.time()
+    if now - _bnb_capacity_alert['at'] < SPOT_BNB_ALERT_HOURS * 3600:
+        return
+    _bnb_capacity_alert['at'] = now
+    log.warning(f'[BNB] 자동 충전 용량 부족: 보충 ${daily_cap:.2f}/일 < '
+                f'소모 ${daily_use:.2f}/일')
+    _tg(f'⚠️ BNB 자동 충전이 소모를 못 따라갑니다\n'
+        f'   보충 한도 ${daily_cap:.2f}/일  <  소모 ${daily_use:.2f}/일\n'
+        f'   이대로면 잔고가 계속 줄어 결국 손절 주문이 거부됩니다.\n'
+        f'   SPOT_BNB_REFILL_COOLDOWN_H를 줄이거나 '
+        f'SPOT_BNB_MAX_BUY_PCT를 올리세요.')
 
 
 def _refill_bnb(current_usd: float) -> None:
@@ -1055,11 +1128,20 @@ def _check_bnb_fee_balance(bal: dict) -> None:
     """
     try:
         qty = float((bal.get('BNB') or {}).get('total', 0) or 0)
-        usd = 0.0
-        if qty > 0:
-            usd = qty * float(_get_ex().fetch_ticker('BNB/USDT')['last'] or 0)
-        if usd >= SPOT_BNB_MIN_USD:
+        usd = qty * _bnb_price_usd() if qty > 0 else 0.0
+
+        # 임계값은 **소모 속도**를 따라간다. 자본이 커지면 같은 $5도
+        # 하루치가 되므로, 고정 달러로는 반응할 시간을 벌 수 없다.
+        monthly = _estimate_monthly_bnb_usd()
+        with _state_lock:
+            equity = float(_state.get('equity', 0) or 0)
+        _warn_if_refill_cannot_keep_up(monthly, equity)
+
+        threshold = _bnb_alert_threshold(monthly)
+        if usd >= threshold:
             return
+        days_left = usd / (monthly / 30.0) if monthly > 0 else float('inf')
+
         # 자동 충전이 켜져 있으면 먼저 시도한다. 성공하면 다음 폴링에서
         # 잔고가 회복돼 경고가 자연히 멎는다. 꺼져 있거나 실패하면
         # 아래 경고 경로가 그대로 동작한다.
@@ -1068,11 +1150,16 @@ def _check_bnb_fee_balance(bal: dict) -> None:
         if now - _bnb_alert['at'] < SPOT_BNB_ALERT_HOURS * 3600:
             return
         _bnb_alert['at'] = now
-        log.warning(f'[BNB] 수수료 잔고 부족: {qty:.6f} BNB (≈${usd:.2f})')
-        _tg(f'⚠️ BNB 수수료 잔고 부족 — 약 ${usd:.2f}\n'
+        _days = '무기한' if days_left == float('inf') else f'{days_left:.1f}일'
+        log.warning(f'[BNB] 수수료 잔고 부족: {qty:.6f} BNB (≈${usd:.2f}, '
+                    f'잔여 {_days}, 임계 ${threshold:.2f})')
+        _tg(f'⚠️ BNB 수수료 잔고 부족 — 약 ${usd:.2f} (잔여 {_days})\n'
             f'   비면 수수료가 **기초자산에서** 빠져 손절 주문이 거부됩니다.\n'
             f'   (실제로 ADA·RIF·FET에서 발생했습니다)\n'
-            f'   $10~20어치 충전해 두세요.')
+            f'   월 소모 추정 ${monthly:.2f} → '
+            f'{SPOT_BNB_TARGET_MONTHS:.0f}개월치 ≈ '
+            f'${max(monthly * SPOT_BNB_TARGET_MONTHS, SPOT_BNB_MIN_BUY_USD):.0f} '
+            f'충전 권장')
     except Exception as e:
         log.warning(f'[BNB] 잔고 확인 실패(무시): {e}')
 

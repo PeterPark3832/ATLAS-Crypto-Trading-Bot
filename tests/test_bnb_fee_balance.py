@@ -125,3 +125,115 @@ class TestWiring:
     def test_config_constants_exist(self):
         assert cfg.SPOT_BNB_MIN_USD > 0
         assert cfg.SPOT_BNB_ALERT_HOURS > 0
+
+
+# ══════════════════════════════════════════════════════════════
+#  자본 규모에 따른 확장 (2026-08)
+# ══════════════════════════════════════════════════════════════
+
+class TestThresholdScalesWithConsumption:
+    """고정 달러 임계값은 자본이 커지면 무의미해진다.
+
+    자본 $10,000이면 명목가도 수수료도 10배라, $5는 **하루치**가 된다.
+    경고를 받아도 반응할 시간이 없다. 그래서 임계값을 '남은 소모일수'로
+    잡는다 — 자본이 아니라 실제 소모 속도를 따라간다.
+    """
+
+    def test_high_consumption_raises_threshold(self):
+        low = sm._bnb_alert_threshold(6.0)      # 월 $6 (소액 계좌)
+        high = sm._bnb_alert_threshold(600.0)   # 월 $600 (대형 계좌)
+        assert high > low * 10
+
+    def test_threshold_equals_configured_days(self):
+        monthly = 300.0
+        expect = monthly / 30.0 * cfg.SPOT_BNB_MIN_DAYS
+        assert sm._bnb_alert_threshold(monthly) == pytest.approx(expect)
+
+    def test_small_account_uses_dollar_floor(self):
+        """소모가 미미하면 임계값이 몇 센트가 된다 — 하한이 필요하다."""
+        assert sm._bnb_alert_threshold(0.5) == pytest.approx(cfg.SPOT_BNB_MIN_USD)
+        assert sm._bnb_alert_threshold(0.0) == pytest.approx(cfg.SPOT_BNB_MIN_USD)
+
+    def test_gives_configured_days_of_warning(self):
+        """임계값에 도달한 시점에 남은 여유가 설정한 일수여야 한다."""
+        for monthly in (30.0, 300.0, 3000.0):
+            thr = sm._bnb_alert_threshold(monthly)
+            days = thr / (monthly / 30.0)
+            assert days >= cfg.SPOT_BNB_MIN_DAYS - 1e-6
+
+
+class TestRefillCapacityLimit:
+    """자동 충전에는 속도 상한이 있다 — 1회 상한 ÷ 쿨다운.
+    자본이 커지면 소모가 이걸 넘어서고, 그러면 켜 뒀어도 잔고가 계속 준다.
+    **켜 뒀다는 사실이 오히려 방심을 만들기 때문에** 감지해서 알려야 한다."""
+
+    def test_small_account_keeps_up(self):
+        _, _, ok = sm._bnb_refill_capacity(monthly_usd=6.0, equity=500.0)
+        assert ok
+
+    def test_reports_shortfall_numbers(self):
+        cap, use, ok = sm._bnb_refill_capacity(monthly_usd=6.0, equity=500.0)
+        assert cap > 0 and use > 0
+        assert ok == (cap >= use)
+
+    def test_capacity_scales_with_equity(self):
+        small, _, _ = sm._bnb_refill_capacity(1000.0, 1_000.0)
+        large, _, _ = sm._bnb_refill_capacity(1000.0, 500_000.0)
+        assert large > small, '자산이 크면 1회 상한도 커져 보충 속도가 오른다'
+
+    def test_shortfall_is_detectable(self, monkeypatch):
+        """쿨다운을 길게 잡으면 반드시 못 따라가는 지점이 생긴다."""
+        monkeypatch.setattr(sm, 'SPOT_BNB_REFILL_COOLDOWN_H', 24 * 30)
+        _, _, ok = sm._bnb_refill_capacity(monthly_usd=5000.0, equity=1_000.0)
+        assert ok is False
+
+    def test_warns_once_per_window(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, 'SPOT_BNB_AUTO_REFILL', True)
+        monkeypatch.setattr(sm, 'SPOT_BNB_REFILL_COOLDOWN_H', 24 * 30)
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_bnb_capacity_alert', {'at': 0.0})
+        sm._warn_if_refill_cannot_keep_up(5000.0, 1_000.0)
+        sm._warn_if_refill_cannot_keep_up(5000.0, 1_000.0)
+        assert len(sent) == 1
+        assert '따라가지 못' in sent[0] or '소모' in sent[0]
+
+    def test_silent_when_refill_disabled(self, monkeypatch):
+        """자동 충전이 꺼져 있으면 용량 경고는 의미가 없다."""
+        sent = []
+        monkeypatch.setattr(sm, 'SPOT_BNB_AUTO_REFILL', False)
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_bnb_capacity_alert', {'at': 0.0})
+        sm._warn_if_refill_cannot_keep_up(5000.0, 1_000.0)
+        assert sent == []
+
+
+class TestPriceCache:
+    """잔고폴러는 60초마다 돈다. 매번 티커를 치면 하루 1,440회를 낭비한다."""
+
+    def test_price_is_cached(self, monkeypatch):
+        calls = []
+
+        class _Ex:
+            def fetch_ticker(self, s):
+                calls.append(1)
+                return {'last': 600.0}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _Ex())
+        monkeypatch.setattr(sm, '_bnb_price', {'usd': 0.0, 'at': 0.0})
+        for _ in range(5):
+            sm._bnb_price_usd()
+        assert len(calls) == 1
+
+    def test_cache_expires(self, monkeypatch):
+        calls = []
+
+        class _Ex:
+            def fetch_ticker(self, s):
+                calls.append(1)
+                return {'last': 600.0}
+        monkeypatch.setattr(sm, '_get_ex', lambda: _Ex())
+        monkeypatch.setattr(sm, '_bnb_price',
+                            {'usd': 600.0,
+                             'at': time.time() - cfg.SPOT_BNB_PRICE_TTL_SEC - 1})
+        sm._bnb_price_usd()
+        assert len(calls) == 1

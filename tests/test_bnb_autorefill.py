@@ -84,11 +84,32 @@ class TestDefaultOff:
 # ══════════════════════════════════════════════════════════════
 
 class TestSpendingCaps:
-    def test_respects_per_purchase_cap(self, on, monkeypatch):
-        """소모량이 아무리 커도 1회 상한을 넘지 않는다."""
+    def test_cap_is_equity_relative_not_fixed(self, on, monkeypatch):
+        """상한은 **자산 비율**로 최종 제한된다.
+
+        고정 $30이면 대형 계좌에서 보충이 소모를 못 따라간다. 반대로
+        소모량만 따르면 추정이 틀렸을 때 자산이 통째로 BNB로 묶인다.
+        그래서 '소모량에 맞춰 커지되 자산의 N%를 넘지 않는다'로 잡는다.
+        """
         monkeypatch.setattr(sm, '_estimate_monthly_bnb_usd', lambda: 10_000.0)
-        amt, _ = _amt(current=0.0, usdt=100_000.0, equity=200_000.0)
-        assert amt == pytest.approx(cfg.SPOT_BNB_MAX_BUY_USD)
+        eq = 200_000.0
+        amt, _ = _amt(current=0.0, usdt=100_000.0, equity=eq)
+        assert amt == pytest.approx(eq * cfg.SPOT_BNB_MAX_BUY_PCT)
+        assert amt < 10_000.0 * cfg.SPOT_BNB_TARGET_MONTHS, '소모량만 따르면 안 된다'
+
+    def test_small_account_keeps_fixed_floor(self, on, monkeypatch):
+        """소액 계좌에서 자산 비율만 쓰면 상한이 몇 달러가 돼 못 산다."""
+        monkeypatch.setattr(sm, '_estimate_monthly_bnb_usd', lambda: 40.0)
+        amt, _ = _amt(current=0.0, usdt=500.0, equity=500.0)
+        assert amt >= cfg.SPOT_BNB_MIN_BUY_USD
+        assert amt <= cfg.SPOT_BNB_MAX_BUY_USD
+
+    def test_cap_never_below_fixed_floor(self, on, monkeypatch):
+        monkeypatch.setattr(sm, '_estimate_monthly_bnb_usd', lambda: 100.0)
+        for eq in (200.0, 500.0, 1000.0):
+            amt, _ = _amt(current=0.0, usdt=eq, equity=eq)
+            assert amt <= max(cfg.SPOT_BNB_MAX_BUY_USD,
+                              eq * cfg.SPOT_BNB_MAX_BUY_PCT) + 1e-9
 
     def test_cooldown_blocks_repeat(self, on, monkeypatch):
         monkeypatch.setattr(sm, '_bnb_refill', {'at': time.time()})
