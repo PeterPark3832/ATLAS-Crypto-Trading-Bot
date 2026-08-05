@@ -71,6 +71,8 @@ from atlas_spot_config import (
     SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
     SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     SPOT_BNB_MIN_USD, SPOT_BNB_ALERT_HOURS,
+    SPOT_BNB_AUTO_REFILL, SPOT_BNB_TARGET_MONTHS, SPOT_BNB_MAX_BUY_USD,
+    SPOT_BNB_MIN_BUY_USD, SPOT_BNB_REFILL_COOLDOWN_H,
     SPOT_HEALTH_WINDOW_DAYS,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
@@ -942,6 +944,97 @@ def _rebase_peak_on_capital_flow(total: float) -> None:
 
 
 _bnb_alert = {'at': 0.0}
+_bnb_refill = {'at': 0.0}
+
+
+def _estimate_monthly_bnb_usd() -> float:
+    """최근 30일 거래에서 월 수수료 소모액(USD)을 실측 추정한다.
+
+        소모액 = Σ(명목가) × 수수료율 × 2      (진입 + 청산)
+
+    이력이 없으면 0.0을 돌려준다 — 호출부는 그때 최소 금액만 산다.
+    추정을 부풀리면 매매에 쓸 USDT를 BNB로 묶어 두게 되므로, 모르면
+    적게 사고 다음에 또 사는 편이 낫다.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    try:
+        with _db_lock, _db_conn() as conn:
+            row = conn.execute(
+                'SELECT COALESCE(SUM(cost_usdt), 0) FROM spot_trades '
+                'WHERE COALESCE(dry_run,0)=0 AND exit_ts >= ?', (since,)
+            ).fetchone()
+        notional = float(row[0] or 0)
+    except Exception as e:
+        log.warning(f'[BNB] 소모량 추정 실패: {e}')
+        return 0.0
+    return notional * _detect_fee_rate() * 2
+
+
+def _bnb_refill_amount(current_usd: float, usdt_free: float,
+                       equity: float) -> tuple[float, str]:
+    """지금 얼마를 살 것인가. Returns: (매수액 USD, 사유).
+
+    0.0이면 사지 않는다. **모든 상한을 동시에 만족해야만** 산다 —
+    봇이 스스로 돈을 쓰는 유일한 경로라 한 겹이라도 뚫리면 안 된다.
+
+    부수효과가 없는 순수 판정이므로 각 상한을 따로 시험할 수 있다.
+    """
+    if not SPOT_BNB_AUTO_REFILL:
+        return 0.0, '자동 충전 꺼짐'
+    if _state.get('dry_run'):
+        return 0.0, '드라이런 — 실주문 금지'
+    if current_usd >= SPOT_BNB_MIN_USD:
+        return 0.0, '잔고 충분'
+
+    now = time.time()
+    left_h = (SPOT_BNB_REFILL_COOLDOWN_H * 3600 - (now - _bnb_refill['at'])) / 3600
+    if left_h > 0:
+        return 0.0, f'쿨다운 {left_h:.0f}h 남음'
+
+    # 필요량: 목표 개월치에서 현재 잔고를 뺀 만큼
+    monthly = _estimate_monthly_bnb_usd()
+    if monthly <= 0:
+        # 이력이 없으면 최소 금액만. 과대 추정으로 USDT를 묶는 것보다 낫다.
+        need = SPOT_BNB_MIN_BUY_USD
+    else:
+        need = monthly * SPOT_BNB_TARGET_MONTHS - current_usd
+    need = min(need, SPOT_BNB_MAX_BUY_USD)            # ① 1회 매수 상한
+    if need < SPOT_BNB_MIN_BUY_USD:
+        return 0.0, f'필요액 ${need:.2f} < 최소 ${SPOT_BNB_MIN_BUY_USD:.0f}'
+
+    # ③ USDT 예비금 침범 금지 — 매매 자금을 잠식하면 본말전도다
+    reserve = equity * SPOT_RESERVE_PCT
+    spendable = usdt_free - reserve
+    if spendable < need:
+        return 0.0, (f'예비금 보호: 가용 ${max(spendable, 0.0):.2f} < '
+                     f'필요 ${need:.2f}')
+    return float(need), f'월 소모 추정 ${monthly:.2f} × {SPOT_BNB_TARGET_MONTHS:.0f}개월'
+
+
+def _refill_bnb(current_usd: float) -> None:
+    """BNB를 시장가로 매수한다. 실패해도 봇은 계속 돈다(경고 경로 유지)."""
+    with _state_lock:
+        usdt_free = float(_state.get('usdt_balance', 0) or 0)
+        equity    = float(_state.get('equity', 0) or 0)
+    amount, why = _bnb_refill_amount(current_usd, usdt_free, equity)
+    if amount <= 0:
+        log.debug(f'[BNB] 자동 충전 생략: {why}')
+        return
+    try:
+        order = _get_ex().create_order(
+            'BNB/USDT', 'market', 'buy', None, None,
+            {'quoteOrderQty': round(amount, 2)})
+        # 쿨다운은 **성공했을 때만** 갱신한다. 실패로 갱신하면 다음
+        # 기회까지 72시간을 그냥 버린다.
+        _bnb_refill['at'] = time.time()
+        filled = float(order.get('filled') or 0)
+        log.info(f'[BNB] 자동 충전 ${amount:.2f} 완료 ({filled:.6f} BNB) — {why}')
+        _tg(f'🔄 BNB 수수료 잔고 자동 충전\n'
+            f'   매수 ${amount:.2f} ({filled:.6f} BNB)\n'
+            f'   근거: {why}\n'
+            f'   충전 전 잔고 ≈${current_usd:.2f}')
+    except Exception as e:
+        log.error(f'[BNB] 자동 충전 실패(경고 경로는 유지): {e}')
 
 
 def _check_bnb_fee_balance(bal: dict) -> None:
@@ -967,6 +1060,10 @@ def _check_bnb_fee_balance(bal: dict) -> None:
             usd = qty * float(_get_ex().fetch_ticker('BNB/USDT')['last'] or 0)
         if usd >= SPOT_BNB_MIN_USD:
             return
+        # 자동 충전이 켜져 있으면 먼저 시도한다. 성공하면 다음 폴링에서
+        # 잔고가 회복돼 경고가 자연히 멎는다. 꺼져 있거나 실패하면
+        # 아래 경고 경로가 그대로 동작한다.
+        _refill_bnb(usd)
         now = time.time()
         if now - _bnb_alert['at'] < SPOT_BNB_ALERT_HOURS * 3600:
             return

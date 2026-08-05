@@ -196,6 +196,25 @@ SPOT_LEARN_COST_PER_R    = 0.04   # 수수료가 1R에서 차지하는 비중.
 SPOT_BNB_MIN_USD       = 5.0      # 이 아래면 경고
 SPOT_BNB_ALERT_HOURS   = 24       # 같은 경고 재발송 간격(시간)
 
+# ── BNB 자동 충전 ────────────────────────────────────────────────
+# ⚠️ 이건 봇이 **당신 돈으로 스스로 매수**하는 유일한 기능이다.
+#    매매와 무관한 지출이므로 기본 OFF이며, 켜더라도 아래 상한들이 모두
+#    동시에 걸린다. 하나라도 위반하면 매수하지 않는다.
+#
+#    ① 1회 매수 상한        (SPOT_BNB_MAX_BUY_USD)
+#    ② 재매수 최소 간격      (SPOT_BNB_REFILL_COOLDOWN_H)
+#    ③ USDT 예비금 침범 금지 (SPOT_RESERVE_PCT 아래로 못 내려간다)
+#    ④ 드라이런에서는 절대 실행하지 않는다
+#
+# 필요량은 **실제 거래 이력**에서 추정한다(최근 30일 명목가 합 × 수수료율
+# × 2회). 이력이 없으면 보수적 기본값으로 최소 금액만 산다.
+SPOT_BNB_AUTO_REFILL   = False    # 자동 충전 사용 여부
+SPOT_BNB_TARGET_MONTHS = 2.0      # 몇 개월치를 채울 것인가
+SPOT_BNB_MAX_BUY_USD   = 30.0     # 1회 매수 상한 (하드 캡)
+SPOT_BNB_MIN_BUY_USD   = 12.0     # 이보다 적으면 사지 않는다
+                                  # (NOTIONAL 턱걸이 + 수수료 낭비 방지)
+SPOT_BNB_REFILL_COOLDOWN_H = 72   # 재매수 최소 간격(시간)
+
 SPOT_LEARN_REFRESH_MIN   = 30     # 학습 결과 재계산 주기(분). 진입마다
                                   # DB 전체를 훑으면 루프가 느려진다
 
