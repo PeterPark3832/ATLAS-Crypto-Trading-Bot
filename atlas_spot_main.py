@@ -71,6 +71,7 @@ from atlas_spot_config import (
     SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
     SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
     SPOT_BNB_MIN_USD, SPOT_BNB_ALERT_HOURS, SPOT_BNB_MIN_DAYS,
+    SPOT_FEE_RECHECK_SEC,
     SPOT_BNB_PRICE_TTL_SEC, SPOT_BNB_MAX_BUY_PCT,
     SPOT_BNB_AUTO_REFILL, SPOT_BNB_TARGET_MONTHS, SPOT_BNB_MAX_BUY_USD,
     SPOT_BNB_MIN_BUY_USD, SPOT_BNB_REFILL_COOLDOWN_H,
@@ -1394,7 +1395,7 @@ def _get_momentum_rank_pct(sym: str) -> float:
     return ref.index(sym) / len(ref)
 
 
-_fee_rate: dict = {'taker': BT_SPOT_FEE, 'checked': False}
+_fee_rate: dict = {'taker': BT_SPOT_FEE, 'checked': False, 'at': 0.0}
 
 
 def _detect_fee_rate() -> float:
@@ -1403,10 +1404,23 @@ def _detect_fee_rate() -> float:
     BNB 수수료 결제를 켜면 25% 할인(0.1% → 0.075%)이다. 왕복 0.2%가
     0.15%로 줄면 SL 5% 기준 1R의 4%→3%로 잠식이 줄어든다 — 코드 변경
     없이 얻는 유일한 확정 이득이라 켜져 있는지 확인하고 알린다.
+
+    ⚠️ **주기적으로 다시 확인한다.** 예전에는 프로세스당 1회만 조회하고
+    영원히 캐시했는데, 수수료율은 실제로 바뀐다:
+      · BNB 잔고가 비면 할인이 사라진다(→ 0.075%가 다시 0.1%)
+      · BNB를 채우면 할인이 살아난다
+      · VIP 등급이 바뀐다
+    캐시가 굳으면 봇의 비용 모델이 현실과 조용히 벌어지고, 그 값으로
+    진입 가드(`_cost_edge_ok`)가 판정한다 — 실제보다 비싸다고 믿으면
+    멀쩡한 신호를 막고, 싸다고 믿으면 마이너스 기대값 거래를 통과시킨다.
     """
-    if _fee_rate['checked']:
+    now = time.time()
+    # .get: 캐시 dict가 옛 형태(타임스탬프 없음)여도 죽지 않는다 —
+    # 여기서 예외가 나면 진입 가드 전체가 멈춘다.
+    if _fee_rate['checked'] and now - _fee_rate.get('at', 0.0) < SPOT_FEE_RECHECK_SEC:
         return _fee_rate['taker']
     _fee_rate['checked'] = True
+    _fee_rate['at'] = now
     try:
         ex = _get_ex()
         taker = None
