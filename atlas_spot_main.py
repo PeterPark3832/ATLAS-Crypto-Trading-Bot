@@ -70,6 +70,7 @@ from atlas_spot_config import (
     SPOT_LEARN_ENABLED, SPOT_LEARN_HALF_LIFE_DAYS, SPOT_LEARN_MIN_INFO,
     SPOT_LEARN_UNPROVEN_SCALE, SPOT_LEARN_FLOOR, SPOT_LEARN_MAX_SCALE,
     SPOT_LEARN_GAIN, SPOT_LEARN_COST_PER_R, SPOT_LEARN_REFRESH_MIN,
+    SPOT_BNB_MIN_USD, SPOT_BNB_ALERT_HOURS,
     SPOT_HEALTH_WINDOW_DAYS,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH,
@@ -940,11 +941,51 @@ def _rebase_peak_on_capital_flow(total: float) -> None:
         log.warning(f'[자본변동] 판정 실패(무시): {e}')
 
 
+_bnb_alert = {'at': 0.0}
+
+
+def _check_bnb_fee_balance(bal: dict) -> None:
+    """BNB 수수료 잔고가 바닥나기 전에 알린다.
+
+    바이낸스의 "BNB로 수수료 지불"은 **잔고가 있을 때만** 동작한다.
+    비면 토글이 켜져 있어도 조용히 기초자산 차감으로 되돌아가고, 그 순간
+    두 가지가 동시에 일어난다:
+
+      ① 25% 할인 상실 — 왕복 0.15% → 0.2%. 1R 잠식이 7% → 8%로 늘어난다.
+      ② **보호주문이 깨진다** — 매수 체결량에서 수수료만큼 기초자산이
+         빠져나가 '기록 수량 > 실제 보유량'이 된다. 손절 주문이 -2010
+         (insufficient balance)으로 거부되고, 데이터를 고치기 전까지
+         해소되지 않는다. 실제로 ADA·RIF·FET에서 발생했다(3fa6074).
+
+    ②가 훨씬 비싸다 — 할인 몇 %가 아니라 **손절이 안 걸린 포지션**이
+    생기기 때문이다. 그래서 잔고가 0이 되기 전에 미리 경고한다.
+    """
+    try:
+        qty = float((bal.get('BNB') or {}).get('total', 0) or 0)
+        usd = 0.0
+        if qty > 0:
+            usd = qty * float(_get_ex().fetch_ticker('BNB/USDT')['last'] or 0)
+        if usd >= SPOT_BNB_MIN_USD:
+            return
+        now = time.time()
+        if now - _bnb_alert['at'] < SPOT_BNB_ALERT_HOURS * 3600:
+            return
+        _bnb_alert['at'] = now
+        log.warning(f'[BNB] 수수료 잔고 부족: {qty:.6f} BNB (≈${usd:.2f})')
+        _tg(f'⚠️ BNB 수수료 잔고 부족 — 약 ${usd:.2f}\n'
+            f'   비면 수수료가 **기초자산에서** 빠져 손절 주문이 거부됩니다.\n'
+            f'   (실제로 ADA·RIF·FET에서 발생했습니다)\n'
+            f'   $10~20어치 충전해 두세요.')
+    except Exception as e:
+        log.warning(f'[BNB] 잔고 확인 실패(무시): {e}')
+
+
 def _get_spot_equity() -> tuple[float, float]:
     """총자산 = USDT + 보유 코인 현재가. Returns: (total_equity, usdt_balance)."""
     try:
         ex = _get_ex()
         bal = ex.fetch_balance({'type': 'spot'})
+        _check_bnb_fee_balance(bal)
         usdt = float(bal.get('USDT', {}).get('total', 0) or 0)
         total = usdt
         for currency, data in bal.items():
