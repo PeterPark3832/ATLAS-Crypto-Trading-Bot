@@ -1749,6 +1749,65 @@ def _report_sizing_capability(equity: float) -> None:
             f'리스크 스케일을 조정해야 실제로 동작합니다.')
 
 
+_regime_idle_alerted: set = set()
+_REGIME_IDLE_CHECK_SEC = 600     # 재점검 간격(초)
+_regime_idle_last = 0.0
+
+
+def tradable_strategies(regime: str, equity: float) -> list:
+    """현 레짐에서 **실제로 진입 가능한** 전략 목록."""
+    return [r['strategy'] for r in _diagnose_sizing_capability(equity)
+            if r['regime'] == regime and r['tradable']]
+
+
+def check_regime_idle(regime: str, equity: float) -> str:
+    """지금 레짐에서 아무 전략도 진입할 수 없으면 알림 문구를, 아니면 ''.
+
+    기동 시 진단(_report_sizing_capability)은 죽은 **조합**을 나열하지만,
+    "지금 이 레짐에서는 하나도 못 산다"는 상태 자체는 말해주지 않는다.
+    소액 계좌에서 하락장에 들어가면 담당 전략이 통째로 최소주문액 아래로
+    떨어져 봇이 **조용히 논다** — 로그는 정상이고 프로세스도 살아 있어
+    운영자는 계속 매매 중이라 믿는다. 자산이 줄면 더 많은 조합이 죽는데
+    기동 진단은 그때 이미 지나간 뒤다.
+
+    CRISIS는 설계상 전면 차단이므로 알리지 않는다(정상 동작).
+    레짐당 1회만 알리고, 진입 가능해지면 해제해 다음 발생 시 다시 알린다.
+    """
+    if not regime or regime == REGIME_CRISIS:
+        return ''
+    if tradable_strategies(regime, equity):
+        _regime_idle_alerted.discard(regime)
+        return ''
+    if regime in _regime_idle_alerted:
+        return ''
+    _regime_idle_alerted.add(regime)
+    assigned = REGIME_STRATEGY_MAP.get(regime, [])
+    return (f'⚠️ 현재 레짐({regime})에서 진입 가능한 전략이 없습니다\n'
+            f'   담당 전략: {", ".join(assigned) or "없음"}\n'
+            f'   전부 주문금액이 거래소 최소 ${SPOT_MIN_ORDER_USDT:.0f} 미달입니다.\n'
+            f'   신호가 나와도 체결되지 않습니다 — 봇은 돌지만 실질적으로 대기 상태입니다.\n'
+            f'   자산 ${equity:,.2f} · 해소하려면 자본을 늘리거나 해당 레짐의 '
+            f'리스크 스케일을 조정해야 합니다.')
+
+
+def _report_regime_idle() -> None:
+    """주기적으로 '현 레짐에서 아무것도 못 사는' 상태를 점검·알린다."""
+    global _regime_idle_last
+    now = time.time()
+    if now - _regime_idle_last < _REGIME_IDLE_CHECK_SEC:
+        return
+    _regime_idle_last = now
+    try:
+        rs = get_cached_regime()
+        msg = check_regime_idle(rs.regime if rs else '', _state['equity'])
+    except Exception as e:
+        log.debug(f'[진단] 레짐 진입가능 점검 실패(무시): {e}')
+        return
+    if msg:
+        log.warning(msg.replace('\n', ' '))
+        _tg(msg)
+
+
 def _estimate_round_trip_cost(ccxt_sym: str) -> tuple[float, float]:
     """(왕복 비용률, 스프레드율) 추정.
 
@@ -3113,6 +3172,7 @@ def main():
         while not SPOT_KILL_SWITCH.exists():
             time.sleep(5)
             _report_dead_threads(threads)
+            _report_regime_idle()
     except KeyboardInterrupt:
         log.info('[메인] 키보드 인터럽트')
     finally:

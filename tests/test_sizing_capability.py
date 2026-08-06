@@ -193,3 +193,59 @@ class TestReport:
                             lambda eq: (_ for _ in ()).throw(Exception('boom')))
         sm._report_sizing_capability(134.0)      # 예외가 새어나오면 기동이 죽는다
         assert not _no_telegram
+
+
+class TestRegimeIdleDetection:
+    """'지금 이 레짐에서는 아무것도 못 산다'를 알린다.
+
+    기동 진단은 죽은 **조합**을 나열하지만 그 상태 자체는 말해주지 않는다.
+    소액 계좌가 하락장에 들어가면 담당 전략이 통째로 최소주문액 아래로
+    떨어져 봇이 **조용히 논다** — 로그도 정상이고 프로세스도 살아 있어
+    운영자는 계속 매매 중이라 믿는다. 실측: 자산 $217에서 TRENDING_DOWN의
+    유일한 전략 S4가 주문 $3.26으로 최소 $5 미달이었다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_regime_idle_alerted', set())
+
+    def _rows(self, monkeypatch, tradable):
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN',
+             'tradable': tradable, 'cost_usdt': 3.26, 'risk_pct': 0.0009},
+            {'strategy': 'S6', 'regime': 'TRENDING_UP',
+             'tradable': True, 'cost_usdt': 10.7, 'risk_pct': 0.003},
+        ])
+
+    def test_alerts_when_no_strategy_can_enter(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        msg = sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        assert 'TRENDING_DOWN' in msg and '진입 가능한 전략이 없습니다' in msg
+
+    def test_silent_when_some_strategy_works(self, monkeypatch):
+        self._rows(monkeypatch, tradable=True)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0) == ''
+
+    def test_alerts_once_per_regime(self, monkeypatch):
+        """5초 루프에서 점검하므로 억제가 없으면 폭주한다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0) == ''
+
+    def test_rearms_after_recovery(self, monkeypatch):
+        """자본이 늘어 해소됐다가 다시 나빠지면 또 알려야 한다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        self._rows(monkeypatch, tradable=True)
+        assert sm.check_regime_idle('TRENDING_DOWN', 400.0) == ''
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+
+    def test_crisis_is_not_reported(self, monkeypatch):
+        """CRISIS는 설계상 전면 차단 — 정상 동작이므로 알리지 않는다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle(sm.REGIME_CRISIS, 217.0) == ''
+
+    def test_empty_regime_is_safe(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('', 217.0) == ''
