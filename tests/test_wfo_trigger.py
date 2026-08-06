@@ -109,3 +109,30 @@ class TestDeployUnits:
         """라이브 봇을 지키기 위한 cgroup 상한이 두 잡 모두에 있어야 한다."""
         for name in ('atlas-wfo-report.service', 'atlas-wfo-reopt.service'):
             assert 'MemoryMax=' in (self.ROOT / name).read_text(), name
+
+
+class TestLogRotation:
+    """systemd가 append 하는 로그에도 회전이 있어야 한다.
+
+    봇의 RotatingFileHandler는 logs/atlas_spot_<날짜>.log 를 회전시킨다.
+    그런데 systemd 유닛은 stdout/stderr를 logs/spot_main.log 에 append 하고,
+    **대시보드가 파싱하는 건 후자**다(atlas_web_dashboard.LOG_FILE).
+    즉 보호가 필요한 파일에 회전이 없었다 — 실측 1.4MB/일로 무한 증가.
+    """
+
+    ROOT = Path(__file__).parent.parent / 'deploy'
+
+    def test_logrotate_config_exists(self):
+        assert (self.ROOT / 'atlas-logrotate.conf').exists(), (
+            'systemd append 로그(spot_main.log·dashboard.log)에 회전이 없다')
+
+    def test_uses_copytruncate(self):
+        """systemd가 fd를 붙잡고 있어 rename 방식은 새 파일을 비워 둔다."""
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        assert 'copytruncate' in conf, (
+            'copytruncate 없이 회전하면 systemd가 옛 inode에 계속 쓴다 — '
+            '새 로그가 영원히 비고 대시보드는 상태를 못 읽는다')
+
+    def test_covers_the_file_dashboard_parses(self):
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        assert '/root/atlas_spot/logs/*.log' in conf
