@@ -93,6 +93,8 @@ GRIDS: dict[str, dict[str, list]] = {
 PLATEAU_EXCLUDE = {'SPOT_TRAIL_ENABLED'}
 
 MIN_TRADES = 20   # IS/OOS 최소 거래 수 — 표본 부족 조합 배제 (과최적화 방지)
+PROGRESS_EVERY = 5  # 그리드 진행 표시 간격(조합 수). 무인 실행에서 '작업 중'과
+                    # '멈춤'을 구분할 수 있어야 한다.
 PLATEAU_MIN_RATIO = 0.5   # 이웃 평균 IS 점수 / 최적 점수의 하한.
                           # 이보다 낮으면 '고립된 피크'로 보고 제안하지 않는다.
 
@@ -246,10 +248,17 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
         base_oos = run_window(sid, symbols, ohlcv, regime_map, WF_OOS_START, oos_end, rank_map)
 
     # ── IS 로만 후보 선택 (OOS 미열람) ──
+    # 조합 하나가 25심볼 × 5년 백테스트라 전체가 수십 분 걸린다. 진행 표시가
+    # 없으면 무인(월간 systemd) 실행에서 '작업 중'과 '멈춤'을 구분할 수 없다 —
+    # 실측으로 S6 54조합이 15분 넘게 한 줄도 내지 않았다.
     best = None
-    for combo in combos:
+    for i, combo in enumerate(combos, 1):
         with override_params(combo):
             m_is = run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END, rank_map)
+        if i % PROGRESS_EVERY == 0 or i == len(combos):
+            top = f'{best["score"][0]:.2f}' if best else '—'
+            print(f'  [{sid}] 그리드 {i}/{len(combos)} 진행 (현재 최고 IS PF {top})',
+                  flush=True)
         if m_is.get('total_trades', 0) < MIN_TRADES:
             continue
         score = (m_is.get('profit_factor', 0), m_is.get('sharpe', 0))
@@ -266,8 +275,11 @@ def optimize_strategy(sid: str, symbols: list[str], data_dir: Path,
     # 그대로 믿으면 그 노이즈를 실계좌에 반영하게 되므로, 이웃의 IS 점수가
     # 크게 낮으면 '고립된 피크'로 보고 제안하지 않는다. (OOS는 여전히 미열람)
     peak_score = _is_score(best['is'])
+    neighbours = _neighbors(best['combo'], grid)
+    if neighbours:
+        print(f'  [{sid}] 고원 확인 — 이웃 {len(neighbours)}개 평가', flush=True)
     neigh_scores = []
-    for n in _neighbors(best['combo'], grid):
+    for n in neighbours:
         with override_params(n):
             neigh_scores.append(_is_score(
                 run_window(sid, symbols, ohlcv, regime_map, WF_IS_START, WF_IS_END, rank_map)))

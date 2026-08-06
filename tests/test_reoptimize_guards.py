@@ -276,3 +276,32 @@ class TestPlateauThreshold:
     ])
     def test_isolation_rule(self, plateau, peak, expected):
         assert bool(peak > 0 and plateau < peak * ro.PLATEAU_MIN_RATIO) is expected
+
+
+class TestProgressVisibility:
+    """무인 실행에서 '작업 중'과 '멈춤'을 구분할 수 있어야 한다.
+
+    조합 하나가 25심볼 × 5년 백테스트라 전체가 수십 분 걸린다. 실측으로
+    S6 54조합이 15분 넘게 한 줄도 내지 않았다 — 월간 systemd 실행에서
+    운영자는 잡이 살아 있는지 알 방법이 없다.
+    """
+
+    def test_grid_loop_emits_progress(self, monkeypatch, capsys):
+        calls = {'n': 0}
+
+        def _fake_window(sid, symbols, ohlcv, regime_map, start, end, rank_map=None):
+            calls['n'] += 1
+            return {'total_trades': 50, 'profit_factor': 1.5, 'sharpe': 1.0}
+
+        monkeypatch.setattr(ro, 'run_window', _fake_window)
+        monkeypatch.setattr(ro, 'load_symbol_data',
+                            lambda *a, **k: ({'BTCUSDT': [1]}, {}, {}))
+        monkeypatch.setattr(ro, 'GRIDS', {'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5],
+                                                 'S6_ATR_SL': [1.5, 2.0, 2.5]}})
+        ro.optimize_strategy('S6', ['BTCUSDT'], None, '2026-01-01')
+        out = capsys.readouterr().out
+        assert '그리드' in out and '/9' in out, (
+            f'진행 표시가 없어 멈춤과 구분되지 않는다: {out!r}')
+
+    def test_progress_interval_is_sane(self):
+        assert 1 <= ro.PROGRESS_EVERY <= 20
