@@ -279,3 +279,54 @@ class TestRegimeIdleDetection:
         assert empty, '빈 레짐이 하나도 없다면 이 가드의 전제가 바뀐 것이다'
         for rg in empty:
             assert sm.check_regime_idle(rg, 217.0) == '', f'{rg}에서 허위 경보'
+
+
+class TestDeadComboExplainsCause:
+    """진입 불가 알림은 **어느 배수 때문인지**를 말해야 한다.
+
+    금액만 알리면 운영자는 어느 레버를 당길지 정할 수 없다. 실측 사례에서
+    주원인은 Kelly가 하한(0.15)까지 내려간 것이었고, 그건 그 전략의 실적이
+    나쁘다는 뜻이라 '배수를 올려 해결할 문제'가 아니었다 —
+    성적 나쁜 전략을 하락장에서 최소로 줄이는 건 설계대로 동작한 것이다.
+    """
+
+    def test_alert_includes_multiplier_breakdown(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN', 'tradable': False,
+             'cost_usdt': 3.21, 'risk_pct': 0.0009,
+             'kelly': 0.15, 'health': 1.0, 'regime_scale': 0.30},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert sent, '진입 불가 조합이 있는데 알림이 없다'
+        msg = sent[0]
+        assert 'kelly' in msg and '0.15' in msg, '주원인(배수)이 안 보인다'
+        assert '레짐' in msg and '0.30' in msg
+        assert '1.56x 부족' in msg, '얼마나 모자란지 없으면 판단 불가'
+
+    def test_alert_suggests_required_equity(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN', 'tradable': False,
+             'cost_usdt': 3.21, 'risk_pct': 0.0009,
+             'kelly': 0.15, 'health': 1.0, 'regime_scale': 0.30},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert '$338' in sent[0] or '$337' in sent[0], (
+            f'필요 자산 금액이 없다: {sent[0]}')
+
+    def test_no_alert_when_all_tradable(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S6', 'regime': 'TRENDING_UP', 'tradable': True,
+             'cost_usdt': 10.7, 'risk_pct': 0.003,
+             'kelly': 1.0, 'health': 1.0, 'regime_scale': 1.0},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert not sent

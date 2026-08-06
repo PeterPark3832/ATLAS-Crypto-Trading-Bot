@@ -1740,13 +1740,24 @@ def _report_sizing_capability(equity: float) -> None:
                  f'{r["risk_pct"]/SPOT_BASE_RISK_PCT*100:3.0f}%) '
                  f'→ 주문 ${r["cost_usdt"]:6.2f}')
     if dead:
+        # 금액만 알리면 "왜 죽었는지"를 알 수 없어 어느 레버를 당길지 못 정한다.
+        # 배수를 분해해 보여준다 — 대개 Kelly가 하한까지 내려간 것이 주원인이고,
+        # 그건 그 전략의 실적이 나쁘다는 뜻이라 '고칠 문제'가 아닐 수도 있다
+        # (성적 나쁜 전략을 하락장에서 최소로 줄이는 건 설계대로 동작한 것이다).
         lines = '\n'.join(
-            f'   • {r["strategy"]} / {r["regime"]} — 주문 ${r["cost_usdt"]:.2f}'
-            for r in dead)
+            f'   • {r["strategy"]} / {r["regime"]} — 주문 ${r["cost_usdt"]:.2f} '
+            f'({SPOT_MIN_ORDER_USDT / r["cost_usdt"]:.2f}x 부족)\n'
+            f'     kelly {r["kelly"]:.2f} × 건강도 {r["health"]:.2f} × '
+            f'레짐 {r["regime_scale"]:.2f} → 리스크 {r["risk_pct"] * 100:.3f}%'
+            for r in dead if r['cost_usdt'] > 0)
+        need_eq = max((equity * SPOT_MIN_ORDER_USDT / r['cost_usdt']
+                       for r in dead if r['cost_usdt'] > 0), default=0.0)
         _tg(f'⚠️ 진입 불가 조합 {len(dead)}건 (주문금액이 거래소 최소 '
             f'${SPOT_MIN_ORDER_USDT:.0f} 미달)\n{lines}\n'
-            f'   신호가 나와도 체결되지 않습니다. 자본을 늘리거나 해당 레짐의 '
-            f'리스크 스케일을 조정해야 실제로 동작합니다.')
+            f'   신호가 나와도 체결되지 않습니다.\n'
+            f'   해소 방법: 자산 ${need_eq:,.0f} 이상으로 늘리거나, 위 배수 중 '
+            f'하나를 조정합니다. kelly가 하한이면 그 전략의 실적이 나쁘다는 '
+            f'뜻이므로 배수를 올리기 전에 전략 자체를 먼저 검토하세요.')
 
 
 _regime_idle_alerted: set = set()
