@@ -73,6 +73,33 @@ def _df(rows):
 #  load_trades
 # ══════════════════════════════════════════════════════════════
 
+class TestDbPathResolution:
+    """리포트가 **봇과 같은 DB**를 보는지.
+
+    실제로 서버 .env에 옛 선물봇 경로(/root/atlas_bot/state/atlas_v2.db)가
+    남아 있었다. 그 파일이 없으면 load_trades가 빈 DataFrame을 돌려주므로
+    리포트는 거래 40건이 쌓인 상태에서도 매번 '데이터 없음'만 냈다.
+    조용히 실패하는 종류라 아무도 눈치채지 못했다.
+    """
+
+    def test_falls_back_when_override_missing(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv('DB_FILE', str(tmp_path / 'gone' / 'old.db'))
+        resolved = wr._resolve_db()
+        assert resolved == Path(wr.SPOT_DB_FILE), (
+            '존재하지 않는 DB_FILE 오버라이드를 그대로 써서 빈 리포트를 낸다')
+        assert '없습니다' in capsys.readouterr().out, '대체 사실을 알려야 한다'
+
+    def test_existing_override_is_honoured(self, tmp_path, monkeypatch):
+        p = tmp_path / 'custom.db'
+        p.write_text('', encoding='utf-8')
+        monkeypatch.setenv('DB_FILE', str(p))
+        assert wr._resolve_db() == p
+
+    def test_defaults_to_bot_db(self, monkeypatch):
+        monkeypatch.delenv('DB_FILE', raising=False)
+        assert wr._resolve_db() == Path(wr.SPOT_DB_FILE)
+
+
 class TestLoadTrades:
     def test_missing_db_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(wr, 'DB_FILE', tmp_path / 'nope.db')

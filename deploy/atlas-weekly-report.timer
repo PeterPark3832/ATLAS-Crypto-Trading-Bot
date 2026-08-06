@@ -1,0 +1,20 @@
+# ATLAS Spot — 주간 리포트 타이머
+# ================================
+# 매주 월요일 00:00 UTC (= 한국시간 09:00). 원래 docstring의 crontab
+# 스케줄(0 0 * * 1)과 같은 시각이다.
+#
+# Persistent=true: 그 시각에 서버가 꺼져 있었으면 부팅 후 보충 실행한다.
+# RandomizedDelaySec: WFO 리포트(매월 1일 03:00)와 겹칠 일은 없지만,
+#   재부팅 직후 여러 타이머가 동시에 몰리는 것을 피한다.
+
+[Unit]
+Description=ATLAS Spot Weekly Report Timer
+
+[Timer]
+OnCalendar=Mon *-*-* 00:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=atlas-weekly-report.service
+
+[Install]
+WantedBy=timers.target

@@ -1,6 +1,14 @@
 """
-ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC crontab 실행
-  0 0 * * 1 python3 /root/atlas_bot/weekly_report.py
+ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC 실행
+
+설치(systemd 타이머):
+  sudo cp deploy/atlas-weekly-report.service \
+          deploy/atlas-weekly-report.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now atlas-weekly-report.timer
+
+수동 실행:
+  python3 weekly_report.py
 """
 
 import os
@@ -15,10 +23,33 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / '.env')
 
+from atlas_spot_config import SPOT_DB_FILE   # noqa: E402  (.env 로드 후여야 한다)
+
 TG_TOKEN        = os.getenv('TG_TOKEN', '')
 TG_CHAT_ID      = os.getenv('TG_CHAT_ID', '')
-DB_FILE         = Path(os.getenv('DB_FILE',
-                    str(Path(__file__).parent / 'state' / 'atlas_spot.db')))
+
+
+def _resolve_db() -> Path:
+    """봇이 쓰는 DB를 본다. DB_FILE 환경변수는 **존재할 때만** 우선한다.
+
+    예전에는 DB_FILE만 보고 기본값으로 폴백했다. 그런데 서버 .env에는 옛
+    선물봇 경로(/root/atlas_bot/state/atlas_v2.db)가 남아 있었고, 그 파일이
+    없으면 load_trades가 빈 DataFrame을 돌려주므로 리포트는 **매번
+    '데이터 없음'** 을 냈다. 거래 40건이 쌓여 있는데도 조용히 그랬다.
+
+    이제 봇과 같은 단일 출처(SPOT_DB_FILE)를 기본으로 쓰고, 오버라이드가
+    실재하지 않으면 그 사실을 알리고 정식 경로로 되돌린다.
+    """
+    override = os.getenv('DB_FILE', '').strip()
+    if override:
+        p = Path(override)
+        if p.exists():
+            return p
+        print(f'⚠️ DB_FILE={p} 이(가) 없습니다 — 봇 DB로 대체합니다: {SPOT_DB_FILE}')
+    return Path(SPOT_DB_FILE)
+
+
+DB_FILE         = _resolve_db()
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 
 
