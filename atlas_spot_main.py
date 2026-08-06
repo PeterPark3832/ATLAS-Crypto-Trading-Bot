@@ -1773,7 +1773,15 @@ def check_regime_idle(regime: str, equity: float) -> str:
     CRISIS는 설계상 전면 차단이므로 알리지 않는다(정상 동작).
     레짐당 1회만 알리고, 진입 가능해지면 해제해 다음 발생 시 다시 알린다.
     """
-    if not regime or regime == REGIME_CRISIS:
+    # 담당 전략이 **애초에 배정되지 않은** 레짐은 이 경보의 대상이 아니다.
+    # 이 경보가 말하려는 건 "자본이 모자라 신호가 나와도 못 산다"이지
+    # "설계상 쉬는 중"이 아니다. 맵에는 빈 레짐이 셋 있다 —
+    #   CRISIS(변동성 폭발 시 전면 정지) · MICRO_RANGING(기존 동작 보존) ·
+    #   UNKNOWN(레짐 판별 실패 시 안전 정지)
+    # 특히 UNKNOWN은 기동 직후 RegimeLoop가 첫 분류를 내기까지 5초 남짓
+    # 반드시 지나가는 상태라, 거르지 않으면 **재시작할 때마다** 허위 경보가
+    # 나간다(실측: 11:14:56 '레짐(UNKNOWN)에서 진입 가능한 전략이 없습니다').
+    if not REGIME_STRATEGY_MAP.get(regime):
         return ''
     if tradable_strategies(regime, equity):
         _regime_idle_alerted.discard(regime)

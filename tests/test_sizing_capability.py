@@ -249,3 +249,33 @@ class TestRegimeIdleDetection:
     def test_empty_regime_is_safe(self, monkeypatch):
         self._rows(monkeypatch, tradable=False)
         assert sm.check_regime_idle('', 217.0) == ''
+
+    def test_unknown_regime_is_not_reported(self, monkeypatch):
+        """기동 직후 RegimeLoop가 첫 분류를 내기 전 상태.
+
+        UNKNOWN은 REGIME_STRATEGY_MAP에 없어 '담당 전략 0개'로 읽힌다.
+        걸러내지 않으면 **재시작할 때마다** 허위 경보가 나간다.
+        실측: 11:14:56 '레짐(UNKNOWN)에서 진입 가능한 전략이 없습니다'.
+        """
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('UNKNOWN', 217.0) == ''
+
+    def test_unmapped_regime_is_not_reported(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('NOT_A_REGIME', 217.0) == ''
+
+    def test_known_regime_still_reported(self, monkeypatch):
+        """가드가 정상 경보까지 막으면 안 된다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+
+    def test_regimes_with_no_assigned_strategies_are_silent(self, monkeypatch):
+        """맵에 빈 레짐이 셋 있다 — 전부 '설계상 쉬는 중'이지 자본 문제가 아니다.
+
+        CRISIS(변동성 폭발) · MICRO_RANGING(동작 보존) · UNKNOWN(판별 실패).
+        """
+        self._rows(monkeypatch, tradable=False)
+        empty = [rg for rg, strats in sm.REGIME_STRATEGY_MAP.items() if not strats]
+        assert empty, '빈 레짐이 하나도 없다면 이 가드의 전제가 바뀐 것이다'
+        for rg in empty:
+            assert sm.check_regime_idle(rg, 217.0) == '', f'{rg}에서 허위 경보'
