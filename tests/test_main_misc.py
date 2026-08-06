@@ -10,6 +10,7 @@ _handle_tg_cmd, _position_reconcile_loop을 검증합니다.
 
 import os
 import sys
+import re
 import threading
 import time
 from pathlib import Path
@@ -432,3 +433,55 @@ class TestPositionReconcileLoop:
 
         monkeypatch.setattr(sm, '_get_ex', lambda: _RaisingExchange())
         sm._position_reconcile_loop(ev)  # 예외가 전파되지 않아야 함
+
+
+class _FakeThread:
+    def __init__(self, name, alive=True):
+        self.name, self._alive = name, alive
+
+    def is_alive(self):
+        return self._alive
+
+
+class TestDeadThreadDetection:
+    """스레드가 조용히 죽는 것을 잡는다.
+
+    감시견(_bot_alive)은 pgrep 기반이라 프로세스 생존만 본다. 봇은 10개
+    데몬 스레드로 도는데, Loop1D가 예외로 죽어도 프로세스는 살아 있으므로
+    감시견은 계속 녹색을 보고한다. 그 사이 SL/TP 판정과 청산이 멈춘다 —
+    무인 운영에서 가장 위험한 실패 형태다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_thread_alerted', set())
+
+    def test_detects_dead_thread(self):
+        ts = [_FakeThread('Loop1D', alive=False), _FakeThread('TgWorker')]
+        assert sm.find_dead_threads(ts) == ['Loop1D']
+
+    def test_all_alive_reports_nothing(self):
+        assert sm.find_dead_threads([_FakeThread('Loop1D')]) == []
+
+    def test_reports_each_thread_once(self):
+        """5초마다 도는 루프에서 검사하므로 억제가 없으면 알림이 폭주한다."""
+        ts = [_FakeThread('Loop1D', alive=False)]
+        assert sm.find_dead_threads(ts) == ['Loop1D']
+        assert sm.find_dead_threads(ts) == []
+
+    def test_survives_broken_thread_object(self):
+        """감시 자체가 봇을 멈추면 안 된다."""
+        class _Broken:
+            name = 'X'
+
+            def is_alive(self):
+                raise RuntimeError('boom')
+        assert sm.find_dead_threads([_Broken(), _FakeThread('Loop1D', alive=False)]) \
+            == ['Loop1D']
+
+    def test_every_spawned_thread_has_a_role_description(self):
+        """알림은 '무엇이 멈췄는지'를 말해야 우선순위를 정할 수 있다."""
+        src = Path(sm.__file__).read_text(encoding='utf-8')
+        spawned = set(re.findall(r"_t\([_a-zA-Z]+,\s*'([A-Za-z0-9]+)'", src))
+        missing = spawned - set(sm._THREAD_ROLE)
+        assert not missing, f'역할 설명이 없는 스레드: {missing}'

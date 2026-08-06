@@ -287,3 +287,43 @@ def _breakout_series(n=600, seed=11):
         out.append([ts + i * 86400000, o, max(o, px) * 1.01,
                     min(o, px) * 0.99, px, 1e6 * (2.5 if drift > 0 else 1.0)])
     return out
+
+
+class TestRankMapNoDeprecatedPandas:
+    """RS 순위 계산이 pandas 폐기 예정 동작에 의존하면 안 된다.
+
+    `pct_change()`의 fill_method 기본값(pad)은 제거 예정이다. 그대로 두면
+    pandas 업그레이드 시 **기본 동작이 바뀌어** 변동성과 RS 순위가 조용히
+    달라진다 — requirements는 pandas<4.0.0 까지 허용하므로 실제로 일어난다.
+    (백테스트에서 FutureWarning으로 실측됨)
+    """
+
+    @pytest.fixture
+    def gappy(self):
+        """상장 시점이 달라 선행 결측이 있는 실제 형태의 데이터."""
+        d = {
+            'OLDUSDT': _series(200, 0.003, 0.01, seed=11),
+            'NEWUSDT': _series(120, 0.002, 0.01, seed=12),   # 늦게 상장
+        }
+        return d
+
+    def test_no_future_warning(self, gappy):
+        import warnings
+        import atlas_spot_backtest as bt
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            bt.build_momentum_rank_map(gappy)
+        bad = [w for w in caught
+               if issubclass(w.category, FutureWarning)
+               and 'pct_change' in str(w.message)]
+        assert not bad, f'폐기 예정 동작에 의존 중: {[str(w.message) for w in bad]}'
+
+    def test_ordering_preserved_with_gaps(self, gappy):
+        """수정이 순위 자체를 바꾸지 않았는지(동작 보존) 확인."""
+        import atlas_spot_backtest as bt
+        m = bt.build_momentum_rank_map(gappy)
+        assert m
+        day = sorted(m)[-1]
+        assert set(m[day]) == set(gappy)
+        for pct in m[day].values():
+            assert 0.0 <= pct <= 1.0

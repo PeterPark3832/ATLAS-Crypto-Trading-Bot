@@ -365,7 +365,11 @@ def build_momentum_rank_map(ohlcv_by_symbol: dict,
 
     px = pd.DataFrame(closes).sort_index()
     mom = px / px.shift(momentum_days) - 1.0
-    vol = px.pct_change().rolling(vol_days).std()
+    # ffill 후 fill_method=None — 지금 동작(pad 후 계산)을 그대로 보존하면서
+    # FutureWarning을 없앤다. pct_change의 fill_method 인자 자체가 제거 예정이라,
+    # 그대로 두면 pandas 업그레이드 시 **기본 동작이 바뀌어** 변동성·RS 순위가
+    # 조용히 달라진다(requirements는 pandas<4.0.0까지 허용한다).
+    vol = px.ffill().pct_change(fill_method=None).rolling(vol_days).std()
     score = mom / vol.replace(0, np.nan)
     # 높을수록 상위 → 내림차순 순위(0-based)를 심볼 수로 나눠 백분위화
     ranks = score.rank(axis=1, ascending=False, method='first', na_option='bottom')

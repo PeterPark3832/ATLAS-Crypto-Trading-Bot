@@ -1183,6 +1183,56 @@ def _valuation_warn_due(currency: str) -> bool:
     return True
 
 
+_thread_alerted: set = set()
+
+# 스레드 이름 → 그 스레드가 멈추면 무엇이 멈추는가.
+# 알림에 "무슨 일이 벌어지는지"를 같이 적어야 운영자가 우선순위를 정할 수 있다.
+_THREAD_ROLE = {
+    'Loop4H':     'SL/TP 판정·청산·보호주문 자가복구(4H 전략)',
+    'Loop1D':     'SL/TP 판정·청산·보호주문 자가복구(1D 전략)',
+    'BalancePoll': '총자산 갱신 — 사이징·낙폭 래칫이 옛 값으로 굳는다',
+    'RegimeLoop':  '레짐 판정 — 전략 라우팅이 옛 레짐에 고정된다',
+    'Reconcile':   '거래소·DB 대조(수동매도 감지)',
+    'DbBackup':    'DB 스냅샷 백업',
+    'DailyReset':  '일일 손익 기준 초기화',
+    'TgWorker':    '텔레그램 전송 — 이후 모든 알림이 사라진다',
+    'TgCmd':       '텔레그램 명령 수신',
+    'UniverseRefresh': '유니버스 갱신',
+}
+
+
+def find_dead_threads(threads: list) -> list:
+    """죽은 백그라운드 스레드 이름 목록. 같은 스레드는 **1회만** 보고한다.
+
+    감시견(_bot_alive)은 pgrep 기반이라 **프로세스 생존만** 본다. 봇은 10개
+    데몬 스레드로 도는데 그중 하나가 예외로 죽어도 프로세스는 살아 있으므로
+    감시견은 계속 녹색을 보고한다. 하필 Loop1D/Loop4H가 죽으면 SL/TP 판정과
+    청산이 통째로 멈추는데 겉으로는 아무 이상이 없어 보인다 —
+    무인 운영에서 가장 위험한 실패 형태다.
+    """
+    dead = []
+    for t in threads:
+        try:
+            if t.is_alive() or t.name in _thread_alerted:
+                continue
+        except Exception:      # noqa: BLE001 — 감시가 봇을 멈추면 안 된다
+            continue
+        _thread_alerted.add(t.name)
+        dead.append(t.name)
+    return dead
+
+
+def _report_dead_threads(threads: list) -> None:
+    """죽은 스레드를 로그·텔레그램으로 알린다(스레드당 1회)."""
+    for name in find_dead_threads(threads):
+        role = _THREAD_ROLE.get(name, '해당 기능')
+        log.critical(f'[감시] 백그라운드 스레드 사망: {name} — {role} 중단')
+        _tg(f'🚨 [감시] 스레드 "{name}" 중단\n'
+            f'   멈춘 기능: {role}\n'
+            f'   프로세스는 살아 있어 외부 감시로는 정상으로 보입니다.\n'
+            f'   복구: systemctl restart atlas-spot')
+
+
 def _get_spot_equity() -> tuple[float, float]:
     """총자산 = USDT + 보유 코인 현재가. Returns: (total_equity, usdt_balance)."""
     try:
@@ -3026,7 +3076,7 @@ def main():
         _state['universe'] = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT']
 
     stop_event = threading.Event()
-    threads = []
+    threads: list = []
 
     def _t(target, name, *a):
         t = threading.Thread(target=target, args=a, name=name, daemon=True)
@@ -3062,6 +3112,7 @@ def main():
     try:
         while not SPOT_KILL_SWITCH.exists():
             time.sleep(5)
+            _report_dead_threads(threads)
     except KeyboardInterrupt:
         log.info('[메인] 키보드 인터럽트')
     finally:
