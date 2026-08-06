@@ -93,3 +93,64 @@ class TestStartArgsPreserved:
     def test_default_empty_args(self):
         import shlex
         assert shlex.split('') == []
+
+
+class TestNoCommittedCredentials:
+    """추적 대상 파일에 실제 자격증명이 들어가면 안 된다.
+
+    운영 서버의 git remote URL에 GitHub PAT가 평문으로 박혀 있었다
+    (.git/config). 저장소가 공개라 pull에는 애초에 인증이 필요 없었는데도
+    토큰이 남아 있었다 — 서버를 백업하거나 이미지를 뜨면 그대로 새어 나간다.
+    같은 실수가 **추적 파일**에 들어오는 것을 여기서 막는다.
+
+    .env는 gitignore 대상이라 검사 범위 밖이다(추적되지 않는다).
+    """
+
+    # 실제 키 형태만 잡는다. 문서의 placeholder(`...`, `<your-key>`)는 통과시켜야
+    # 설치 안내를 쓸 수 있다.
+    PATTERNS = {
+        'GitHub PAT':      r'gh[pousr]_[A-Za-z0-9]{30,}',
+        'GitHub fine PAT': r'github_pat_[A-Za-z0-9_]{50,}',
+        'AWS access key':  r'AKIA[0-9A-Z]{16}',
+        'Slack token':     r'xox[baprs]-[A-Za-z0-9-]{10,}',
+        'Private key':     r'-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----',
+    }
+
+    def _tracked_files(self):
+        import subprocess
+        root = Path(__file__).parent.parent
+        out = subprocess.run(['git', 'ls-files'], cwd=root,
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            pytest.skip('git 저장소가 아니다')
+        return [root / p for p in out.stdout.splitlines() if p.strip()]
+
+    def test_no_credentials_in_tracked_files(self):
+        import re
+        hits = []
+        for path in self._tracked_files():
+            if not path.is_file() or path.suffix in ('.png', '.jpg', '.ico', '.db'):
+                continue
+            try:
+                text = path.read_text(encoding='utf-8', errors='ignore')
+            except OSError:
+                continue
+            # 이 테스트 파일 자신의 패턴 정의는 제외
+            if path.name == Path(__file__).name:
+                continue
+            for label, pat in self.PATTERNS.items():
+                if re.search(pat, text):
+                    hits.append(f'{path.name}: {label}')
+        assert not hits, f'추적 파일에 자격증명으로 보이는 값: {hits}'
+
+    def test_no_credentials_in_remote_url_docs(self):
+        """설치 안내가 토큰 박힌 URL을 예시로 쓰면 그대로 따라 하게 된다."""
+        import re
+        root = Path(__file__).parent.parent
+        for name in ('README.md',):
+            p = root / name
+            if not p.exists():
+                continue
+            text = p.read_text(encoding='utf-8', errors='ignore')
+            assert not re.search(r'https://[^\s/]*:[^\s/]*@github\.com', text), (
+                f'{name}에 자격증명이 박힌 remote URL 예시가 있다')

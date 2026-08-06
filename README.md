@@ -79,6 +79,19 @@ cp .env.example .env
 # .env 파일에 API 키 입력
 ```
 
+> **remote URL에 토큰을 넣지 말 것.** 이 저장소는 공개라 `git pull`에
+> 인증이 필요 없다. `https://<token>@github.com/...` 형태로 clone 하면
+> 토큰이 `.git/config`에 **평문으로** 남아, 서버를 백업하거나 이미지를
+> 뜨는 순간 그대로 새어 나간다. 실제로 운영 서버가 그 상태였다.
+> 이미 그렇게 설정했다면 아래로 정리한다.
+>
+> ```bash
+> git remote set-url origin https://github.com/PeterPark3832/ATLAS-Crypto-Trading-Bot.git
+> grep -c github_pat_ .git/config   # 0 이어야 한다
+> ```
+>
+> 운영 서버는 pull만 하면 되므로 push가 막히는 편이 오히려 안전하다.
+
 ### 환경변수 (.env)
 
 ```env
