@@ -136,3 +136,18 @@ class TestLogRotation:
     def test_covers_the_file_dashboard_parses(self):
         conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
         assert '/root/atlas_spot/logs/*.log' in conf
+
+    def test_rotates_by_size_not_daily(self):
+        """일 단위 회전은 대시보드 레짐 표시를 매일 끊는다.
+
+        대시보드는 spot_main.log의 *내용*을 파싱해 레짐을 뽑으므로, 회전으로
+        파일이 비면 다음 레짐 로그(시간당 1회)까지 표시가 사라진다. 실제로
+        강제 회전 직후 /api/status의 regime이 null로 떨어지는 것을 확인했다.
+        """
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        body = '\n'.join(ln for ln in conf.splitlines()
+                         if not ln.lstrip().startswith('#'))
+        assert 'size 20M' in body
+        assert not any(ln.strip() in ('daily', 'hourly', 'weekly')
+                       for ln in body.splitlines()), (
+            '시간 기준 회전은 대시보드 표시 공백을 주기적으로 만든다')
