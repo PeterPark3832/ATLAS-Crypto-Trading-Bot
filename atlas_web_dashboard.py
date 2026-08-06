@@ -126,11 +126,18 @@ def _try_login(password: str, client_ip: str) -> str:
     raise HTTPException(401, 'Invalid password')
 
 # ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
-_bal_cache: dict = {'val': None, 'ts': 0.0}
+_bal_cache: dict = {'val': None, 'ts': 0.0, 'other': 0.0}
 
 def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
-    """USDT 잔고 + 오픈 포지션 현재가 합산 = 총 자산 (60s TTL).
-    pos_df를 넘기면 DB 재조회를 생략한다."""
+    """USDT 잔고 + 오픈 포지션 현재가 합산 = **거래 가능 자산** (60s TTL).
+
+    포지션 밖 보유분(수수료용 BNB·더스트)은 여기 포함되지 않는다. 그 금액은
+    _bal_cache['other']에 따로 담아 payload의 other_assets로 내보낸다 —
+    봇은 그것까지 포함해 사이징하므로(_get_spot_equity), 두 숫자를 함께
+    보여야 화면과 봇 로그의 '총자산'이 서로 설명된다.
+
+    pos_df를 넘기면 DB 재조회를 생략한다.
+    """
     now = time.time()
     if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:
         return _bal_cache['val']
@@ -147,10 +154,15 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
         if not r.ok:
             raise ValueError(f'HTTP {r.status_code}')
         usdt = 0.0
+        _holdings: dict = {}
         for b in r.json().get('balances', []):
+            _q = float(b['free']) + float(b['locked'])
+            if _q <= 0:
+                continue
             if b['asset'] == 'USDT':
-                usdt = float(b['free']) + float(b['locked'])
-                break
+                usdt = _q
+            else:
+                _holdings[b['asset']] = _q
 
         # 오픈 포지션 시가 합산 (가격 1회 배치 조회)
         total = usdt
@@ -163,6 +175,23 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
             for sym, qty, risk in open_pos:
                 pr = prices.get(sym)
                 total += qty * pr if pr else risk
+
+        # 포지션 밖 보유분(수수료용 BNB·더스트 등)의 시가.
+        # 봇은 이것까지 포함한 금액으로 사이징한다(_get_spot_equity). 화면이
+        # USDT+포지션만 보여주면 로그·텔레그램의 '총자산'과 어긋나 보인다 —
+        # 실측 $197.32(화면) vs $217.02(봇), 차이는 대부분 수수료용 BNB였다.
+        # 헤드라인 의미는 그대로 두고 차액을 함께 노출해 두 숫자가 설명되게 한다.
+        _in_pos = {str(p['symbol']).replace('USDT', '')
+                   for _, p in pos_df.iterrows()} if not pos_df.empty else set()
+        _rest = {a: q for a, q in _holdings.items() if a not in _in_pos}
+        other = 0.0
+        if _rest:
+            _px = _fetch_prices([f'{a}USDT' for a in _rest])
+            for a, q in _rest.items():
+                p = _px.get(f'{a}USDT')
+                if p:
+                    other += q * p
+        _bal_cache['other'] = round(other, 2)
 
         val = round(total, 2)
         _bal_cache.update({'val': val, 'ts': now})
@@ -771,6 +800,10 @@ def dashboard(token: str, period: int = 0):
         'metrics': m, 'regime': regime, 'streak': streak,
         'briefing': briefing,
         'actual_balance': actual_bal,
+        # 포지션 밖 보유분(수수료용 BNB·더스트) 시가. 봇은 이것까지 포함해
+        # 사이징하므로, 이 값을 함께 보여야 화면 숫자와 봇 로그의 '총자산'이
+        # 서로 설명된다. actual_balance + other_assets = 봇 기준 총자산.
+        'other_assets': _bal_cache.get('other', 0.0),
         'bot_alive': bot_alive, 'log_time': log_time, 'alerts': alerts,
         'eq_curve': _downsample(eq_curve, 'eq'), 'daily': daily,
         'module_stats': module_stats,
