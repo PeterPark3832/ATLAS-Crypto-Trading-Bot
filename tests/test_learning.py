@@ -760,3 +760,32 @@ class TestReport:
              '--json', '--db', str(tmp_path / 'none.db')],
             capture_output=True, text=True)
         assert r.returncode == 0 and r.stdout.strip() == '{}'
+
+
+class TestNoPep563:
+    """이 모듈은 PEP 563(from __future__ import annotations)을 쓰면 안 된다.
+
+    애노테이션이 전부 문자열이 되면 @dataclass가 KW_ONLY를 찾느라
+    dataclasses._is_type()을 타는데, CPython 3.11의 그 함수는
+    `sys.modules.get(cls.__module__).__dict__`를 방어 없이 호출한다.
+    CI(3.11)에서 이 파일 수집 중 간헐적으로 터졌다 —
+      AttributeError: 'NoneType' object has no attribute '__dict__'
+    같은 커밋이 PR 실행은 통과하고 push 실행만 실패하는 플래키였고,
+    플래키 게이트는 진짜 실패를 가린다.
+    """
+
+    def test_module_does_not_use_future_annotations(self):
+        src = Path(L.__file__).read_text(encoding='utf-8')
+        code = '\n'.join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith('#'))
+        assert 'from __future__ import annotations' not in code, (
+            'PEP 563을 켜면 @dataclass가 CPython 3.11의 취약한 _is_type 경로를 '
+            '타 CI가 간헐적으로 실패한다')
+
+    def test_dataclass_annotations_are_real_objects(self):
+        """문자열이 아니어야 _is_type 경로가 아예 도달 불가다."""
+        import dataclasses
+        for cls in (L.LearnConfig, L.Observation):
+            for f in dataclasses.fields(cls):
+                assert not isinstance(f.type, str), (
+                    f'{cls.__name__}.{f.name} 애노테이션이 문자열이다')

@@ -89,7 +89,17 @@ ATLAS Spot — 자기주도 학습 (Self-Directed Allocation Learner)
   python atlas_learning.py --json
 """
 
-from __future__ import annotations
+# ⚠️ `from __future__ import annotations`(PEP 563)를 넣지 말 것.
+#    애노테이션이 전부 문자열이 되면 @dataclass가 KW_ONLY를 찾느라
+#    dataclasses._is_type() 을 타는데, CPython 3.11의 그 함수는
+#    `sys.modules.get(cls.__module__).__dict__` 를 방어 없이 호출한다.
+#    CI(3.11)에서 이 파일 수집 중 간헐적으로 터졌다:
+#      AttributeError: 'NoneType' object has no attribute '__dict__'
+#    같은 커밋이 PR 실행은 통과하고 push 실행만 실패하는 플래키였고,
+#    플래키 게이트는 진짜 실패를 가린다. _process_class는 애노테이션이
+#    **문자열일 때만** _is_type을 부르므로, PEP 563을 끄면 경로 자체가
+#    도달 불가가 된다. 이 파일에 전방참조는 없어 런타임 평가로 충분하다.
+#    (저장소의 다른 모듈도 전부 PEP 563 없이 쓴다 — 이 파일만 예외였다)
 
 import argparse
 import json
