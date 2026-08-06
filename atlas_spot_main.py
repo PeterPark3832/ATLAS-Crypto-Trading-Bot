@@ -1165,6 +1165,24 @@ def _check_bnb_fee_balance(bal: dict) -> None:
         log.warning(f'[BNB] 잔고 확인 실패(무시): {e}')
 
 
+_valuation_warned: dict = {}          # currency → 마지막 경고 시각
+_VALUATION_WARN_INTERVAL = 6 * 3600   # 통화별 경고 재발송 간격(초)
+
+
+def _valuation_warn_due(currency: str) -> bool:
+    """이 통화의 평가 실패를 지금 경고할 차례인가.
+
+    사실 자체는 계속 유효하므로 완전히 숨기지 않는다. 다만 60초 폴링마다
+    같은 줄을 남기면 로그가 그 한 줄로 뒤덮여 정작 중요한 경고가 묻힌다.
+    """
+    now  = time.time()
+    last = _valuation_warned.get(currency, 0.0)
+    if now - last < _VALUATION_WARN_INTERVAL:
+        return False
+    _valuation_warned[currency] = now
+    return True
+
+
 def _get_spot_equity() -> tuple[float, float]:
     """총자산 = USDT + 보유 코인 현재가. Returns: (total_equity, usdt_balance)."""
     try:
@@ -1190,8 +1208,15 @@ def _get_spot_equity() -> tuple[float, float]:
                 # 이 자산이 총자산에서 **누락**된다. 총자산은 사이징·드로다운
                 # 래칫·일일 손실한도의 기준이므로, 과소평가되면 그만큼
                 # 작게 베팅하고 래칫이 잘못 발동한다. 조용히 넘기면 안 된다.
-                log.warning(f'[자산평가] {currency} 시세 조회 실패 — '
-                            f'총자산에서 제외됨(과소평가): {e}')
+                #
+                # 다만 원인이 '현물 마켓이 없는 자산'(Simple Earn 잔고 LD*,
+                # 상장폐지 토큰, 스테이킹 등)이면 **영원히** 실패한다.
+                # 잔고 폴러가 60초마다 도므로 억제하지 않으면 같은 줄이
+                # 하루 1,440회 쌓인다(실측: LDUSDT 한 건으로 7일간 1,470회).
+                # 반복되는 경고는 곧 무시되는 경고다 — 통화별로 간격을 둔다.
+                if _valuation_warn_due(currency):
+                    log.warning(f'[자산평가] {currency} 시세 조회 실패 — '
+                                f'총자산에서 제외됨(과소평가): {e}')
         return total, usdt
     except Exception as e:
         log.warning(f'[잔고] 조회 실패: {e}')

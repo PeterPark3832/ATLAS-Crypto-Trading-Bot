@@ -77,6 +77,40 @@ def _state(monkeypatch):
 #  _get_price
 # ══════════════════════════════════════════════════════════════
 
+class TestValuationWarnThrottle:
+    """평가 실패 경고는 통화별로 간격을 둔다.
+
+    현물 마켓이 없는 자산(Simple Earn LD*, 상장폐지, 스테이킹)은 **영원히**
+    실패한다. 잔고 폴러가 60초마다 도므로 억제가 없으면 같은 줄이 하루
+    1,440회 쌓인다 — 실측으로 LDUSDT 한 건이 7일간 1,470회를 남겼고,
+    그 사이 정작 중요한 경고가 묻혔다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_valuation_warned', {})
+
+    def test_first_warning_passes(self):
+        assert sm._valuation_warn_due('LDUSDT') is True
+
+    def test_repeat_is_suppressed(self):
+        sm._valuation_warn_due('LDUSDT')
+        assert sm._valuation_warn_due('LDUSDT') is False, (
+            '60초 폴링마다 같은 줄이 쌓여 로그가 뒤덮인다')
+
+    def test_other_currency_not_suppressed(self):
+        """한 통화의 억제가 다른 통화의 경고를 가리면 안 된다."""
+        sm._valuation_warn_due('LDUSDT')
+        assert sm._valuation_warn_due('PENGU') is True
+
+    def test_warns_again_after_interval(self, monkeypatch):
+        """사실은 계속 유효하므로 완전히 숨기지는 않는다."""
+        sm._valuation_warn_due('LDUSDT')
+        aged = time.time() - sm._VALUATION_WARN_INTERVAL - 1
+        monkeypatch.setitem(sm._valuation_warned, 'LDUSDT', aged)
+        assert sm._valuation_warn_due('LDUSDT') is True
+
+
 class _FakeTickerExchange:
     def __init__(self, prices=None, raises_times=0):
         self._prices = prices or {}

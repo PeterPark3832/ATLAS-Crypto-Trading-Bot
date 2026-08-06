@@ -83,9 +83,16 @@ class TestDeployUnits:
         assert (self.ROOT / 'atlas-wfo-report.timer').exists()
 
     def test_reopt_has_no_timer_by_design(self):
-        """재최적화는 리포트가 트리거한다 — 독립 타이머가 있으면 중복 실행된다."""
-        timers = list(self.ROOT.glob('*.timer'))
-        assert [t.name for t in timers] == ['atlas-wfo-report.timer']
+        """재최적화는 리포트가 트리거한다 — 독립 타이머가 있으면 중복 실행된다.
+
+        지키려는 불변식은 '재최적화에 타이머가 없다'는 것 하나다. 예전에는
+        deploy 디렉터리의 타이머가 **정확히 1개**인지로 검사했는데, 그러면
+        무관한 잡(주간 리포트 등)을 타이머로 등록하는 것만으로 깨진다.
+        의도한 적 없는 제약이라 실제로 정상 추가를 막았다.
+        """
+        assert not (self.ROOT / 'atlas-wfo-reopt.timer').exists(), (
+            '재최적화에 독립 타이머가 생기면 리포트 트리거와 겹쳐 '
+            '메모리 피크가 중복된다(RAM 951MB 서버)')
 
     def test_reopt_runs_after_report(self):
         unit = (self.ROOT / 'atlas-wfo-reopt.service').read_text()
