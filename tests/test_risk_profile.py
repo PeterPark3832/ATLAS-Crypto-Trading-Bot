@@ -123,7 +123,7 @@ class TestMaxPositionsIsHonest:
         """가용자본 ÷ 종목당 상한 = 실제 한계. 설정값이 그보다 크면 표시가
         거짓이 된다 — config 주석에 그 사실이 적혀 있어야 한다."""
         real = (1 - cfg.SPOT_RESERVE_PCT) / cfg.SPOT_MAX_ALLOC_PCT
-        if cfg.SPOT_MAX_POSITIONS > real:
+        if real < cfg.SPOT_MAX_POSITIONS:
             src = Path(cfg.__file__).read_text()
             assert '실제 한계는' in src, (
                 f'설정 {cfg.SPOT_MAX_POSITIONS}개 vs 실제 {real:.0f}개 — '
