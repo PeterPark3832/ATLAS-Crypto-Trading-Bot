@@ -179,3 +179,38 @@ def test_format_proposal_none_accepted():
     msg = ro.format_proposal(props, datetime.now(timezone.utc))
     assert '개선 제안 없음' in msg
     assert 'OOS 개선 없음' in msg
+
+
+class TestPortfolioCaveat:
+    """리포트는 이 수치가 '상한선'이라는 사실을 함께 알려야 한다.
+
+    backtest_strategy 는 (전략 × 심볼) 단위로 독립 실행되므로 동시 포지션
+    한도·슬롯당 최소자본·USDT 예비금을 반영하지 못한다 — 코드에는 한계로
+    명시돼 있는데(atlas_spot_backtest 의 '포트폴리오 제약' 주석) 정작 판정을
+    전달하는 리포트에는 단서가 없었다. PASS/FAIL로 전략 존폐를 정하는
+    사람이 수치를 액면 그대로 믿게 된다.
+    """
+
+    def test_caveat_present_in_message(self):
+        wf = {'IS': {'S4': _m(2.0, 1.0, 40, 60)},
+              'OOS': {'S4': _m(1.5, 0.5, 10, 30)}}
+        rows = mr.evaluate(wf, ['S4'])
+        msg = mr.format_message(rows, datetime.now(timezone.utc), '2026-08-13', 564.0)
+        assert '낙관적' in msg, '결과를 상한선으로 읽어야 한다는 단서가 없다'
+
+    def test_slots_computed_from_equity(self):
+        """추상적 경고가 아니라 **현재 한도**를 숫자로 보여야 판단에 쓸 수 있다."""
+        txt = mr.portfolio_caveat(564.0)
+        assert '15슬롯' in txt, txt      # min(15, 564//20=28) = 15 (상한)
+
+    def test_small_account_slots_are_capital_bound(self):
+        txt = mr.portfolio_caveat(217.0)
+        assert '10슬롯' in txt, txt      # min(15, 217//20=10) = 10
+
+    def test_unknown_equity_falls_back_to_config_limit(self):
+        """자산 조회가 실패해도 단서 자체는 남아야 한다."""
+        txt = mr.portfolio_caveat(None)
+        assert '낙관적' in txt and '15슬롯' in txt
+
+    def test_zero_equity_does_not_crash(self):
+        assert '낙관적' in mr.portfolio_caveat(0.0)

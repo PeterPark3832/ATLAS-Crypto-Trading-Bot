@@ -28,6 +28,7 @@ weekly_report.py 와 동일한 배달·환경변수 규약을 따른다 (tg / .e
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import traceback
@@ -46,6 +47,7 @@ from atlas_spot_config import (
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
+    SPOT_MAX_POSITIONS, SPOT_EQUITY_PER_SLOT, SPOT_DB_FILE,
 )
 from atlas_spot_universe import get_backtest_universe
 
@@ -108,7 +110,32 @@ def evaluate(wf_results: dict, strategies: list[str]) -> list[dict]:
     return rows
 
 
-def format_message(rows: list[dict], now: datetime, oos_end: str) -> str:
+def live_equity() -> float | None:
+    """슬롯 수 계산에 쓸 자산. 조회 실패는 치명적이지 않다(단서만 일반화).
+
+    봇이 기록해 둔 값을 읽는다 — 리포트는 격리된 oneshot 잡이라 거래소를
+    직접 부르지 않는 편이 가볍고 자격증명도 필요 없다.
+
+    현재 자산(`equity`)은 DB에 저장되지 않는다(메모리 상태로만 산다).
+    남는 것은 그날 시작 자산과 피크뿐이므로 day_start_eq 를 쓴다 — 슬롯 수는
+    $20 단위의 계단 함수라 하루 등락으로는 거의 바뀌지 않아 이 근사로 충분하다.
+    """
+    try:
+        con = sqlite3.connect(f'file:{SPOT_DB_FILE}?mode=ro', uri=True, timeout=10)
+        try:
+            row = con.execute(
+                "SELECT value FROM spot_config WHERE key='day_start_eq'").fetchone()
+        finally:
+            con.close()
+        val = float(row[0]) if row and row[0] else 0.0
+        return val if val > 0 else None
+    except Exception as e:
+        print(f'[자산 조회 실패 — 단서를 일반 문구로 대체] {e}')
+        return None
+
+
+def format_message(rows: list[dict], now: datetime, oos_end: str,
+                   equity: float | None = None) -> str:
     """텔레그램용 요약 메시지 생성."""
     n_pass = sum(1 for r in rows if r['verdict'] == 'PASS')
     n_eval = sum(1 for r in rows if r['has_data'])
@@ -139,7 +166,30 @@ def format_message(rows: list[dict], now: datetime, oos_end: str) -> str:
         tail += f"\n⚠️ 재최적화 후보: {', '.join(failing)} (OOS 기준 미달)"
     else:
         tail += "\n✅ 전 전략 OOS 기준 통과"
+    tail += '\n' + portfolio_caveat(equity)
     return head + '\n\n'.join(body) + tail
+
+
+def portfolio_caveat(equity: float | None) -> str:
+    """이 수치를 '상한선'으로 읽어야 하는 이유를 함께 알린다.
+
+    backtest_strategy 는 (전략 × 심볼) 단위로 독립 실행되므로 동시 포지션
+    수 상한·슬롯당 최소 자본·USDT 예비금을 반영하지 못한다(코드에 한계로
+    명시돼 있다). 즉 신호가 몰리는 구간에서 라이브는 일부 진입을 포기하는데
+    백테스트는 전부 잡는다 — 결과가 구조적으로 낙관적이다.
+
+    그런데 정작 판정을 전달하는 리포트에는 이 단서가 없었다. PASS/FAIL로
+    전략 존폐를 결정하는 사람이 수치를 액면 그대로 믿게 된다.
+    현재 자본으로 계산한 **실제 슬롯 수**를 함께 보여 낙관 정도를 가늠하게 한다.
+    """
+    base = ('※ 백테스트는 포트폴리오 제약(동시 포지션 한도·슬롯당 최소자본·'
+            'USDT 예비금)을 모델링하지 않아 실제보다 낙관적입니다.')
+    if not equity or equity <= 0:
+        return base + f'\n   라이브 한도: 최대 {SPOT_MAX_POSITIONS}슬롯'
+    slots = min(SPOT_MAX_POSITIONS, int(equity // SPOT_EQUITY_PER_SLOT))
+    return (base + f'\n   현재 라이브 한도: {slots}슬롯 '
+            f'(자산 ${equity:,.0f} ÷ 슬롯당 ${SPOT_EQUITY_PER_SLOT:.0f}, '
+            f'상한 {SPOT_MAX_POSITIONS})')
 
 
 def save_latest(rows: list[dict], wf_results: dict, meta: dict) -> None:
@@ -231,7 +281,7 @@ def main() -> int:
         return 1
 
     rows = evaluate(wf_results, strategies)
-    msg  = format_message(rows, now, oos_end)
+    msg  = format_message(rows, now, oos_end, live_equity())
     tg(msg)
     print(msg)
 
