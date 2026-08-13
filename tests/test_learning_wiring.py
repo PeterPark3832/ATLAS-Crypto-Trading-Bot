@@ -17,15 +17,9 @@ ATLAS — 학습기 배선 (라이브 · 백테스트)
   pytest tests/test_learning_wiring.py -v
 """
 
-import os
-import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

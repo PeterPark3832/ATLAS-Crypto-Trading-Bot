@@ -8,14 +8,8 @@ BOT_START_ARGS 기동 인자 보존을 검증합니다.
   pytest tests/test_dashboard_security.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 from fastapi import HTTPException

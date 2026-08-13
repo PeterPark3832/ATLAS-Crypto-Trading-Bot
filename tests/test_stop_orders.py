@@ -9,16 +9,10 @@ main() 킬스위치 기동 가드를 검증합니다.
   pytest tests/test_stop_orders.py -v
 """
 
-import os
 import sys
 import threading
 import time
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

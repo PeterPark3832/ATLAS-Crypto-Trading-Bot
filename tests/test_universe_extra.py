@@ -7,15 +7,8 @@ test_universe.py가 다루지 않는 universe_refresh_loop을 검증합니다.
   pytest tests/test_universe_extra.py -v
 """
 
-import os
-import sys
 import threading
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import atlas_spot_universe as uv
 

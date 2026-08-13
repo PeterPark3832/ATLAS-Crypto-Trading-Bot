@@ -12,14 +12,8 @@ REGIME_STRATEGY_MAP / DEFAULT_ACTIVE_STRATEGIES / 전략 레지스트리 간의
   pytest tests/test_config_consistency.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from atlas_spot_config import (
     REGIME_STRATEGY_MAP, DEFAULT_ACTIVE_STRATEGIES,

@@ -9,14 +9,8 @@ _regime_from_log, _parse_regime_metrics(로그 파싱) 을 검증합니다.
 """
 
 import os
-import sys
 import time
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import atlas_web_dashboard as wd
 

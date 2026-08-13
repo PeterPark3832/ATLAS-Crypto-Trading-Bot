@@ -14,15 +14,9 @@ DB의 sl_order_id가 채워져 있다는 것만으로는 부족하다 — 그 �
   pytest tests/test_check_protection.py -v
 """
 
-import os
 import sqlite3
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

@@ -13,15 +13,9 @@ ATLAS — 재최적화 과최적화 방지 장치
   pytest tests/test_reoptimize_guards.py -v
 """
 
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

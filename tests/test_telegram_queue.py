@@ -8,16 +8,9 @@ _tg(논블로킹 enqueue), _tg_worker(백그라운드 전송), _tg_flush(동기 
   pytest tests/test_telegram_queue.py -v
 """
 
-import os
 import queue
-import sys
 import threading
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

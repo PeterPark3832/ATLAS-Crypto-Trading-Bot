@@ -9,14 +9,7 @@ test_strategies.py가 S3~S6만 다루므로, CALC_FUNCS/SIGNAL_FUNCS에 등록�
   pytest tests/test_strategies_extra.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 

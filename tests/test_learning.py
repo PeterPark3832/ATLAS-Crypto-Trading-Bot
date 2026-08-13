@@ -21,15 +21,10 @@ invariant`가 그 사실을, `TestNoAbsorbingState`가 수정을 고정한다.
 """
 
 import math
-import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

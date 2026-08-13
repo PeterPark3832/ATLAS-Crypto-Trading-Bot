@@ -8,17 +8,11 @@ _handle_tg_cmd, _position_reconcile_loop을 검증합니다.
   pytest tests/test_main_misc.py -v
 """
 
-import os
-import sys
 import re
 import threading
 import time
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

@@ -15,16 +15,9 @@ ATLAS — 정확성 감사 수정 회귀 테스트
   pytest tests/test_audit_fixes.py -v
 """
 
-import os
-import sys
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

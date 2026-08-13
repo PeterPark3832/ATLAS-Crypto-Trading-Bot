@@ -16,14 +16,8 @@ ATLAS — 레짐 엔진 패리티 / 거래 정지 가시화
   pytest tests/test_regime_parity.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import pytest

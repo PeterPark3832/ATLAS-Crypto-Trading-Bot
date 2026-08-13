@@ -8,16 +8,10 @@ load_trades(DB 조회), calc(통계 계산), strategy_summary(전략별 요약)�
   pytest tests/test_weekly_report.py -v
 """
 
-import os
 import sqlite3
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import pytest
