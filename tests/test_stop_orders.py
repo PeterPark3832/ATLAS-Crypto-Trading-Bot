@@ -218,6 +218,23 @@ class TestStopAlertThrottle:
         monkeypatch.setitem(sm._stop_alert_at, ('S5', 'ONEUSDT'), aged)
         assert sm._stop_alert_due('S5', 'ONEUSDT') is True
 
+    def test_price_band_hold_leaves_a_log_trace(self, _fake_ex, _temp_db,
+                                                _state, monkeypatch, caplog):
+        """보류는 알려야 한다 — 로그에 흔적이 없으면 원인을 추적할 수 없다.
+
+        실제로 첫 수정판은 _tg만 보내고 로그를 남기지 않아, 알림은 멎었지만
+        로그를 grep해도 왜 보호주문이 없는지 알 수 없는 상태가 됐다.
+        """
+        _fake_ex.market = lambda sym: {'info': {'filters': [
+            {'filterType': 'PERCENT_PRICE_BY_SIDE', 'askMultiplierDown': '0.9'}]}}
+        monkeypatch.setattr(sm, '_get_price', lambda s: 0.00081)
+        pos = {'qty_tokens': 15486.3, 'sl': 0.00072057, 'tp': 0.0}
+        _fake_ex.free_balance = {'ONE': 15486.3}
+        with caplog.at_level('INFO'):
+            sm._rearm_missing_protection('S5', 'ONEUSDT', 'ONE/USDT', pos)
+        assert any('보호주문 보류' in r.message for r in caplog.records), (
+            '보류 사유가 로그에 남지 않아 운영자가 원인을 추적할 수 없다')
+
     def test_failure_alert_is_throttled(self, _fake_ex, _no_telegram):
         """실제 실패 경로에서도 반복 알림이 나가지 않아야 한다."""
         _fake_ex.market = lambda sym: {'info': {'filters': []}}

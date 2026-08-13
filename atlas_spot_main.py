@@ -2481,8 +2481,14 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
     floor = _min_sell_price(ccxt_sym)
     sl_lim = float(pos['sl']) * (1 - SPOT_STOP_LIMIT_GAP)
     if floor > 0 and sl_lim < floor:
+        # 알림과 같은 간격으로 로그도 남긴다. 흔적이 전혀 없으면 운영자가
+        # 로그를 뒤져도 '왜 보호주문이 없는지' 알 수 없다(조용한 보류 금지).
+        # 매 주기(5분) 남기면 하루 288줄이라 그 자체가 스팸이 된다.
         if _stop_alert_due(strategy, symbol):
             gap = (floor - sl_lim) / floor * 100
+            log.info(f'[{strategy}] {symbol} 보호주문 보류: 손절 지정가 '
+                     f'{sl_lim:.8g} < 거래소 허용 하한 {floor:.8g} '
+                     f'({gap:.1f}% 초과) — 소프트웨어 SL 감시 중')
             _tg(f'ℹ️ [{strategy}] {symbol} 거래소 보호주문 보류 — 손절가가 '
                 f'거래소 허용 범위 밖입니다({gap:.1f}% 초과).\n'
                 f'   현재가가 손절선에 가까워지면 자동으로 등록됩니다.\n'
