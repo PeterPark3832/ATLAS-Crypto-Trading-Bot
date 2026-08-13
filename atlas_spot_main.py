@@ -2575,9 +2575,11 @@ def _rs_gate_scale(strategy_id: str, symbol: str) -> Optional[float]:
 def _funding_scale(strategy_id: str, symbol: str) -> Optional[float]:
     """펀딩비 기반 리스크 배수. 롱 과밀이면 **None**(진입 차단).
 
-    ⚠️ 백테스트는 이 필터를 모델링하지 않는다 — 과거 펀딩비 데이터를
-    받지 않기 때문이다. 즉 백테스트는 라이브가 실제로는 걸렀을 구간까지
-    거래한 것으로 계산한다(낙관 편향).
+    백테스트도 같은 규칙을 적용한다 — `atlas_spot_backtest._bt_funding_scale`
+    이 `build_funding_map()` 으로 받은 과거 펀딩 이력을 보고 판정한다.
+    (예전에는 이력을 받지 않아 백테스트가 라이브보다 낙관적이었다)
+    퍼프가 없는 심볼은 여기서 조회 실패로 0.0이 되어 통과하는데,
+    백테스트도 데이터 없음을 통과로 처리해 동작을 맞춘다.
     """
     if strategy_id not in FUNDING_APPLY_STRATS:
         return 1.0

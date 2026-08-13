@@ -62,6 +62,7 @@ from atlas_spot_config import (
     REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
     S3_COOLDOWN, S5_SL_COOLDOWN_BARS,
+    FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
 )
 from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
@@ -242,6 +243,102 @@ def _bt_rs_gate(rs_applies: bool, rank_map, rank_keys: list,
     if rank_pct <= MOMENTUM_TOP_TIER_PCT:
         return MOMENTUM_TOP_RISK_MULT, 'rs_top_tier'
     return 1.0, None
+
+
+def _bt_funding_scale(applies: bool, funding_map: Optional[dict],
+                      ts_ms: int) -> tuple:
+    """펀딩비 판정. Returns: (리스크 배수 or **None(차단)**, 진단키 or None).
+
+    라이브 `_funding_scale` 패리티. 롱 과밀(펀딩 ≥ FUNDING_LONG_BLOCK)이면
+    진입을 막고, 숏 쏠림(≤ FUNDING_SHORT_BOOST)이면 리스크를 키운다.
+
+    데이터가 없으면 **1.0(통과)** 이다 — 라이브의 `_get_spot_funding` 도
+    조회 실패 시 0.0을 돌려 통과시키므로 같은 동작이다. 퍼프가 없는 현물
+    전용 심볼(MATIC·EOS 등)이 여기 해당한다. 하위권 취급으로 영구 차단하면
+    라이브와 어긋난다.
+    """
+    if not applies or not funding_map:
+        return 1.0, None
+    rate = _funding_asof(funding_map, ts_ms)
+    if rate is None:
+        return 1.0, None
+    if rate >= FUNDING_LONG_BLOCK:
+        return None, 'funding_block'
+    if rate <= FUNDING_SHORT_BOOST:
+        return 1.20, 'funding_boost'
+    return 1.0, None
+
+
+def _funding_asof(funding_map: dict, ts_ms: int) -> Optional[float]:
+    """그 시점에 **이미 확정된** 가장 최근 펀딩비.
+
+    펀딩은 8시간마다 확정되고 봉은 4H/1D다. 봉 시각 이후의 펀딩을 쓰면
+    미래를 보는 것이므로, ts 이하의 마지막 값만 쓴다(선행편향 차단).
+    """
+    keys = funding_map.get('_keys')
+    if not keys:
+        return None
+    i = bisect.bisect_right(keys, ts_ms) - 1
+    return funding_map['rates'][keys[i]] if i >= 0 else None
+
+
+def build_funding_map(symbol: str, since_ms: int,
+                      data_dir: Optional[Path] = None) -> dict:
+    """심볼의 과거 펀딩비를 {ts_ms: rate} 로. 실패·미지원이면 빈 dict.
+
+    OHLCV와 같은 방식으로 CSV 캐시한다 — 5년치가 심볼당 약 5,500건이라
+    매 실행마다 받으면 백테스트가 느려지고 레이트리밋도 낭비된다.
+    """
+    csv_path = (data_dir / f'{symbol}_FUNDING.csv') if data_dir else None
+    rows: list = []
+    if csv_path and csv_path.exists():
+        try:
+            df = pd.read_csv(csv_path)
+            rows = [(int(t), float(r)) for t, r in zip(df['ts'], df['rate'], strict=True)]
+        except Exception as e:
+            print(f'    [펀딩] {symbol} 캐시 읽기 실패 — 재수집: {e}')
+            rows = []
+    if not rows:
+        rows = _fetch_funding_history(symbol, since_ms)
+        if rows and csv_path:
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(rows, columns=['ts', 'rate']).to_csv(csv_path, index=False)
+    if not rows:
+        return {}
+    rows.sort()
+    return {'_keys': [t for t, _ in rows], 'rates': dict(rows)}
+
+
+def _fetch_funding_history(symbol: str, since_ms: int) -> list:
+    """선물 펀딩비 이력 전체 페이지네이션. 퍼프 미지원이면 빈 리스트."""
+    try:
+        import ccxt
+        ex = ccxt.binance({'options': {'defaultType': 'future'},
+                           'enableRateLimit': True})
+        ccxt_sym = symbol.replace('USDT', '/USDT:USDT')
+        out: list = []
+        since = since_ms
+        while True:
+            batch = ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=1000)
+            if not batch:
+                break
+            new = [(int(b['timestamp']), float(b['fundingRate']))
+                   for b in batch if b.get('fundingRate') is not None]
+            if out:
+                new = [x for x in new if x[0] > out[-1][0]]
+            if not new:
+                break
+            out.extend(new)
+            if len(batch) < 1000:
+                break
+            since = new[-1][0] + 1
+        print(f'    [펀딩] {symbol} {len(out)}건 수집')
+        return out
+    except Exception as e:
+        # 퍼프가 없는 현물 전용 심볼이 여기 온다 — 라이브도 통과시키므로
+        # 실패가 아니라 '해당 없음'이다.
+        print(f'    [펀딩] {symbol} 미지원/실패 — 필터 미적용: {e}')
+        return []
 
 
 def _bt_entry_filters(sl_dist: float, entry_price: float,
@@ -635,6 +732,7 @@ def backtest_strategy(
     risk_pct:     float = SPOT_BASE_RISK_PCT,
     initial_equity: float = BT_INITIAL_EQ,
     rank_map:     Optional[dict] = None,
+    funding_map:  Optional[dict] = None,
 ) -> tuple[list, dict]:
     """
     단일 전략 × 단일 심볼 bar-by-bar 시뮬레이션.
@@ -644,6 +742,9 @@ def backtest_strategy(
                   주도주 리스크 부스트가 라이브와 동일하게 적용된다.
                   None이면 두 규칙 모두 비활성 — 그 경우 백테스트는
                   라이브보다 낙관적이다(막혔을 진입까지 체결로 센다).
+        funding_map: `build_funding_map()` 결과. 넘기면 롱 과밀 구간의
+                  진입 차단·숏 쏠림 부스트가 라이브와 동일하게 적용된다.
+                  None이면 비활성 — 역시 낙관 편향이 남는다.
 
     Returns:
         (trades: list[SpotTrade], diagnostics: dict)
@@ -653,6 +754,7 @@ def backtest_strategy(
 
     rank_keys = sorted(rank_map) if rank_map else []
     rs_applies = bool(rank_keys) and strategy_id in MOMENTUM_RS_GATE_STRATS
+    fund_applies = bool(funding_map) and strategy_id in FUNDING_APPLY_STRATS
 
     # 시작/종료 타임스탬프 필터
     ts_start = _since_ms(start_date)
@@ -812,6 +914,17 @@ def backtest_strategy(
         if rs_scale is None:
             continue
 
+        # ── 펀딩비 필터 (라이브 진입 경로 패리티) ──────────────────────
+        # 라이브는 롱이 과밀할 때(펀딩 ≥ 0.05%/8h) 추세추종 진입을 막는다.
+        # 백테스트가 이걸 모르면 라이브가 실제로는 걸렀을 구간까지 거래한
+        # 것으로 계산해 **낙관 편향**이 된다. 특히 S6는 현재 OOS PF가 가장
+        # 높은 전략이라 그 수치가 부풀려져 있으면 판단이 통째로 흔들린다.
+        fund_scale, fund_flag = _bt_funding_scale(fund_applies, funding_map, ts)
+        if fund_flag:
+            diag[fund_flag] = diag.get(fund_flag, 0) + 1
+        if fund_scale is None:
+            continue
+
         slip        = _get_slippage(symbol)
         entry_price = float(row['open']) * (1 + slip)  # 현재봉 시가 = 신호봉 다음봉 오픈
         sl          = sig['sl']
@@ -868,7 +981,8 @@ def backtest_strategy(
                 diag['learn_blocked'] = diag.get('learn_blocked', 0) + 1
                 continue
 
-        adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale * rs_scale
+        adj_risk_pct = (risk_pct * regime_scale * kelly_scale * health_scale
+                        * rs_scale * fund_scale)
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
         cost_usdt    = qty * entry_price
@@ -1011,6 +1125,18 @@ def run_spot_backtest(
         print(f'  모멘텀 순위맵: {len(rank_map)}일 × {len(ohlcv_1d)}심볼'
               + ('' if rank_map else ' — 데이터 부족, RS Gate 미적용'))
 
+    # 펀딩비는 추세추종 전략에만 쓰인다. 대상이 없으면 받지 않는다
+    # (심볼당 5년치 약 5,500건 — 불필요하게 받으면 첫 실행이 크게 느려진다).
+    funding_maps: dict = {}
+    if any(s in FUNDING_APPLY_STRATS for s in strategies):
+        print(f'\n[데이터] 펀딩비 로드 ({len(symbols)}개)...')
+        for sym in symbols:
+            fm = build_funding_map(sym, since_ms, data_dir)
+            if fm:
+                funding_maps[sym] = fm
+        print(f'  펀딩맵: {len(funding_maps)}/{len(symbols)}심볼'
+              + ('' if funding_maps else ' — 데이터 없음, 펀딩 필터 미적용'))
+
     # 백테스트 실행
     results = {}
     for strategy_id in strategies:
@@ -1029,6 +1155,7 @@ def run_spot_backtest(
                 strategy_id, sym, ohlcv, regime_map,
                 start_date, end_date, risk_pct,
                 rank_map=rank_map or None,
+                funding_map=funding_maps.get(sym) or None,
             )
             metrics = calc_spot_metrics(trades, BT_INITIAL_EQ, start_date, end_date)
             results[strategy_id][sym] = {

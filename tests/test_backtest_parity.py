@@ -323,3 +323,57 @@ class TestS5SlCooldownParity:
                     for a, b in zip(tp_trades, tp_trades[1:], strict=False)]
             assert min(gaps) <= cfg.S5_SL_COOLDOWN_BARS, (
                 '익절 후에도 쿨다운이 걸려 진입 기회를 과도하게 막는다')
+
+
+class TestFundingParity:
+    """라이브의 펀딩비 필터가 백테스트에도 있어야 한다.
+
+    라이브(_funding_scale)는 롱이 과밀할 때(펀딩 ≥ FUNDING_LONG_BLOCK)
+    추세추종 진입을 막고, 숏 쏠림(≤ FUNDING_SHORT_BOOST)이면 리스크를 키운다.
+    백테스트가 이걸 모르면 라이브가 실제로는 걸렀을 구간까지 거래한 것으로
+    계산해 **낙관 편향**이 된다 — 특히 S6는 현재 OOS PF가 가장 높은 전략이라
+    그 수치가 부풀려져 있으면 판단이 통째로 흔들린다.
+    """
+
+    def _fm(self, pairs):
+        return {'_keys': [t for t, _ in pairs], 'rates': dict(pairs)}
+
+    def test_blocks_when_longs_crowded(self):
+        fm = self._fm([(1000, cfg.FUNDING_LONG_BLOCK)])
+        scale, flag = bt._bt_funding_scale(True, fm, 2000)
+        assert scale is None and flag == 'funding_block'
+
+    def test_boosts_when_shorts_crowded(self):
+        fm = self._fm([(1000, cfg.FUNDING_SHORT_BOOST)])
+        scale, flag = bt._bt_funding_scale(True, fm, 2000)
+        assert scale == pytest.approx(1.20) and flag == 'funding_boost'
+
+    def test_neutral_in_between(self):
+        fm = self._fm([(1000, 0.0)])
+        assert bt._bt_funding_scale(True, fm, 2000) == (1.0, None)
+
+    def test_missing_data_passes_like_live(self):
+        """퍼프가 없는 심볼은 라이브도 0.0으로 통과시킨다 — 차단하면 어긋난다."""
+        assert bt._bt_funding_scale(True, None, 2000) == (1.0, None)
+        assert bt._bt_funding_scale(True, self._fm([]), 2000) == (1.0, None)
+
+    def test_not_applied_to_other_strategies(self):
+        fm = self._fm([(1000, cfg.FUNDING_LONG_BLOCK)])
+        assert bt._bt_funding_scale(False, fm, 2000) == (1.0, None)
+
+    def test_uses_only_past_funding(self):
+        """봉 시각 이후의 펀딩을 쓰면 선행편향이다."""
+        fm = self._fm([(1000, 0.0), (5000, cfg.FUNDING_LONG_BLOCK)])
+        # ts=2000 시점엔 5000의 과밀을 알 수 없다
+        assert bt._bt_funding_scale(True, fm, 2000) == (1.0, None)
+        assert bt._bt_funding_scale(True, fm, 6000)[0] is None
+
+    def test_before_first_funding_is_neutral(self):
+        fm = self._fm([(5000, cfg.FUNDING_LONG_BLOCK)])
+        assert bt._bt_funding_scale(True, fm, 1000) == (1.0, None)
+
+    def test_constants_shared_with_live(self):
+        """상수를 복제하면 한쪽만 바뀌어 조용히 어긋난다."""
+        assert bt.FUNDING_LONG_BLOCK is cfg.FUNDING_LONG_BLOCK
+        assert bt.FUNDING_SHORT_BOOST is cfg.FUNDING_SHORT_BOOST
+        assert bt.FUNDING_APPLY_STRATS is cfg.FUNDING_APPLY_STRATS
