@@ -33,7 +33,20 @@ import atlas_spot_main as sm
 
 @pytest.fixture(autouse=True)
 def _no_telegram(monkeypatch):
-    monkeypatch.setattr(sm, '_tg', lambda msg: None)
+    """전송을 막고 **보낸 내용을 모은다**(알림 횟수 검증용)."""
+    sent: list = []
+    monkeypatch.setattr(sm, '_tg', lambda msg: sent.append(msg))
+    return sent
+
+
+@pytest.fixture(autouse=True)
+def _reset_alert_throttle(monkeypatch):
+    """알림 간격 제한은 모듈 전역이라 테스트 간에 남는다.
+
+    초기화하지 않으면 앞선 테스트가 같은 (전략, 심볼)로 한 번 보냈다는
+    이유로 뒤 테스트의 알림이 조용히 억제된다.
+    """
+    monkeypatch.setattr(sm, '_stop_alert_at', {})
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +126,44 @@ class TestEmergencyExit:
         assert len(_sell_calls) == 1
         assert _sell_calls[0][3] == 'EMERGENCY'
         assert _sell_calls[0][2] == pytest.approx(100.0 * 0.99)
+
+    def test_exchange_stop_present_blocks_emergency_sell(self, monkeypatch,
+                                                         _sell_calls, _no_telegram):
+        """거래소 스탑이 있으면 던지지 않는다.
+
+        이 경로의 목적은 'SL이 작동하지 못하는 상태' 방지인데, 거래소 스탑이
+        걸려 있으면 SL은 봇의 시야와 무관하게 거래소가 집행한다.
+        오히려 _spot_sell 은 매도 **전에 그 스탑을 취소**하므로, 이어지는
+        시장가 매도가 실패하면(가격 조회를 막은 그 장애로 실패하기 쉽다)
+        보호가 통째로 사라진 채 포지션만 남는다 — 의도와 정반대다.
+        """
+        _open_position(entry=100.0)
+        sm._update_position_order_id('S4', 'BTCUSDT', 'STOP-1')
+        sm._last_known_price['BTC/USDT'] = (100.0, time.time() - sm._PRICE_CACHE_TTL - 1)
+        _set_price(monkeypatch, 0.0)
+        sm._manage_position('S4', 'BTCUSDT', 'BTC/USDT', None, 0)
+        assert _sell_calls == [], (
+            '거래소 보호주문이 있는데 긴급 청산했다 — 스탑을 취소하고 '
+            '장애 중 시장가로 던지는 최악의 조합이 된다')
+
+    def test_hold_is_reported_once(self, monkeypatch, _sell_calls, _no_telegram):
+        """보류는 알려야 하지만 5분마다 반복하면 알림이 마비된다."""
+        _open_position(entry=100.0)
+        sm._update_position_order_id('S4', 'BTCUSDT', 'STOP-1')
+        sm._last_known_price['BTC/USDT'] = (100.0, time.time() - sm._PRICE_CACHE_TTL - 1)
+        _set_price(monkeypatch, 0.0)
+        for _ in range(4):
+            sm._manage_position('S4', 'BTCUSDT', 'BTC/USDT', None, 0)
+        assert len(_no_telegram) == 1, f'알림 {len(_no_telegram)}건 — 반복 발송'
+
+    def test_no_protection_still_liquidates(self, monkeypatch, _sell_calls,
+                                            _no_telegram):
+        """보호가 없으면 기존대로 청산한다 — 가드가 과하게 막으면 안 된다."""
+        _open_position(entry=100.0)
+        sm._last_known_price['BTC/USDT'] = (100.0, time.time() - sm._PRICE_CACHE_TTL - 1)
+        _set_price(monkeypatch, 0.0)
+        sm._manage_position('S4', 'BTCUSDT', 'BTC/USDT', None, 0)
+        assert len(_sell_calls) == 1 and _sell_calls[0][3] == 'EMERGENCY'
 
 
 # ══════════════════════════════════════════════════════════════

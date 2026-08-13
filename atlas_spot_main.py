@@ -2705,6 +2705,26 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
         # 가격 조회 불가 2분 초과 → 긴급 청산 (SL 미작동 방지)
         cached = _last_known_price.get(ccxt_sym)
         if cached and (time.time() - cached[1]) >= _PRICE_CACHE_TTL:
+            # 거래소 보호주문이 있으면 청산하지 않는다.
+            #
+            # 이 경로의 목적은 'SL이 작동하지 못하는 상태'를 막는 것인데,
+            # 거래소 스탑이 걸려 있으면 SL은 봇의 시야와 무관하게 거래소가
+            # 집행한다. 오히려 _spot_sell 은 매도 **전에 그 스탑을 취소**하므로,
+            # 이어지는 시장가 매도가 실패하면(가격 조회를 막은 그 장애로
+            # 실패하기 쉽다) 보호가 통째로 사라진 채 포지션만 남는다 —
+            # 의도와 정반대다.
+            #
+            # 시세 장애는 몇 분씩 흔하고, 하필 그때의 시장가 체결은 가장
+            # 불리하다. 보호가 있는 포지션까지 던질 이유가 없다.
+            if pos.get('sl_order_id') or pos.get('tp_order_id'):
+                if _stop_alert_due(strategy, symbol):
+                    log.warning(f'[{strategy}/{symbol}] 가격 조회 불가 '
+                                f'{_PRICE_CACHE_TTL}s 초과 — 거래소 보호주문이 '
+                                f'있어 긴급 청산 보류(SL은 거래소가 집행)')
+                    _tg(f'⚠️ [{strategy}/{symbol}] 시세 조회 불가 — 봇이 가격을 '
+                        f'보지 못합니다.\n'
+                        f'   거래소 손절이 걸려 있어 청산하지 않고 대기합니다.')
+                return
             log.error(f'[{strategy}/{symbol}] 가격 조회 불가 {_PRICE_CACHE_TTL}s 초과 — 긴급 청산')
             _tg(f'🚨 [{strategy}/{symbol}] 가격 조회 불가 — 긴급 청산')
             _spot_sell(strategy, symbol, ccxt_sym, pos, entry * 0.99, 'EMERGENCY')
