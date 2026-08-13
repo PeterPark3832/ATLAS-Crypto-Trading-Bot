@@ -40,8 +40,13 @@ SSH_USER     = os.getenv('VULTR_USER', 'root')
 SSH_KEY_PATH = os.getenv('VULTR_KEY_PATH', '')
 SSH_PASSWORD = os.getenv('VULTR_PASSWORD', '')
 
-REMOTE_DB_PATH  = os.getenv('REMOTE_DB_PATH',  '/root/ATLAS/state/atlas_spot.db')
-REMOTE_LOG_DIR  = os.getenv('REMOTE_LOG_DIR',  '/root/ATLAS/logs')
+# 기본값은 **실제 배포 경로**여야 한다. 예전 기본값(/root/ATLAS/...)은 서버에
+# 존재하지 않는 경로라, REMOTE_DB_PATH 를 .env에 적지 않으면 모든 조회가
+# `[Errno 2] No such file` 로 죽었다 — 도구 전체가 동작 불가였다.
+# (주간 리포트가 죽은 DB 경로를 보던 것과 같은 부류다)
+REMOTE_DIR      = os.getenv('REMOTE_DIR', '/root/atlas_spot')
+REMOTE_DB_PATH  = os.getenv('REMOTE_DB_PATH',  f'{REMOTE_DIR}/state/atlas_spot.db')
+REMOTE_LOG_DIR  = os.getenv('REMOTE_LOG_DIR',  f'{REMOTE_DIR}/logs')
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 
 mcp = FastMCP("ATLAS Spot")

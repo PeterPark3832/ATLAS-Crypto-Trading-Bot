@@ -224,3 +224,36 @@ class TestGetErrorLogs:
         result = ms.get_error_logs(n=3)
         assert 'err9' in result
         assert 'err6' not in result
+
+
+class TestRemotePathDefaults:
+    """기본 경로가 실제 배포 위치를 가리켜야 한다.
+
+    예전 기본값은 /root/ATLAS/... 였는데 서버의 실제 경로는
+    /root/atlas_spot/... 이다. REMOTE_DB_PATH 를 .env에 적지 않으면 모든
+    조회가 `[Errno 2] No such file` 로 죽어 **도구 전체가 동작 불가**였다.
+    실제로 그 상태였고, MCP 도구를 호출해 보고서야 드러났다.
+    (주간 리포트가 죽은 DB 경로를 보던 것과 같은 부류)
+    """
+
+    def test_db_default_points_to_deployed_path(self):
+        assert ms.REMOTE_DB_PATH.startswith('/root/atlas_spot/'), (
+            f'배포 경로가 아니다: {ms.REMOTE_DB_PATH}')
+        assert ms.REMOTE_DB_PATH.endswith('state/atlas_spot.db')
+
+    def test_log_default_points_to_deployed_path(self):
+        assert ms.REMOTE_LOG_DIR == '/root/atlas_spot/logs', ms.REMOTE_LOG_DIR
+
+    def test_paths_share_one_root(self, monkeypatch):
+        """배포 위치가 바뀌면 REMOTE_DIR 하나로 함께 움직여야 한다."""
+        import importlib
+        monkeypatch.setenv('REMOTE_DIR', '/opt/atlas')
+        monkeypatch.delenv('REMOTE_DB_PATH', raising=False)
+        monkeypatch.delenv('REMOTE_LOG_DIR', raising=False)
+        m = importlib.reload(ms)
+        try:
+            assert m.REMOTE_DB_PATH == '/opt/atlas/state/atlas_spot.db'
+            assert m.REMOTE_LOG_DIR == '/opt/atlas/logs'
+        finally:
+            monkeypatch.delenv('REMOTE_DIR', raising=False)
+            importlib.reload(ms)
