@@ -1,0 +1,371 @@
+{
+ "S3/BTCUSDT/favourable": {
+  "diag": {
+   "cooldown_skip": 8,
+   "entries": 4,
+   "exits": 4,
+   "total_bars": 699
+  },
+  "n": 4,
+  "trades": [
+   {
+    "bars": [
+     271,
+     288
+    ],
+    "cost": 1129.88,
+    "entry": 178.13254162,
+    "exit": 160.64766794,
+    "hold_h": 68.0,
+    "pnl_r": -1.109,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   },
+   {
+    "bars": [
+     312,
+     342
+    ],
+    "cost": 1080.05,
+    "entry": 189.84144658,
+    "exit": 170.53490426,
+    "hold_h": 120.0,
+    "pnl_r": -1.1109,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   },
+   {
+    "bars": [
+     362,
+     370
+    ],
+    "cost": 1018.47,
+    "entry": 197.95317834,
+    "exit": 238.16397565,
+    "hold_h": 32.0,
+    "pnl_r": 2.1165,
+    "reason": "TP",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   },
+   {
+    "bars": [
+     617,
+     627
+    ],
+    "cost": 998.96,
+    "entry": 594.12681666,
+    "exit": 718.00156041,
+    "hold_h": 40.0,
+    "pnl_r": 2.0871,
+    "reason": "TP",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   }
+  ]
+ },
+ "S3/DOTUSDT/mixed": {
+  "diag": {
+   "cooldown_skip": 4,
+   "entries": 2,
+   "exits": 2,
+   "regime_block": 480,
+   "total_bars": 699
+  },
+  "n": 2,
+  "trades": [
+   {
+    "bars": [
+     469,
+     486
+    ],
+    "cost": 1054.73,
+    "entry": 217.81929512,
+    "exit": 201.61299689,
+    "hold_h": 68.0,
+    "pnl_r": -0.7847,
+    "reason": "CROSS",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   },
+   {
+    "bars": [
+     571,
+     589
+    ],
+    "cost": 994.31,
+    "entry": 196.51661472,
+    "exit": 176.76998748,
+    "hold_h": 72.0,
+    "pnl_r": -1.0072,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   }
+  ]
+ },
+ "S4/ATOMUSDT/empty": {
+  "diag": {
+   "regime_block": 699,
+   "total_bars": 699
+  },
+  "n": 0,
+  "trades": []
+ },
+ "S4/ETHUSDT/favourable": {
+  "diag": {
+   "entries": 2,
+   "exits": 2,
+   "total_bars": 699
+  },
+  "n": 2,
+  "trades": [
+   {
+    "bars": [
+     44,
+     56
+    ],
+    "cost": 772.03,
+    "entry": 124.58053121,
+    "exit": 138.96844083,
+    "hold_h": 288.0,
+    "pnl_r": 1.486,
+    "reason": "TP",
+    "regime": "TRENDING_DOWN",
+    "risk": 0.006
+   },
+   {
+    "bars": [
+     242,
+     247
+    ],
+    "cost": 1513.13,
+    "entry": 238.28799069,
+    "exit": 214.43679691,
+    "hold_h": 120.0,
+    "pnl_r": -1.0027,
+    "reason": "SL",
+    "regime": "RANGING",
+    "risk": 0.0149735893
+   }
+  ]
+ },
+ "S4/XRPUSDT/mixed": {
+  "diag": {
+   "entries": 1,
+   "exits": 1,
+   "regime_block": 331,
+   "total_bars": 699
+  },
+  "n": 1,
+  "trades": [
+   {
+    "bars": [
+     150,
+     155
+    ],
+    "cost": 1500.0,
+    "entry": 165.5301891,
+    "exit": 184.51351618,
+    "hold_h": 120.0,
+    "pnl_r": 1.4631,
+    "reason": "TP",
+    "regime": "RANGING",
+    "risk": 0.0117572824
+   }
+  ]
+ },
+ "S5/BNBUSDT/favourable": {
+  "diag": {
+   "cooldown_skip": 8,
+   "entries": 7,
+   "exits": 7,
+   "total_bars": 699
+  },
+  "n": 7,
+  "trades": [
+   {
+    "bars": [
+     40,
+     44
+    ],
+    "cost": 1500.0,
+    "entry": 123.93200292,
+    "exit": 116.78689433,
+    "hold_h": 96.0,
+    "pnl_r": -1.0133,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.0085348467
+   },
+   {
+    "bars": [
+     91,
+     94
+    ],
+    "cost": 1486.59,
+    "entry": 134.4232912,
+    "exit": 127.02183576,
+    "hold_h": 72.0,
+    "pnl_r": -1.0139,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.0081456382
+   },
+   {
+    "bars": [
+     147,
+     159
+    ],
+    "cost": 1473.88,
+    "entry": 165.61032959,
+    "exit": 179.74311683,
+    "hold_h": 288.0,
+    "pnl_r": 1.5378,
+    "reason": "TIME",
+    "regime": "RANGING",
+    "risk": 0.0083241514
+   },
+   {
+    "bars": [
+     196,
+     208
+    ],
+    "cost": 1492.29,
+    "entry": 228.2476811,
+    "exit": 260.36059756,
+    "hold_h": 288.0,
+    "pnl_r": 2.7198,
+    "reason": "TIME",
+    "regime": "WEAK_TREND",
+    "risk": 0.0077592969
+   },
+   {
+    "bars": [
+     292,
+     299
+    ],
+    "cost": 1523.3,
+    "entry": 365.84098786,
+    "exit": 346.42552256,
+    "hold_h": 168.0,
+    "pnl_r": -1.0145,
+    "reason": "SL",
+    "regime": "RANGING",
+    "risk": 0.007846894
+   },
+   {
+    "bars": [
+     338,
+     344
+    ],
+    "cost": 1510.73,
+    "entry": 393.78840164,
+    "exit": 370.90988072,
+    "hold_h": 144.0,
+    "pnl_r": -1.0132,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.0086016584
+   },
+   {
+    "bars": [
+     397,
+     406
+    ],
+    "cost": 1497.12,
+    "entry": 475.70180797,
+    "exit": 547.36473921,
+    "hold_h": 216.0,
+    "pnl_r": 3.1682,
+    "reason": "TP",
+    "regime": "RANGING",
+    "risk": 0.0071324239
+   }
+  ]
+ },
+ "S5/LINKUSDT/mixed": {
+  "diag": {
+   "cooldown_skip": 2,
+   "entries": 1,
+   "exits": 1,
+   "regime_block": 331,
+   "total_bars": 699
+  },
+  "n": 1,
+  "trades": [
+   {
+    "bars": [
+     493,
+     497
+    ],
+    "cost": 1500.0,
+    "entry": 630.19439488,
+    "exit": 599.84298859,
+    "hold_h": 96.0,
+    "pnl_r": -1.0161,
+    "reason": "SL",
+    "regime": "WEAK_TREND",
+    "risk": 0.0071099841
+   }
+  ]
+ },
+ "S6/ADAUSDT/mixed": {
+  "diag": {
+   "regime_block": 331,
+   "total_bars": 699
+  },
+  "n": 0,
+  "trades": []
+ },
+ "S6/AVAXUSDT/empty": {
+  "diag": {
+   "entries": 1,
+   "exits": 1,
+   "total_bars": 699
+  },
+  "n": 1,
+  "trades": [
+   {
+    "bars": [
+     104,
+     109
+    ],
+    "cost": 1249.11,
+    "entry": 150.77422903,
+    "exit": 170.47374974,
+    "hold_h": 120.0,
+    "pnl_r": 1.632,
+    "reason": "TP",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   }
+  ]
+ },
+ "S6/SOLUSDT/favourable": {
+  "diag": {
+   "entries": 1,
+   "exits": 1,
+   "total_bars": 699
+  },
+  "n": 1,
+  "trades": [
+   {
+    "bars": [
+     253,
+     258
+    ],
+    "cost": 1313.78,
+    "entry": 324.26865697,
+    "exit": 367.67646805,
+    "hold_h": 120.0,
+    "pnl_r": 1.7587,
+    "reason": "TP",
+    "regime": "WEAK_TREND",
+    "risk": 0.01
+   }
+  ]
+ }
+}

@@ -182,3 +182,33 @@ class TestCharacterization:
         """SL/TP/CROSS/TIME이 골고루 나와야 청산 경로가 실제로 고정된다."""
         reasons = {t['reason'] for v in _run_all().values() for t in v['trades']}
         assert len(reasons) >= 2, f'청산 사유가 {reasons} 뿐 — 경로 커버리지 부족'
+
+
+class TestSnapshotIsVersioned:
+    """스냅샷이 저장소에 없으면 이 테스트 파일 전체가 무의미해진다.
+
+    test_matches_snapshot 은 파일이 없으면 새로 만들고 **skip** 한다.
+    즉 스냅샷이 커밋되지 않으면 CI는 매번 새로 만들고 건너뛰므로,
+    백테스트 동작이 바뀌어도 아무도 모른다 — 잠금 장치가 죽은 채로
+    초록 불만 켜진다.
+
+    실제로 그런 상태였다. .gitignore 의 `data/` 패턴이 (선행 슬래시가 없어)
+    모든 깊이에서 매칭돼 tests/data/ 까지 무시했고, 스냅샷은 한 번도
+    커밋되지 않았다.
+    """
+
+    def test_snapshots_are_not_gitignored(self):
+        import subprocess
+        for snap in (SNAPSHOT,
+                     SNAPSHOT.parent / 'metrics_snapshot.json'):
+            r = subprocess.run(['git', 'check-ignore', str(snap)],
+                               capture_output=True, text=True,
+                               cwd=str(Path(__file__).parent.parent))
+            assert r.returncode != 0, (
+                f'{snap.name} 이 .gitignore로 무시된다 — 커밋되지 않으면 '
+                f'CI에서 특성화 테스트가 조용히 skip 되어 잠금이 풀린다')
+
+    def test_snapshot_file_exists(self):
+        assert SNAPSHOT.exists(), (
+            '스냅샷이 없으면 test_matches_snapshot 이 생성 후 skip 한다 — '
+            '동작 변화를 감지하지 못한다')

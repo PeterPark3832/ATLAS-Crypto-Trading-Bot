@@ -265,3 +265,61 @@ class TestKnownGaps:
         assert '포트폴리오 제약' in src, (
             '백테스트가 모델링하지 못하는 제약(동시 포지션 수, 슬롯당 자본, '
             'USDT 예비금)이 문서화돼 있어야 한다')
+
+
+class TestS5SlCooldownParity:
+    """라이브의 S5 손절 쿨다운이 백테스트에도 있어야 한다.
+
+    라이브(_s5_safety_block)는 S5가 손절로 나간 종목에 2일간 재진입하지
+    않는다 — 평균회귀는 '더 싸졌으니 또 산다'가 되기 쉬워, 같은 하락에
+    연속으로 맞기 때문이다.
+
+    백테스트가 이 규칙을 무시하면 **라이브가 절대 하지 않는 거래**로 성과를
+    평가하게 된다. 막는 이유가 '나쁜 거래'이므로 편향은 비관 쪽이고,
+    S5는 지금 OOS 기준 미달로 재최적화 대상이라 판정이 뒤집힐 수 있다.
+    """
+
+    @pytest.fixture
+    def s5_always_sl(self, monkeypatch):
+        """진입하면 곧 손절되는 S5 신호 — 재진입 간격만 본다."""
+        def _sig(df, i):
+            close = float(df['close'].iloc[i])
+            return {'signal': 1, 'sl': close * 0.97, 'tp': close * 1.20,
+                    'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 0}
+        monkeypatch.setitem(bt.SIGNAL_FUNCS, 'S5', _sig)
+        monkeypatch.setitem(bt.CALC_FUNCS, 'S5', bt.CALC_FUNCS['S3'])
+
+    def _s5(self, rows):
+        return bt.backtest_strategy('S5', 'BTCUSDT', rows, {},
+                                    '2021-01-01', '2022-12-31', risk_pct=0.02)
+
+    def test_no_reentry_on_bar_right_after_sl(self, s5_always_sl):
+        trades, _ = self._s5(_falling_ohlcv())
+        sl_bars = {t.exit_bar for t in trades if t.reason == 'SL'}
+        entries = [t.entry_bar for t in trades]
+        violations = [b for b in entries
+                      if any(0 < b - x <= cfg.S5_SL_COOLDOWN_BARS for x in sl_bars)]
+        assert not violations, (
+            f'손절 후 {cfg.S5_SL_COOLDOWN_BARS}봉 이내 재진입 {len(violations)}건 — '
+            f'라이브는 막는 거래다')
+
+    def test_cooldown_constant_is_shared(self):
+        """상수를 복제하면 한쪽만 바뀌어 조용히 어긋난다."""
+        src = Path(bt.__file__).read_text(encoding='utf-8')
+        assert 'S5_SL_COOLDOWN_BARS' in src, (
+            '백테스트가 라이브와 같은 상수를 참조해야 한다')
+
+    def test_non_sl_exit_does_not_trigger_cooldown(self, s5_always_sl, monkeypatch):
+        """쿨다운은 **손절 후에만** 건다 — 익절까지 막으면 과도 제약이다."""
+        def _tp_sig(df, i):
+            close = float(df['close'].iloc[i])
+            return {'signal': 1, 'sl': close * 0.80, 'tp': close * 1.005,
+                    'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 0}
+        monkeypatch.setitem(bt.SIGNAL_FUNCS, 'S5', _tp_sig)
+        trades, _ = self._s5(_flat_ohlcv())
+        tp_trades = [t for t in trades if t.reason == 'TP']
+        if len(tp_trades) >= 2:
+            gaps = [b.entry_bar - a.exit_bar
+                    for a, b in zip(tp_trades, tp_trades[1:])]
+            assert min(gaps) <= cfg.S5_SL_COOLDOWN_BARS, (
+                '익절 후에도 쿨다운이 걸려 진입 기회를 과도하게 막는다')

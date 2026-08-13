@@ -61,7 +61,7 @@ from atlas_spot_config import (
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
     REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
-    S3_COOLDOWN,
+    S3_COOLDOWN, S5_SL_COOLDOWN_BARS,
 )
 from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
@@ -680,7 +680,7 @@ def backtest_strategy(
     learn_at             = None   # 마지막 학습 시각(시뮬레이션 시계)
     learn_cfg = _bt_learn_config() if SPOT_LEARN_ENABLED else None
     position = None      # 현재 포지션 dict or None
-    cooldown = 0         # 쿨다운 카운터 (S3용)
+    cooldown = 0         # 쿨다운 카운터 (S3 청산 후 / S5 손절 후)
     diag     = defaultdict(int)
     diag['total_bars'] = 0
 
@@ -749,6 +749,15 @@ def backtest_strategy(
                 position = None
                 if strategy_id == 'S3':
                     cooldown = S3_COOLDOWN
+                elif strategy_id == 'S5' and reason == 'SL':
+                    # 라이브 패리티: _s5_safety_block 의 SL 쿨다운.
+                    # 평균회귀는 '더 싸졌으니 또 산다'가 되기 쉬워, 손절 직후
+                    # 같은 종목에 재진입하면 같은 하락에 연속으로 맞는다.
+                    # 라이브는 이 재진입을 막는데 백테스트가 세면, **라이브가
+                    # 절대 하지 않는 거래**로 성과를 평가하게 된다.
+                    # (막는 이유가 '나쁜 거래'이므로 편향은 비관 쪽이다 —
+                    #  S5는 지금 OOS 기준 미달로 재최적화 대상이라 특히 중요)
+                    cooldown = S5_SL_COOLDOWN_BARS
                 diag['exits'] += 1
                 continue
 
