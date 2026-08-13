@@ -154,3 +154,53 @@ class TestNoCommittedCredentials:
             text = p.read_text(encoding='utf-8', errors='ignore')
             assert not re.search(r'https://[^\s/]*:[^\s/]*@github\.com', text), (
                 f'{name}에 자격증명이 박힌 remote URL 예시가 있다')
+
+
+class TestAccessLogRedactsToken:
+    """접근 로그에 토큰이 평문으로 남으면 안 된다.
+
+    토큰은 쿼리스트링으로 전달되므로 uvicorn 접근 로그에 그대로 기록된다.
+    유효기간이 24시간이라, 로그를 읽을 수 있는 사람은 그동안 로그인 없이
+    대시보드를 열 수 있다 — 봇 중지·재시작 권한까지 포함된다.
+    실제로 운영 서버의 logs/dashboard.log 에 유효한 토큰이 쌓여 있었고,
+    로그는 회전·압축되며 백업에도 함께 담기므로 노출 경로가 넓다.
+    """
+
+    def _record(self, path):
+        import logging
+        return logging.LogRecord(
+            'uvicorn.access', logging.INFO, __file__, 1,
+            '%s - "%s %s HTTP/%s" %d',
+            ('1.2.3.4:5', 'GET', path, '1.1', 200), None)
+
+    def test_token_is_redacted(self):
+        rec = self._record('/api/dashboard?token=deadbeefcafe1234&period=0')
+        assert wd._RedactToken().filter(rec) is True
+        assert 'deadbeefcafe1234' not in rec.args[2]
+        assert '<redacted>' in rec.args[2]
+
+    def test_other_params_survive(self):
+        """가리기가 과해서 진단에 필요한 정보까지 지우면 안 된다."""
+        rec = self._record('/api/dashboard?token=secret123&period=30')
+        wd._RedactToken().filter(rec)
+        assert 'period=30' in rec.args[2]
+        assert '/api/dashboard' in rec.args[2]
+
+    def test_path_without_token_untouched(self):
+        rec = self._record('/api/status')
+        wd._RedactToken().filter(rec)
+        assert rec.args[2] == '/api/status'
+
+    def test_malformed_record_does_not_crash(self):
+        """로그 필터가 예외를 내면 요청 처리까지 깨진다."""
+        import logging
+        rec = logging.LogRecord('uvicorn.access', logging.INFO, __file__, 1,
+                                'no args', None, None)
+        assert wd._RedactToken().filter(rec) is True
+
+    def test_filter_is_installed(self):
+        """정의만 하고 붙이지 않으면 아무 효과가 없다."""
+        import logging
+        assert any(isinstance(f, wd._RedactToken)
+                   for f in logging.getLogger('uvicorn.access').filters), \
+            'uvicorn.access 로거에 리댁션 필터가 붙어 있지 않다'

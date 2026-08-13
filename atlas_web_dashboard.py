@@ -4,6 +4,7 @@ uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
 import io
 import os
+import re
 import time
 import json
 import secrets
@@ -63,6 +64,33 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+
+
+class _RedactToken(logging.Filter):
+    """접근 로그에서 token 질의문자열을 가린다.
+
+    토큰은 쿼리스트링으로 전달되므로 uvicorn 접근 로그에 **평문 그대로**
+    남는다. 유효기간이 24시간이라, 로그를 읽을 수 있는 사람은 그동안
+    로그인 없이 대시보드를 열 수 있다(봇 중지·재시작 권한 포함).
+    실제로 logs/dashboard.log 에 유효한 토큰이 쌓여 있었다.
+
+    로그는 회전·압축되며 백업에도 함께 담기므로 노출 경로가 넓다.
+    API 계약을 바꾸지 않고 기록 시점에만 가린다.
+    """
+
+    _PAT = re.compile(r'(token=)[^&\s"]+')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        # uvicorn.access 포맷: (client, method, full_path, http_version, status)
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) \
+                and 'token=' in args[2]:
+            record.args = (args[:2] + (self._PAT.sub(r'\1<redacted>', args[2]),)
+                           + args[3:])
+        return True
+
+
+logging.getLogger('uvicorn.access').addFilter(_RedactToken())
 
 if not os.getenv('DASH_PASSWORD'):
     log.warning('DASH_PASSWORD 미설정 — 무작위 비밀번호가 생성되어 사실상 로그인 불가 '
