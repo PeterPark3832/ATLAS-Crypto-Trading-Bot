@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+import atlas_rules as rules
 import atlas_spot_main as sm
 
 
@@ -37,9 +38,10 @@ def _temp_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def _on(monkeypatch):
-    monkeypatch.setattr(sm, 'SPOT_TRAIL_ENABLED', True)
-    monkeypatch.setattr(sm, 'SPOT_TRAIL_ACTIVATE_R', 1.0)
-    monkeypatch.setattr(sm, 'SPOT_TRAIL_MULT', 1.0)
+    # trailing_sl 이 atlas_rules 로 이사해 호출 시점 조회처도 rules 전역이다
+    monkeypatch.setattr(rules, 'SPOT_TRAIL_ENABLED', True)
+    monkeypatch.setattr(rules, 'SPOT_TRAIL_ACTIVATE_R', 1.0)
+    monkeypatch.setattr(rules, 'SPOT_TRAIL_MULT', 1.0)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -53,7 +55,7 @@ class TestDisabledByDefault:
             '검증 전 기본 활성화는 실계좌 매매를 바꾸는 것이다')
 
     def test_no_movement_when_disabled(self, monkeypatch):
-        monkeypatch.setattr(sm, 'SPOT_TRAIL_ENABLED', False)
+        monkeypatch.setattr(rules, 'SPOT_TRAIL_ENABLED', False)
         # 진입 100, SL 95(=1R 5), 가격이 130까지 갔어도 SL 불변
         assert sm.trailing_sl(100.0, 95.0, 130.0, 5.0) == 95.0
 
@@ -82,11 +84,11 @@ class TestTrailingRule:
         assert sm.trailing_sl(100.0, 112.0, 106.0, 5.0) == 112.0
 
     def test_mult_widens_trail(self, _on, monkeypatch):
-        monkeypatch.setattr(sm, 'SPOT_TRAIL_MULT', 2.0)
+        monkeypatch.setattr(rules, 'SPOT_TRAIL_MULT', 2.0)
         assert sm.trailing_sl(100.0, 95.0, 120.0, 5.0) == pytest.approx(110.0)
 
     def test_activate_threshold_respected(self, _on, monkeypatch):
-        monkeypatch.setattr(sm, 'SPOT_TRAIL_ACTIVATE_R', 2.0)
+        monkeypatch.setattr(rules, 'SPOT_TRAIL_ACTIVATE_R', 2.0)
         assert sm.trailing_sl(100.0, 95.0, 109.9, 5.0) == 95.0     # +2R 미만
         assert sm.trailing_sl(100.0, 95.0, 110.0, 5.0) == pytest.approx(105.0)
 
@@ -320,8 +322,8 @@ class TestBacktestEffect:
 
         monkeypatch.setitem(bt.SIGNAL_FUNCS, 'S3', stub)
         monkeypatch.setitem(bt.EXIT_CHECK_FUNCS, 'S3', None)
-        monkeypatch.setattr(bt, 'SPOT_TRAIL_ENABLED', enabled)
-        monkeypatch.setattr(sm, 'SPOT_TRAIL_ENABLED', enabled)
+        monkeypatch.setattr(bt, 'SPOT_TRAIL_ENABLED', enabled)     # bt 자체 게이트
+        monkeypatch.setattr(rules, 'SPOT_TRAIL_ENABLED', enabled)  # trailing_sl 조회처
         trades, _ = bt.backtest_strategy('S3', 'BTCUSDT', rows, {},
                                          '2021-01-01', '2022-12-31', risk_pct=0.02)
         return trades
@@ -348,6 +350,22 @@ class TestBacktestParity:
     def test_shares_same_rule_function(self):
         import atlas_spot_backtest as bt
         assert bt.trailing_sl is sm.trailing_sl, '규칙이 두 벌이면 패리티가 깨진다'
+        assert bt.trailing_sl is rules.trailing_sl, (
+            '단일 출처는 atlas_rules 다 — 어느 쪽이든 복제본이 생기면 안 된다')
+
+    def test_backtest_import_has_no_live_side_effects(self):
+        """backtest 를 import해도 atlas_spot_main 이 실행되면 안 된다.
+
+        예전에는 backtest:70 이 main 에서 trailing_sl 을 가져와, 백테스트·
+        리포트·최적화기가 import만 해도 라이브 봇의 로그 핸들러 설치·mkdir·
+        캐시 생성을 물려받았다. atlas_rules 로 결합을 끊은 것이 이 테스트의
+        보호 대상이다. (여기서는 소스 검사 — 프로세스 격리 검증은 무겁다)
+        """
+        import atlas_spot_backtest as bt
+        src = Path(bt.__file__).read_text(encoding='utf-8')
+        assert 'from atlas_spot_main import' not in src, (
+            'backtest 가 다시 main 에 결합됐다 — import 부수효과가 되살아난다')
+        assert 'import atlas_spot_main' not in src
 
     def test_backtest_reads_same_flag(self):
         import atlas_spot_backtest as bt

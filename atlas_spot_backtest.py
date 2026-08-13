@@ -67,7 +67,10 @@ from atlas_spot_config import (
 from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
 )
-from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
+# 추적 손절 규칙 단일 출처(라이브와 공유). atlas_rules 는 leaf 라서
+# 이 import 는 부수효과가 없다 — 예전처럼 atlas_spot_main 을 거치면
+# 백테스트를 import만 해도 라이브 봇의 로그 핸들러·mkdir가 실행됐다.
+from atlas_rules import trailing_sl
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
 from atlas_regime import classify_regime, REGIME_BTC_LOOKBACK

@@ -42,6 +42,7 @@ atlas_bootstrap.load_env(__file__)   # config import 전 — raw os.getenv 순�
 
 from atlas_notify import send_telegram   # noqa: E402
 
+import atlas_rules as _rules_mod
 import atlas_spot_backtest as _bt_mod
 import atlas_spot_main as _live_mod
 import atlas_spot_strategies as strat
@@ -161,10 +162,13 @@ def _param_targets(key: str) -> tuple:
     """이 파라미터를 어느 모듈에 써야 하는가.
 
     전략 진입 상수는 atlas_spot_strategies 전역이지만, 추적 손절 같은
-    **실행 규칙**은 라이브(atlas_spot_main)와 백테스트 양쪽 전역에 있다.
-    한쪽만 바꾸면 검증이 실제 동작과 어긋난다.
+    **실행 규칙**은 여러 모듈 전역에 흩어져 있다. 한쪽만 바꾸면 검증이
+    실제 동작과 어긋난다. atlas_rules(공유 규칙 leaf)가 여기 포함돼야
+    trailing_sl 의 호출 시점 조회(SPOT_TRAIL_*)까지 치환된다 — 함수가
+    main 에서 rules 로 이사하면서 __globals__ 도 함께 옮겨갔기 때문이다.
     """
-    mods = tuple(m for m in (strat, _live_mod, _bt_mod) if hasattr(m, key))
+    mods = tuple(m for m in (strat, _live_mod, _bt_mod, _rules_mod)
+                 if hasattr(m, key))
     return mods
 
 

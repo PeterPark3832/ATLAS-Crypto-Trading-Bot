@@ -99,14 +99,24 @@ class TestGlobalParamOverride:
     """추적 손절 같은 **실행 규칙**은 전략 모듈이 아니라 라이브·백테스트
     양쪽 전역에 있다. 한쪽만 바꾸면 검증이 실제 동작과 어긋난다."""
 
-    def test_patches_both_live_and_backtest(self):
+    def test_patches_every_holder_of_the_flag(self):
+        """SPOT_TRAIL_ENABLED 를 실제로 읽는 모든 모듈이 함께 치환돼야 한다.
+
+        trailing_sl 이 atlas_rules 로 이사하면서 호출 시점 조회처는
+        rules 전역이 됐고, 백테스트의 peak 갱신 게이트는 여전히 bt 전역을
+        읽는다. 한쪽만 바꾸면 '켰다고 믿는데 절반만 켜진' 검증이 된다.
+        (main 은 이제 이 플래그를 읽지 않으므로 보유하지 않는 것이 맞다)
+        """
+        import atlas_rules as rules
         import atlas_spot_backtest as bt
         import atlas_spot_main as sm
-        before = (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        assert not hasattr(sm, 'SPOT_TRAIL_ENABLED'), (
+            'main 이 다시 플래그를 들면 override 대상이 조용히 갈라진다')
+        before = (rules.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
         with ro.override_params({'SPOT_TRAIL_ENABLED': True}):
-            assert sm.SPOT_TRAIL_ENABLED is True
+            assert rules.SPOT_TRAIL_ENABLED is True
             assert bt.SPOT_TRAIL_ENABLED is True
-        assert before == (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        assert before == (rules.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
 
     def test_strategy_constants_still_work(self):
         before = ro.strat.S3_ADX_MIN
@@ -129,8 +139,8 @@ class TestGlobalParamOverride:
     def test_current_params_reads_right_module(self):
         cur = ro.current_params('S3')
         assert 'SPOT_TRAIL_ENABLED' in cur
-        import atlas_spot_main as sm
-        assert cur['SPOT_TRAIL_ENABLED'] == sm.SPOT_TRAIL_ENABLED
+        import atlas_rules as rules
+        assert cur['SPOT_TRAIL_ENABLED'] == rules.SPOT_TRAIL_ENABLED
 
 
 class TestPlateauExclusion:

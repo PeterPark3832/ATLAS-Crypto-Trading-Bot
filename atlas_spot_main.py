@@ -60,7 +60,6 @@ from atlas_spot_config import (
     SPOT_LOG_MAX_BYTES, SPOT_LOG_BACKUPS, SPOT_CAPITAL_FLOW_PCT,
     SPOT_MAX_COST_PER_R, SPOT_ASSUMED_SLIP_PCT, SPOT_DEFAULT_SPREAD_PCT,
     SPOT_EDGE_MIN_TRADES,
-    SPOT_TRAIL_ENABLED, SPOT_TRAIL_ACTIVATE_R, SPOT_TRAIL_MULT,
     SPOT_TRAIL_REARM_FRAC,
     SPOT_MAX_POSITIONS, SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
     SPOT_RESERVE_PCT, SPOT_DAILY_LOSS_LIMIT, SPOT_MIN_ORDER_USDT, SPOT_MAX_SL_PCT,
@@ -90,6 +89,7 @@ from atlas_spot_config import (
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
     S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
 )
+from atlas_rules import trailing_sl   # 라이브·백테스트 공유 규칙 (leaf) — 재수출 겸용
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
 from atlas_regime import (
@@ -1653,21 +1653,13 @@ def _detect_fee_rate() -> float:
     return _fee_rate['taker']
 
 
-def trailing_sl(entry: float, cur_sl: float, peak: float,
-                sl_dist: float) -> float:
-    """추적 손절 계산. 순수 함수 — 라이브/백테스트가 공유한다.
-
-    peak가 entry + sl_dist × ACTIVATE_R 를 넘은 뒤부터
-    `peak − sl_dist × TRAIL_MULT` 로 손절을 따라 올린다(내리지 않음).
-    SL 거리를 기준으로 하므로 심볼·변동성에 무관하게 스케일이 맞고,
-    ACTIVATE_R = TRAIL_MULT 이면 활성화 시점이 자연스럽게 본전 이동이 된다.
-    """
-    if not SPOT_TRAIL_ENABLED or sl_dist <= 0:
-        return cur_sl
-    if peak < entry + sl_dist * SPOT_TRAIL_ACTIVATE_R:
-        return cur_sl                       # 아직 활성화 전
-    return max(cur_sl, peak - sl_dist * SPOT_TRAIL_MULT)
-
+# trailing_sl 은 atlas_rules 로 이사했다(라이브·백테스트 공유 규칙의 leaf
+# 거처 — 백테스트가 이 모듈을 import하며 로그 핸들러·mkdir 부수효과까지
+# 물려받던 결합을 끊기 위함). 여기 재바인딩은 함수 객체 동일성을 유지한다:
+# bt.trailing_sl is sm.trailing_sl (tests/test_trailing_stop.py 가 고정).
+# ⚠️ SPOT_TRAIL_ENABLED 등 추적 상수의 호출 시점 조회처도 atlas_rules 로
+#    옮겨갔다 — 오버라이드/패치는 atlas_rules 모듈에 해야 효과가 있다
+#    (reoptimize._param_targets 튜플에 반영됨).
 
 _NO_TRADE_ALERT_HOURS = 6      # 이 시간 넘게 전 전략이 막히면 알린다
 
