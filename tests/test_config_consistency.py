@@ -90,3 +90,69 @@ class TestMainUsesDefaultList:
     def test_live_strategies_derived_from_regime_map(self):
         from atlas_spot_config import LIVE_STRATEGIES
         assert set(LIVE_STRATEGIES) == _mapped_strategies()
+
+
+# ══════════════════════════════════════════════════════════════
+#  죽은 설정 상수 래칫
+# ══════════════════════════════════════════════════════════════
+
+# 운영 코드가 참조하지 않는 config 상수 — **의도적으로 남겨둔 것만** 여기 적는다.
+# 각 항목에 이유를 붙여, 새로 죽은 상수가 생기면 눈에 띄게 한다.
+KNOWN_UNREFERENCED = {
+    'BASE_DIR':               'config 내부에서 경로 조립에 쓰인다(파생 상수)',
+    'BT_SPOT_SLIPPAGE':       '티어 폴백용이었으나 _get_slippage의 tier3가 catch-all이라 도달하지 않는다',
+    'S2_EXIT_TYPE':           'S2는 라우팅에서 빠진 연구용 전략',
+    'S5_EXIT_TYPE':           'S5 청산은 _manage_position이 BB 상단을 실시간 갱신해 처리한다',
+    'SPOT_MIN_ALLOC_PCT':     '최소 배분 하한 — 현재는 SPOT_MIN_ORDER_USDT가 그 역할을 한다',
+    'UNIVERSE_QUOTE_CURRENCY': '유니버스 필터가 USDT를 직접 쓴다',
+}
+
+
+def _config_constants() -> set:
+    import re
+    src = (Path(__file__).parent.parent / 'atlas_spot_config.py').read_text(encoding='utf-8')
+    return set(re.findall(r'^([A-Z][A-Z0-9_]{3,})\s*=', src, re.M))
+
+
+def _production_blob() -> str:
+    root = Path(__file__).parent.parent
+    return '\n'.join(p.read_text(encoding='utf-8') for p in root.glob('*.py')
+                     if p.name != 'atlas_spot_config.py')
+
+
+class TestNoNewDeadConstants:
+    """설정 상수가 운영 코드에서 참조되지 않으면 **그 설정은 동작하지 않는다**.
+
+    이 저장소는 실제로 이 부류로 크게 당했다 — 죽은 상수 9개가 "값을 바꿔도
+    거래가 그대로"인 상태를 만들었고(d8f8e38), ruff의 미사용 import 경고
+    하나에서 실마리가 잡혔다. 상수는 import되지 않으면 경고조차 안 나므로
+    별도 래칫이 필요하다.
+
+    새 상수를 넣고 배선을 잊으면 여기서 잡힌다. 의도적으로 남기는 것이라면
+    KNOWN_UNREFERENCED 에 **이유와 함께** 등록해야 한다.
+    """
+
+    def test_no_unlisted_dead_constants(self):
+        import re
+        blob = _production_blob()
+        dead = sorted(n for n in _config_constants()
+                      if not re.search(rf'\b{n}\b', blob))
+        unexpected = [n for n in dead if n not in KNOWN_UNREFERENCED]
+        assert not unexpected, (
+            f'운영 코드가 참조하지 않는 새 설정 상수: {unexpected}\n'
+            f'  배선을 잊었다면 그 설정은 아무 효과가 없다. 의도적이라면 '
+            f'KNOWN_UNREFERENCED 에 이유와 함께 등록할 것.')
+
+    def test_ratchet_is_not_stale(self):
+        """이미 배선된 상수가 목록에 남아 있으면 래칫이 헐거워진다."""
+        import re
+        blob = _production_blob()
+        stale = sorted(n for n in KNOWN_UNREFERENCED
+                       if re.search(rf'\b{n}\b', blob))
+        assert not stale, (
+            f'이제 참조되는 상수가 예외 목록에 남아 있다: {stale} — 목록에서 뺄 것')
+
+    def test_listed_constants_still_exist(self):
+        """이름이 바뀌거나 삭제된 항목이 목록에 남으면 의미가 없다."""
+        missing = sorted(set(KNOWN_UNREFERENCED) - _config_constants())
+        assert not missing, f'config에 없는 상수가 목록에 있다: {missing}'
