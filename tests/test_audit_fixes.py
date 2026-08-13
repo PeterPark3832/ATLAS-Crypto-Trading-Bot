@@ -709,3 +709,62 @@ class TestSellDetectsStopFillFirst:
         monkeypatch.setattr(sm, '_handle_stop_order_state', _boom)
         sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
         assert sm._load_position('S3', 'BTCUSDT') is None
+
+
+class TestSellFailureAlertThrottle:
+    """매도 실패는 포지션이 남아 **주기마다 반복**된다.
+
+    잔고 부족이 아닌 오류(거래정지·상장폐지·레이트리밋)면 청산이 계속
+    실패하고 포지션도 그대로 남는다. 관리 주기가 5분이므로 매번 알리면
+    하루 288건이 되어, 오늘 겪은 보호주문 알림 폭주와 같은 상황이 된다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_stop_alert_at', {})
+
+    def _tg_spy(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        return sent
+
+    def test_repeated_failure_alerts_once(self, _state, _ex, monkeypatch):
+        sent = self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0}
+        for _ in range(5):
+            pos = _save_pos(qty=10.0)
+            _ex.sell_errors = [Exception('Market is closed')]
+            sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        fails = [m for m in sent if '매도 실패' in m]
+        assert len(fails) == 1, f'5회 실패에 알림 {len(fails)}건 — 주기마다 반복 발송'
+
+    def test_kinds_do_not_suppress_each_other(self):
+        """성격이 다른 사건은 서로를 가리면 안 된다.
+
+        하나의 키를 공유하면 보호주문 실패 알림이 매도 실패 알림을
+        삼킨다(또는 그 반대) — 더 중요한 쪽이 조용히 사라질 수 있다.
+        """
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'stop') is True
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'sell_fail') is True, (
+            '다른 종류의 알림이 억제됐다')
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'stop') is False
+
+    def test_other_symbol_not_suppressed(self, _state, _ex, monkeypatch):
+        sent = self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0, 'ETH': 10.0}
+        for sym, cs in (('BTCUSDT', 'BTC/USDT'), ('ETHUSDT', 'ETH/USDT')):
+            pos = _save_pos(symbol=sym, qty=10.0)
+            _ex.sell_errors = [Exception('Market is closed')]
+            sm._spot_sell('S3', sym, cs, pos, 105.0, 'CROSS')
+        assert len([m for m in sent if '매도 실패' in m]) == 2
+
+    def test_log_still_records_every_failure(self, _state, _ex, monkeypatch, caplog):
+        """알림은 줄이되 로그는 매번 남아야 추적이 가능하다."""
+        self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0}
+        with caplog.at_level('ERROR'):
+            for _ in range(3):
+                pos = _save_pos(qty=10.0)
+                _ex.sell_errors = [Exception('Market is closed')]
+                sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert len([r for r in caplog.records if '매도 실패' in r.message]) == 3

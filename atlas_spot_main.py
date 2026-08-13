@@ -625,14 +625,18 @@ def _min_sell_price(ccxt_sym: str) -> float:
     return mult * px if px > 0 else 0.0
 
 
-def _stop_alert_due(strategy: str, symbol: str) -> bool:
-    """이 포지션의 보호주문 실패를 지금 알릴 차례인가.
+def _stop_alert_due(strategy: str, symbol: str, kind: str = 'stop') -> bool:
+    """이 포지션의 **kind 종류** 실패를 지금 알릴 차례인가.
 
     실패는 재시도 주기(5분)마다 반복되므로 매번 보내면 하루 288건이 된다.
     실제로 ONEUSDT 한 종목이 하루 119건을 보냈고, 그 탓에 정작 중요한
     알림이 묻혔다.
+
+    kind로 종류를 나누는 이유: 하나의 키를 공유하면 보호주문 실패 알림이
+    매도 실패 알림을 가린다(또는 그 반대). 성격이 다른 사건은 서로를
+    억제하면 안 된다.
     """
-    key  = (strategy, symbol)
+    key  = (strategy, symbol, kind)
     now  = time.time()
     if now - _stop_alert_at.get(key, 0.0) < _STOP_ALERT_INTERVAL:
         return False
@@ -2254,7 +2258,11 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
         except Exception as e:
             err_str = str(e).lower()
             log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
-            _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
+            # 잔고 부족이 아닌 오류(거래정지·상장폐지·레이트리밋 등)면 포지션이
+            # 남고, 다음 관리 주기(5분)마다 같은 청산 판정 → 같은 실패 →
+            # 같은 알림이 반복된다. 로그는 매번 남기되 알림만 간격을 둔다.
+            if _stop_alert_due(strategy, symbol, 'sell_fail'):
+                _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
             # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
             if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
                 # 잔고가 없는 **가장 흔한 이유는 거래소 보호주문이 먼저

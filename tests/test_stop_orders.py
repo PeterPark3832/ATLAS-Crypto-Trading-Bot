@@ -215,7 +215,9 @@ class TestStopAlertThrottle:
     def test_alerts_again_after_interval(self, monkeypatch):
         sm._stop_alert_due('S5', 'ONEUSDT')
         aged = time.time() - sm._STOP_ALERT_INTERVAL - 1
-        monkeypatch.setitem(sm._stop_alert_at, ('S5', 'ONEUSDT'), aged)
+        # 키에 종류(kind)가 포함된다 — 성격이 다른 알림이 서로를 가리지
+        # 않도록 분리했다(예: 보호주문 실패 vs 매도 실패).
+        monkeypatch.setitem(sm._stop_alert_at, ('S5', 'ONEUSDT', 'stop'), aged)
         assert sm._stop_alert_due('S5', 'ONEUSDT') is True
 
     def test_price_band_hold_leaves_a_log_trace(self, _fake_ex, _temp_db,
