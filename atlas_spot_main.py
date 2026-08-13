@@ -592,6 +592,54 @@ def _cancel_orphan_sell_orders(strategy: str, symbol: str, ccxt_sym: str,
         return current_free
 
 
+_ppbs_mult: dict = {}                 # ccxt_sym → askMultiplierDown (심볼 필터는 거의 안 바뀐다)
+_stop_alert_at: dict = {}             # (strategy, symbol) → 마지막 실패 알림 시각
+_STOP_ALERT_INTERVAL = 6 * 3600       # 같은 포지션의 실패 알림 재발송 간격(초)
+
+
+def _min_sell_price(ccxt_sym: str) -> float:
+    """PERCENT_PRICE_BY_SIDE 가 허용하는 **최저 매도 주문가**. 0이면 제한 없음/불명.
+
+    바이낸스는 현재가에서 너무 먼 주문을 거부한다(매도는 askMultiplierDown,
+    보통 0.9 = 평균가의 -10%까지). 변동성 큰 소형 코인에서 ATR 기반 손절이
+    이 범위를 넘으면 주문이 **영원히** 거부된다.
+
+    가격 의존 조건이라 NOTIONAL 미달 같은 영구 불가와는 다르다 — 가격이
+    손절선 쪽으로 내려오면 다시 등록 가능해지므로, 포기하지 않고 매 주기
+    싸게 다시 판정할 수 있도록 캐시된 값만 쓴다(추가 API 호출 없음).
+    """
+    mult = _ppbs_mult.get(ccxt_sym)
+    if mult is None:
+        mult = 0.0
+        try:
+            for f in _get_ex().market(ccxt_sym)['info']['filters']:
+                if f.get('filterType') == 'PERCENT_PRICE_BY_SIDE':
+                    mult = float(f.get('askMultiplierDown') or 0)
+                    break
+        except Exception as e:
+            log.debug(f'[{ccxt_sym}] PERCENT_PRICE_BY_SIDE 조회 실패: {e}')
+        _ppbs_mult[ccxt_sym] = mult
+    if mult <= 0:
+        return 0.0
+    px = _get_price(ccxt_sym)
+    return mult * px if px > 0 else 0.0
+
+
+def _stop_alert_due(strategy: str, symbol: str) -> bool:
+    """이 포지션의 보호주문 실패를 지금 알릴 차례인가.
+
+    실패는 재시도 주기(5분)마다 반복되므로 매번 보내면 하루 288건이 된다.
+    실제로 ONEUSDT 한 종목이 하루 119건을 보냈고, 그 탓에 정작 중요한
+    알림이 묻혔다.
+    """
+    key  = (strategy, symbol)
+    now  = time.time()
+    if now - _stop_alert_at.get(key, 0.0) < _STOP_ALERT_INTERVAL:
+        return False
+    _stop_alert_at[key] = now
+    return True
+
+
 def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
                            qty: float, sl_price: float) -> str:
     """거래소에 STOP_LOSS_LIMIT 매도 주문 등록. 실패 시 '' 반환(소프트웨어 SL 폴백)."""
@@ -603,6 +651,13 @@ def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
         log.info(f'[{strategy}] {symbol} 스탑주문 생략: NOTIONAL 미달 '
                  f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
         return ''
+    # 거부가 확실한 주문은 보내지 않는다 — API·레이트리밋 낭비이고,
+    # 실패 경고가 5분마다 쌓여 로그와 텔레그램을 뒤덮는다.
+    floor = _min_sell_price(ccxt_sym)
+    if floor > 0 and limit_price < floor:
+        log.info(f'[{strategy}] {symbol} 스탑주문 생략: 거래소 가격범위 밖 '
+                 f'(지정가 {limit_price:.8g} < 허용 하한 {floor:.8g}) — 소프트웨어 SL 작동')
+        return ''
     try:
         order = _get_ex().create_order(
             ccxt_sym, 'limit', 'sell', qty, limit_price,
@@ -613,7 +668,8 @@ def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
         return order_id
     except Exception as e:
         log.warning(f'[{strategy}] {symbol} 스탑주문 등록 실패(소프트웨어 SL로 폴백): {e}')
-        _tg(f'⚠️ [{strategy}] {symbol} 거래소 스탑주문 실패 — 소프트웨어 SL만 작동: {e}')
+        if _stop_alert_due(strategy, symbol):
+            _tg(f'⚠️ [{strategy}] {symbol} 거래소 스탑주문 실패 — 소프트웨어 SL만 작동: {e}')
         return ''
 
 
@@ -631,6 +687,14 @@ def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
     if qty <= 0 or qty * limit_price < SPOT_MIN_ORDER_USDT:
         log.info(f'[{strategy}] {symbol} 보호주문 생략: NOTIONAL 미달 '
                  f'(${qty * limit_price:.2f} < ${SPOT_MIN_ORDER_USDT})')
+        return '', ''
+    # 손절 지정가가 거래소 허용 범위(PERCENT_PRICE_BY_SIDE) 밖이면 OCO도
+    # 스탑 단독도 모두 거부된다. 두 번 실패하며 경고를 두 줄 남기는 대신
+    # 여기서 한 번에 걸러 낸다.
+    floor = _min_sell_price(ccxt_sym)
+    if floor > 0 and limit_price < floor:
+        log.info(f'[{strategy}] {symbol} 보호주문 생략: 거래소 가격범위 밖 '
+                 f'(지정가 {limit_price:.8g} < 허용 하한 {floor:.8g}) — 소프트웨어 SL 작동')
         return '', ''
     if SPOT_EXCHANGE_OCO and tp_price and tp_price > 0:
         try:
@@ -2408,6 +2472,22 @@ def _rearm_missing_protection(strategy: str, symbol: str, ccxt_sym: str,
                 f'최소치(${SPOT_MIN_ORDER_USDT:.0f}) 미만입니다.\n'
                 f'   소프트웨어 SL만 작동합니다(봇이 멈추면 손절되지 않음).')
         _rearm_attempts[key] = (now + _REARM_GIVEUP, max(cnt, 1))
+        return
+    # 손절가가 거래소 허용 가격범위(PERCENT_PRICE_BY_SIDE) 밖인 경우.
+    # NOTIONAL 미달과 달리 **가격에 따라 변하는** 조건이라 영구 포기하면 안 된다 —
+    # 가격이 손절선 쪽으로 내려오면 등록이 가능해지고, 그때가 정확히 보호가
+    # 필요한 순간이다. 판정은 캐시된 값만 쓰므로 매 주기 다시 봐도 싸다.
+    # 다만 사유는 사람이 알아야 하므로 간격을 두고 한 번씩만 알린다.
+    floor = _min_sell_price(ccxt_sym)
+    sl_lim = float(pos['sl']) * (1 - SPOT_STOP_LIMIT_GAP)
+    if floor > 0 and sl_lim < floor:
+        if _stop_alert_due(strategy, symbol):
+            gap = (floor - sl_lim) / floor * 100
+            _tg(f'ℹ️ [{strategy}] {symbol} 거래소 보호주문 보류 — 손절가가 '
+                f'거래소 허용 범위 밖입니다({gap:.1f}% 초과).\n'
+                f'   현재가가 손절선에 가까워지면 자동으로 등록됩니다.\n'
+                f'   그때까지는 소프트웨어 SL이 감시합니다.')
+        _rearm_attempts[key] = (now, cnt)
         return
     tp_for_oco = 0.0 if strategy == 'S5' else float(pos.get('tp') or 0)
     sl_id, tp_id = _place_protective_orders(strategy, symbol, ccxt_sym,

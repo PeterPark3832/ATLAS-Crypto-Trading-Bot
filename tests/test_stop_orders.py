@@ -12,6 +12,7 @@ main() 킬스위치 기동 가드를 검증합니다.
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
@@ -77,6 +78,17 @@ def _no_telegram(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_alert_throttle(monkeypatch):
+    """알림 간격 제한은 모듈 전역이라 테스트 간에 남는다.
+
+    초기화하지 않으면 앞선 테스트가 같은 (전략, 심볼)로 알림을 한 번
+    보냈다는 이유로 뒤 테스트의 알림이 조용히 억제된다.
+    """
+    monkeypatch.setattr(sm, '_stop_alert_at', {})
+    monkeypatch.setattr(sm, '_ppbs_mult', {})
+
+
+@pytest.fixture(autouse=True)
 def _temp_db(tmp_path, monkeypatch):
     db_file = tmp_path / 'test_spot.db'
     monkeypatch.setattr(sm, 'SPOT_DB_FILE', db_file)
@@ -132,6 +144,90 @@ def _trades(db_file):
 # ══════════════════════════════════════════════════════════════
 #  _place_stop_loss_order
 # ══════════════════════════════════════════════════════════════
+
+class TestPriceFilterGuard:
+    """손절가가 거래소 허용 범위 밖이면 **주문을 보내지 않는다**.
+
+    바이낸스 PERCENT_PRICE_BY_SIDE 는 현재가에서 너무 먼 매도주문을 거부한다
+    (askMultiplierDown, 보통 0.9 = -10%까지). 변동성 큰 소형 코인에서 ATR
+    기반 손절이 이 범위를 넘으면 주문이 영원히 거부된다.
+
+    실측: ONEUSDT 손절가가 현재가 대비 -11.04%(허용 -10%)라 5분마다 거부됐고,
+    실패마다 텔레그램을 보내 하루 119건이 쌓였다. 정작 중요한 알림이 묻혔다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_ppbs_mult', {})
+        monkeypatch.setattr(sm, '_stop_alert_at', {})
+        monkeypatch.setattr(sm, '_get_price', lambda s: 0.00081)
+
+    def _with_filter(self, ex, mult='0.9'):
+        ex.market_info = {'info': {'filters': [
+            {'filterType': 'PERCENT_PRICE_BY_SIDE', 'askMultiplierDown': mult}]}}
+        ex.market = lambda sym: ex.market_info
+
+    def test_skips_order_outside_price_band(self, _fake_ex, _no_telegram):
+        """허용 하한 미만이면 API를 아예 호출하지 않는다."""
+        self._with_filter(_fake_ex)
+        _fake_ex.free_balance = {'ONE': 15486.3}
+        oid = sm._place_stop_loss_order('S5', 'ONEUSDT', 'ONE/USDT',
+                                        15486.3, 0.0007205714285714285)
+        assert oid == ''
+        assert not [c for c in _fake_ex.calls if c[0] == 'create_order'], (
+            '거부가 확실한 주문을 보내 레이트리밋을 낭비하고 경고를 쌓는다')
+        assert not _no_telegram, '보류는 실패가 아니므로 매번 알리면 안 된다'
+
+    def test_places_order_inside_price_band(self, _fake_ex):
+        """범위 안이면 정상 등록된다 — 가드가 과하게 막지 않는지."""
+        self._with_filter(_fake_ex)
+        _fake_ex.free_balance = {'ONE': 15486.3}
+        oid = sm._place_stop_loss_order('S5', 'ONEUSDT', 'ONE/USDT',
+                                        15486.3, 0.00079)
+        assert oid == 'STOP-1'
+
+    def test_no_filter_means_no_restriction(self, _fake_ex):
+        """필터를 못 읽으면 기존대로 시도한다(기능을 조용히 끄지 않는다)."""
+        _fake_ex.market = lambda sym: {'info': {'filters': []}}
+        _fake_ex.free_balance = {'ONE': 15486.3}
+        assert sm._place_stop_loss_order('S5', 'ONEUSDT', 'ONE/USDT',
+                                         15486.3, 0.0007) == 'STOP-1'
+
+
+class TestStopAlertThrottle:
+    """실패 알림은 포지션별로 간격을 둔다 — 5분 재시도 × 무제한 = 하루 288건."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_stop_alert_at', {})
+
+    def test_first_alert_passes(self):
+        assert sm._stop_alert_due('S5', 'ONEUSDT') is True
+
+    def test_repeat_suppressed(self):
+        sm._stop_alert_due('S5', 'ONEUSDT')
+        assert sm._stop_alert_due('S5', 'ONEUSDT') is False
+
+    def test_other_position_not_suppressed(self):
+        sm._stop_alert_due('S5', 'ONEUSDT')
+        assert sm._stop_alert_due('S6', 'ADAUSDT') is True
+
+    def test_alerts_again_after_interval(self, monkeypatch):
+        sm._stop_alert_due('S5', 'ONEUSDT')
+        aged = time.time() - sm._STOP_ALERT_INTERVAL - 1
+        monkeypatch.setitem(sm._stop_alert_at, ('S5', 'ONEUSDT'), aged)
+        assert sm._stop_alert_due('S5', 'ONEUSDT') is True
+
+    def test_failure_alert_is_throttled(self, _fake_ex, _no_telegram):
+        """실제 실패 경로에서도 반복 알림이 나가지 않아야 한다."""
+        _fake_ex.market = lambda sym: {'info': {'filters': []}}
+        _fake_ex.free_balance = {'ONE': 15486.3}
+        _fake_ex.create_order_result = RuntimeError('Filter failure: PERCENT_PRICE_BY_SIDE')
+        for _ in range(5):
+            sm._place_stop_loss_order('S5', 'ONEUSDT', 'ONE/USDT', 15486.3, 0.0007)
+        assert len(_no_telegram) == 1, (
+            f'5회 실패에 알림 {len(_no_telegram)}건 — 재시도마다 보내면 하루 288건')
+
 
 class TestSellableQtyClampsToBalance:
     """기록 수량이 실제 보유량보다 많으면 보호주문이 영원히 실패한다.
