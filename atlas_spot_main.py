@@ -3043,6 +3043,23 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                 db_qty   = float(pos['qty_tokens'])
 
                 if actual < 1e-8:
+                    # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문 체결**이다.
+                    # 확인하지 않고 MANUAL_SOLD로 적으면 두 가지가 함께 틀어진다:
+                    #   · 사유가 SL/TP가 아니라 MANUAL_SOLD로 남는다
+                    #   · 체결가를 몰라 '현재가'로 추정한다(그 사이 가격이 움직인다)
+                    # 이 통계는 Kelly 사이징과 전략 건강도(net PF)에 그대로 들어가므로
+                    # 오염되면 배분 판단까지 흔들린다.
+                    # 전략 루프가 쓰는 판정 함수를 먼저 태운다 — 체결을 찾으면
+                    # 실제 체결가와 올바른 사유로 기록하고 포지션까지 정리한다.
+                    # (검증 루프가 5분 주기 전략 루프보다 먼저 도는 경합에서 발생)
+                    if pos.get('sl_order_id') or pos.get('tp_order_id'):
+                        try:
+                            if _handle_stop_order_state(
+                                    strategy, sym, sym.replace('USDT', '/USDT'), pos):
+                                continue
+                        except Exception as e:
+                            log.warning(f'[검증] {sym} 보호주문 체결 확인 실패 '
+                                        f'— 수동매도 경로로 진행: {e}')
                     # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
                     _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')

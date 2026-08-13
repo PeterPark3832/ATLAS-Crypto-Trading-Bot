@@ -353,6 +353,83 @@ class _FakeBalanceExchange:
         return self._balances
 
 
+class TestReconcilePrefersActualFill:
+    """잔고 0의 가장 흔한 이유는 **거래소 보호주문 체결**이다.
+
+    확인하지 않고 MANUAL_SOLD로 적으면 사유(SL/TP)와 체결가가 모두 틀어진다.
+    체결가를 몰라 '현재가'로 추정하는데, 체결과 검증 사이에 가격이 움직인다.
+    이 통계는 Kelly 사이징과 전략 건강도(net PF)에 그대로 들어가므로 오염되면
+    배분 판단까지 흔들린다. 실제로 라이브 42건 중 6건이 MANUAL_SOLD로 남았고,
+    그중 하나는 pnl_r +1.31로 익절처럼 보였다.
+
+    검증 루프가 5분 주기 전략 루프보다 먼저 도는 경합에서 발생한다.
+    """
+
+    def _pos(self, sl_id='STOP-9'):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        sm._update_position_order_id('S4', 'BTCUSDT', sl_id)
+
+    def test_filled_stop_recorded_as_sl_with_real_price(self, monkeypatch,
+                                                        _no_telegram):
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        # 거래소에는 체결 정보가 남아 있다 — 실제 체결가 92.5
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'closed', 'filled': 10.0,
+                                          'average': 92.5})
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)   # 그 사이 반등
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1
+        assert rows[0]['reason'] == 'SL', (
+            f"체결된 손절이 {rows[0]['reason']}로 기록됐다 — 사유 통계 오염")
+        assert rows[0]['exit_price'] == pytest.approx(92.5), (
+            '현재가(105)로 추정해 손익이 왜곡됐다 — 실제 체결가는 92.5')
+
+    def test_falls_back_to_manual_when_order_not_filled(self, monkeypatch,
+                                                        _no_telegram):
+        """진짜 수동매도(주문 미체결)면 기존 경로를 그대로 탄다."""
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'open'})
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert rows[0]['reason'] == 'MANUAL_SOLD'
+
+    def test_order_lookup_failure_still_cleans_up(self, monkeypatch, _no_telegram):
+        """체결 확인이 불가능해도 포지션이 DB에 남아 떠돌면 안 된다."""
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+
+        def _boom(strategy, symbol, ccxt_sym, pos):
+            raise RuntimeError('조회 불가')
+        monkeypatch.setattr(sm, '_handle_stop_order_state', _boom)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        assert sm._load_position('S4', 'BTCUSDT') is None
+
+    def test_no_order_id_skips_lookup(self, monkeypatch, _no_telegram):
+        """추적 주문이 없으면 조회 없이 기존 경로로 간다(불필요한 API 호출 방지)."""
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        called = []
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_handle_stop_order_state',
+                            lambda *a: called.append(1) or False)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        assert called == []
+
+
 class TestPositionReconcileLoop:
     def test_no_positions_does_nothing(self, monkeypatch, _no_telegram):
         ev = _OneShotEvent()
