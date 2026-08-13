@@ -48,6 +48,7 @@ from atlas_spot_config import (
     WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
     SPOT_MAX_POSITIONS, SPOT_EQUITY_PER_SLOT, SPOT_DB_FILE,
+    BT_INITIAL_EQ,
 )
 from atlas_spot_universe import get_backtest_universe
 
@@ -258,6 +259,11 @@ def main() -> int:
     ap.add_argument('--no-tg', action='store_true', help='텔레그램 없이 콘솔만')
     ap.add_argument('--strategies', default='', help='쉼표구분 전략 (기본: LIVE_STRATEGIES)')
     ap.add_argument('--data-dir', default=str(SPOT_DATA_DIR), help='OHLCV CSV 캐시 경로')
+    ap.add_argument('--equity', type=float, default=None,
+                    help='백테스트 초기 자본. 기본값은 BT_INITIAL_EQ($10,000)이라 '
+                         '거래소 최소주문금액($5)이 걸리지 않는다. 실계좌 규모를 '
+                         '넣으면 "이 자본으로 실제 실행 가능한가"를 본다. '
+                         "'live'를 주면 봇이 기록한 현재 자산을 쓴다.")
     args = ap.parse_args()
 
     if args.no_tg:
@@ -271,10 +277,13 @@ def main() -> int:
     now      = datetime.now(timezone.utc)
     oos_end  = now.strftime('%Y-%m-%d')
 
-    print(f'[WFO] 전략 {strategies} · 심볼 {len(symbols)}개 · data_dir={data_dir}')
+    bt_equity = args.equity if args.equity and args.equity > 0 else BT_INITIAL_EQ
+    print(f'[WFO] 전략 {strategies} · 심볼 {len(symbols)}개 · data_dir={data_dir} '
+          f'· 초기자본 ${bt_equity:,.0f}')
     try:
         wf_results = run_walk_forward(strategies, symbols, data_dir=data_dir,
-                                      rolling=args.rolling)
+                                      rolling=args.rolling,
+                                      initial_equity=bt_equity)
     except Exception as e:
         tg(f'🧪 ATLAS WFO 월간 리포트\n❌ 실행 실패: {e}')
         traceback.print_exc()

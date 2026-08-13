@@ -377,3 +377,51 @@ class TestFundingParity:
         assert bt.FUNDING_LONG_BLOCK is cfg.FUNDING_LONG_BLOCK
         assert bt.FUNDING_SHORT_BOOST is cfg.FUNDING_SHORT_BOOST
         assert bt.FUNDING_APPLY_STRATS is cfg.FUNDING_APPLY_STRATS
+
+
+class TestNotionalParity:
+    """거래소 최소 주문금액(NOTIONAL)을 백테스트도 반영해야 한다.
+
+    라이브 `_spot_buy` 는 cost_usdt < SPOT_MIN_ORDER_USDT($5) 이면 진입을
+    막는다 — 주문 자체가 거부되기 때문이다. 백테스트는 이 상수를 아예
+    참조하지 않았다.
+
+    기본 자본($10,000)에서는 주문이 수백 달러라 바닥이 걸리지 않아 오랫동안
+    드러나지 않았다. 그러나 실계좌는 $565이고, 사이징 진단은 레짐별 주문금액을
+    $3.26~$10.81로 보고했다 — 하락장 담당 S4는 $3.26으로 아예 진입 불가다.
+    모델링하지 않으면 WFO는 **그 계좌가 실행할 수 없는 조합**을 검증하게 된다.
+    """
+
+    def test_tiny_equity_blocks_entries(self, always_signal):
+        """자본이 작으면 주문이 최소금액에 못 미쳐 진입이 막힌다."""
+        always_signal(0.03)
+        trades, diag = bt.backtest_strategy(
+            'S3', 'BTCUSDT', _flat_ohlcv(), {}, '2021-01-01', '2022-12-31',
+            risk_pct=0.02, initial_equity=50.0)
+        assert diag.get('notional_block', 0) > 0, (
+            '자본 $50에서 주문이 $5 미만인데 진입이 체결됐다 — '
+            '라이브가 거부할 거래로 성과를 계산한다')
+
+    def test_normal_equity_unaffected(self, always_signal):
+        """기본 자본에서는 바닥이 걸리지 않아 기존 동작 그대로다."""
+        always_signal(0.03)
+        _, diag = _run()
+        assert diag.get('notional_block', 0) == 0
+
+    def test_constant_shared_with_live(self):
+        assert bt.SPOT_MIN_ORDER_USDT is cfg.SPOT_MIN_ORDER_USDT
+
+    def test_no_recorded_trade_is_below_minimum(self, always_signal):
+        """미체결은 진입이 아니다 — 거래로 세면 통계가 오염된다.
+
+        자본이 줄면 주문금액도 줄어드는데, 바닥 미만인 주문이 거래로
+        기록되면 라이브가 거부했을 체결로 성과를 계산하게 된다.
+        """
+        always_signal(0.03)
+        trades, _ = bt.backtest_strategy(
+            'S3', 'BTCUSDT', _flat_ohlcv(), {}, '2021-01-01', '2022-12-31',
+            risk_pct=0.02, initial_equity=50.0)
+        tiny = [t for t in trades if t.cost_usdt < cfg.SPOT_MIN_ORDER_USDT]
+        assert not tiny, (
+            f'최소주문금액(${cfg.SPOT_MIN_ORDER_USDT}) 미만 거래 {len(tiny)}건이 '
+            f'기록됐다 — 최소 {min(t.cost_usdt for t in tiny):.2f}')

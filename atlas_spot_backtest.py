@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (
     BT_SPOT_FEE, BT_INITIAL_EQ,
     BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
-    SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
+    SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT, SPOT_MIN_ORDER_USDT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
     SPOT_MAX_SL_PCT, SPOT_MAX_COST_PER_R,
@@ -993,6 +993,19 @@ def backtest_strategy(
             qty       = cost_usdt / entry_price
             adj_risk_pct = (qty * sl_dist) / equity
 
+        # 거래소 최소 주문금액(NOTIONAL) — 라이브 `_spot_buy` 패리티.
+        # 한도 축소 **이후**에 본다(라이브와 같은 순서). 미달이면 주문 자체가
+        # 거부되므로 진입이 아니라 미체결이다.
+        #
+        # 기본 자본($10,000)에서는 주문이 수백 달러라 이 바닥이 걸리지 않아
+        # 오랫동안 드러나지 않았다. 그러나 소액 계좌에서는 상시로 걸린다 —
+        # 실계좌 $565 기준 사이징 진단이 레짐별 주문금액을 $3.26~$10.81로
+        # 보고했고, 하락장 담당 S4는 $3.26으로 아예 진입 불가였다.
+        # 모델링하지 않으면 WFO는 **그 계좌가 실행할 수 없는 조합**을 검증한다.
+        if cost_usdt < SPOT_MIN_ORDER_USDT:
+            diag['notional_block'] = diag.get('notional_block', 0) + 1
+            continue
+
         fee_cost = cost_usdt * BT_SPOT_FEE
         equity  -= fee_cost  # 매수 수수료
 
@@ -1075,6 +1088,7 @@ def run_spot_backtest(
     end_date:    str,
     data_dir:    Optional[Path] = None,
     risk_pct:    float = SPOT_BASE_RISK_PCT,
+    initial_equity: float = BT_INITIAL_EQ,
 ) -> dict:
     """
     전략 × 심볼 조합 전체 백테스트.
@@ -1153,11 +1167,11 @@ def run_spot_backtest(
                 continue
             trades, diag = backtest_strategy(
                 strategy_id, sym, ohlcv, regime_map,
-                start_date, end_date, risk_pct,
+                start_date, end_date, risk_pct, initial_equity,
                 rank_map=rank_map or None,
                 funding_map=funding_maps.get(sym) or None,
             )
-            metrics = calc_spot_metrics(trades, BT_INITIAL_EQ, start_date, end_date)
+            metrics = calc_spot_metrics(trades, initial_equity, start_date, end_date)
             results[strategy_id][sym] = {
                 'trades':  [asdict(t) for t in trades],
                 'metrics': metrics,
@@ -1172,7 +1186,7 @@ def run_spot_backtest(
             print(f'    {sym:<14} {n:>4}건  PnL {pnl:+6.1f}%  WR {wr:.0f}%')
 
         # 전략 합산 지표
-        combined = calc_spot_metrics(all_trades, BT_INITIAL_EQ, start_date, end_date)
+        combined = calc_spot_metrics(all_trades, initial_equity, start_date, end_date)
         results[strategy_id]['_combined'] = combined
         print(f'  → 합계: {len(all_trades)}건  '
               f'PnL {combined.get("total_pnl_pct", 0):+.1f}%  '
@@ -1197,6 +1211,7 @@ def run_walk_forward(
     symbols:     list[str],
     data_dir:    Optional[Path] = None,
     rolling:     bool = False,
+    initial_equity: float = BT_INITIAL_EQ,
 ) -> dict:
     """
     IS(2021~2023) / OOS(2024~현재) Walk-Forward 검증.
@@ -1223,7 +1238,8 @@ def run_walk_forward(
 
     for label, start, end in splits:
         print(f'\n[Walk-Forward] {label}: {start} ~ {end}')
-        res = run_spot_backtest(strategies, symbols, start, end, data_dir)
+        res = run_spot_backtest(strategies, symbols, start, end, data_dir,
+                                initial_equity=initial_equity)
         wf_results[label] = {
             sid: res[sid].get('_combined', {}) for sid in strategies
         }
