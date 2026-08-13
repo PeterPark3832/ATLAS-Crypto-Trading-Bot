@@ -320,6 +320,6 @@ class TestS5SlCooldownParity:
         tp_trades = [t for t in trades if t.reason == 'TP']
         if len(tp_trades) >= 2:
             gaps = [b.entry_bar - a.exit_bar
-                    for a, b in zip(tp_trades, tp_trades[1:])]
+                    for a, b in zip(tp_trades, tp_trades[1:], strict=False)]
             assert min(gaps) <= cfg.S5_SL_COOLDOWN_BARS, (
                 '익절 후에도 쿨다운이 걸려 진입 기회를 과도하게 막는다')
