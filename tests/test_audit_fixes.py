@@ -646,3 +646,66 @@ class TestSavePositionFailure:
         sig = {'sl': 95.0, 'tp': 110.0, 'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 10}
         assert sm._spot_buy('S3', 'BTCUSDT', 'BTC/USDT', sig, 100.0, 'TRENDING_UP') is True
         assert sm._load_position('S3', 'BTCUSDT') is not None
+
+
+class TestSellDetectsStopFillFirst:
+    """잔고 부족의 가장 흔한 이유는 **거래소 보호주문이 먼저 체결된 것**이다.
+
+    _spot_sell 은 매도 전에 스탑을 취소하지만, 이미 체결된 주문의 취소 실패는
+    조용히 무시된다(_cancel_stop_order). 그래서 스탑이 먼저 체결된 상황이
+    여기까지 흘러와 '잔고 없음 → MANUAL_SOLD'로 기록됐다.
+
+    그러면 사유(SL/TP)와 체결가가 모두 틀어지고, 그 통계가 Kelly·전략
+    건강도의 입력이 된다. 검증 루프(_position_reconcile_loop)에서 고친 것과
+    같은 결함이 매도 경로에도 있었다.
+    """
+
+    def test_filled_stop_recorded_as_sl_not_manual(self, _state, _ex, monkeypatch):
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}            # 스탑이 이미 다 팔았다
+        _ex.sell_errors = [Exception('Account has insufficient balance for requested action')]
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'closed', 'filled': 10.0,
+                                          'average': 94.5})
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+
+        rows = _trades()
+        assert len(rows) == 1
+        assert rows[0]['reason'] == 'SL', (
+            f"체결된 손절이 {rows[0]['reason']}로 기록됐다 — 사유 통계 오염")
+        assert rows[0]['exit_price'] == pytest.approx(94.5), (
+            '추정가(105)로 적혀 손익이 왜곡됐다 — 실제 체결가는 94.5')
+        assert sm._load_position('S3', 'BTCUSDT') is None
+
+    def test_open_stop_falls_back_to_existing_path(self, _state, _ex, monkeypatch):
+        """스탑이 체결되지 않았으면 기존 경로를 그대로 탄다."""
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+        monkeypatch.setattr(sm, '_fetch_stop_order', lambda c, o: {'status': 'open'})
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        rows = _trades()
+        assert len(rows) == 1 and rows[0]['reason'] == 'MANUAL_SOLD'
+
+    def test_no_stop_id_skips_lookup(self, _state, _ex, monkeypatch):
+        """추적 주문이 없으면 조회하지 않는다(불필요한 API 호출 방지)."""
+        called = []
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: called.append(1) or None)
+        pos = _save_pos(qty=10.0)
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert called == []
+
+    def test_lookup_failure_still_cleans_up(self, _state, _ex, monkeypatch):
+        """체결 확인이 불가능해도 포지션이 DB에 남아 떠돌면 안 된다."""
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+
+        def _boom(strategy, symbol, ccxt_sym, position):
+            raise RuntimeError('조회 불가')
+        monkeypatch.setattr(sm, '_handle_stop_order_state', _boom)
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert sm._load_position('S3', 'BTCUSDT') is None

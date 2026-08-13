@@ -2213,6 +2213,19 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 # 구분하지 않으면 살아있는 포지션을 허위 MANUAL_SOLD로 지운다.
                 _actual_free = _cancel_orphan_sell_orders(strategy, symbol, ccxt_sym,
                                                           _base_asset, _actual_free)
+            if _actual_free <= 0.0 and (pos.get('sl_order_id') or pos.get('tp_order_id')):
+                # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문이 먼저 체결된
+                # 것**이다. 이 함수는 매도 전에 스탑을 취소하지만, 이미 체결된
+                # 주문의 취소 실패는 조용히 무시되므로(_cancel_stop_order)
+                # 여기까지 흘러온다. 확인하지 않고 MANUAL_SOLD로 적으면 사유
+                # (SL/TP)와 체결가가 모두 틀어지고, 그 통계가 Kelly·전략
+                # 건강도의 입력이 된다(검증 루프에서 고친 것과 같은 결함).
+                try:
+                    if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
+                        return
+                except Exception as _e_chk:
+                    log.warning(f'[{strategy}] {symbol} 보호주문 체결 확인 실패 '
+                                f'— 수동매도 경로로 진행: {_e_chk}')
             if _actual_free <= 0.0:
                 _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
                 log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
@@ -2244,6 +2257,19 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
             # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
             if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
+                # 잔고가 없는 **가장 흔한 이유는 거래소 보호주문이 먼저
+                # 체결된 것**이다. 이 함수는 매도 전에 스탑을 취소하지만,
+                # 이미 체결된 주문의 취소 실패는 조용히 무시되므로 여기까지
+                # 온다. 확인하지 않고 MANUAL_SOLD로 적으면 사유(SL/TP)와
+                # 체결가가 모두 틀어지고, 그 통계가 Kelly·전략 건강도에
+                # 그대로 들어간다(검증 루프에서 고친 것과 같은 결함).
+                if pos.get('sl_order_id') or pos.get('tp_order_id'):
+                    try:
+                        if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
+                            return
+                    except Exception as _e_chk:
+                        log.warning(f'[{strategy}] {symbol} 보호주문 체결 확인 실패 '
+                                    f'— 수동매도 경로로 진행: {_e_chk}')
                 try:
                     _base = ccxt_sym.split('/')[0]
                     _bal = _get_ex().fetch_balance()
