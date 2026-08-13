@@ -35,11 +35,12 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
-from dotenv import load_dotenv
+import atlas_bootstrap
 
 sys.path.insert(0, str(Path(__file__).parent))
-load_dotenv(Path(__file__).parent / '.env')
+atlas_bootstrap.load_env(__file__)   # config import 전 — raw os.getenv 순서 보존
+
+from atlas_notify import send_telegram   # noqa: E402
 
 import atlas_spot_backtest as _bt_mod
 import atlas_spot_main as _live_mod
@@ -128,18 +129,13 @@ def _is_score(m: dict) -> float:
 
 
 def tg(msg: str) -> None:
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print(msg)
-        return
-    try:
-        requests.post(
-            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': msg},
-            timeout=15,
-        )
-    except Exception as e:
-        print(f'TG 전송 실패: {e}')
-        print(msg)
+    """텔레그램 전송 — 공통부(atlas_notify)로 위임.
+
+    TG_TOKEN을 호출 시점에 읽는 것이 계약이다 — --no-tg 가
+    `global TG_TOKEN = ''` 로 구현돼 있다(monthly_wfo_report와 동일).
+    """
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID,
+                  timeout=15, print_fallback=True, reprint_on_error=True)
 
 
 @contextmanager

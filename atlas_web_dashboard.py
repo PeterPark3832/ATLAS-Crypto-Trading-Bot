@@ -9,7 +9,6 @@ import time
 import json
 import secrets
 import shlex
-import sqlite3
 import subprocess
 import logging
 import hashlib
@@ -21,9 +20,12 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+
+import atlas_bootstrap
+from atlas_db import connect_ro, resolve_db_path
+from atlas_notify import send_telegram
 
 # 전략/레짐 표시 메타데이터는 config를 단일 출처로 사용 (수동 복사 금지 — drift 방지)
 from atlas_spot_config import (
@@ -33,9 +35,11 @@ from atlas_spot_config import (
     REGIME_DESCRIPTIONS as _REGIME_DESC,
 )
 
-load_dotenv(Path(__file__).parent / '.env')
+atlas_bootstrap.load_env(__file__)
 
-DB_FILE         = Path(__file__).parent / 'state' / 'atlas_spot.db'
+# DB 경로는 공용 해석기를 쓴다 — 죽은 DB_FILE 오버라이드 방어 포함
+# (weekly_report가 겪은 '조용한 빈 데이터' 사고의 재발 방지).
+DB_FILE         = resolve_db_path(Path(__file__).parent / 'state' / 'atlas_spot.db')
 LOG_FILE        = Path(__file__).parent / 'logs'  / 'spot_main.log'
 LOG_DIR         = Path(__file__).parent / 'logs'
 BOT_DIR         = Path(__file__).parent
@@ -230,18 +234,14 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
 
 # ── Telegram ──────────────────────────────────────────────────────
 def _tg(msg: str):
-    if not TG_TOKEN or not TG_CHAT_ID: return
-    try:
-        requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-                      data={'chat_id': TG_CHAT_ID, 'text': msg}, timeout=8)
-    except Exception as e:
-        log.error(f'TG 전송 실패: {e}')
+    # 데몬 계약: print 폴백 없이 조용히, 실패는 log.error (atlas_notify 위임)
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID, timeout=8, logger=log)
 
 # ── DB 쿼리 ──────────────────────────────────────────────────────
 def _q(sql: str, params=()) -> pd.DataFrame:
     if not DB_FILE.exists(): return pd.DataFrame()
     try:
-        con = sqlite3.connect(f'file:{DB_FILE}?mode=ro', uri=True, timeout=10)
+        con = connect_ro(DB_FILE)
         df  = pd.read_sql_query(sql, con, params=params)
         con.close()
         return df

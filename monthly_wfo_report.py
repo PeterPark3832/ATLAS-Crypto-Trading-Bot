@@ -28,19 +28,19 @@ weekly_report.py 와 동일한 배달·환경변수 규약을 따른다 (tg / .e
 import argparse
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
-from dotenv import load_dotenv
+import atlas_bootstrap
 
 sys.path.insert(0, str(Path(__file__).parent))
-load_dotenv(Path(__file__).parent / '.env')
+atlas_bootstrap.load_env(__file__)   # config import 전 — raw os.getenv 순서 보존
 
+from atlas_db import connect_ro, resolve_db_path   # noqa: E402
+from atlas_notify import send_telegram             # noqa: E402
 from atlas_spot_backtest import run_walk_forward
 from atlas_spot_config import (
     LIVE_STRATEGIES, STRATEGY_NAMES,
@@ -59,19 +59,14 @@ LATEST_PATH = SPOT_RESULTS_DIR / 'wfo_latest.json'
 
 
 def tg(msg: str) -> None:
-    """텔레그램 전송 (자격증명 없으면 print). weekly_report.tg 와 동일 규약."""
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print(msg)
-        return
-    try:
-        requests.post(
-            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': msg},
-            timeout=15,
-        )
-    except Exception as e:
-        print(f'TG 전송 실패: {e}')
-        print(msg)
+    """텔레그램 전송 — 공통부(atlas_notify)로 위임.
+
+    실패·자격증명 부재 시 print 폴백(reprint_on_error 포함)은 cron 출력에
+    리포트가 남게 하는 계약이다. TG_TOKEN을 호출 시점에 읽는 것도 계약 —
+    --no-tg 가 `global TG_TOKEN = ''` 로 구현돼 있다.
+    """
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID,
+                  timeout=15, print_fallback=True, reprint_on_error=True)
 
 
 def evaluate(wf_results: dict, strategies: list[str]) -> list[dict]:
@@ -122,7 +117,8 @@ def live_equity() -> float | None:
     $20 단위의 계단 함수라 하루 등락으로는 거의 바뀌지 않아 이 근사로 충분하다.
     """
     try:
-        con = sqlite3.connect(f'file:{SPOT_DB_FILE}?mode=ro', uri=True, timeout=10)
+        # weekly와 같은 해석기를 쓴다 — 죽은 DB_FILE 오버라이드 방어 포함.
+        con = connect_ro(resolve_db_path(SPOT_DB_FILE))
         try:
             row = con.execute(
                 "SELECT value FROM spot_config WHERE key='day_start_eq'").fetchone()
