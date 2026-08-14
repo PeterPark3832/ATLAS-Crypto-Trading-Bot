@@ -89,7 +89,7 @@ from atlas_spot_config import (
     S3_COOLDOWN, S3_COOLDOWN_WEAK,
     S5_SL_COOLDOWN_BARS, S5_BTC_CORR_SYMBOLS, S5_CORR_MAX_POS,
 )
-from atlas_rules import trailing_sl   # 라이브·백테스트 공유 규칙 (leaf) — 재수출 겸용
+from atlas_rules import base_of, to_ccxt, trailing_sl   # 라이브·백테스트 공유 규칙 (leaf) — 재수출 겸용
 from atlas_spot_universe import discover_universe, filter_tradeable, universe_refresh_loop
 from atlas_spot_strategies import CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS
 from atlas_regime import (
@@ -490,7 +490,7 @@ def _net_filled_qty(order: dict, ccxt_sym: str, requested: float) -> float:
     filled = float(order.get('filled') or requested or 0.0)
     if filled <= 0:
         return 0.0
-    base = ccxt_sym.split('/')[0].upper()
+    base = base_of(ccxt_sym).upper()
     fee_base = 0.0
     fees = list(order.get('fees') or [])
     if not fees and order.get('fee'):
@@ -526,7 +526,7 @@ def _sellable_qty(ccxt_sym: str, qty: float) -> float:
     try:
         ex   = _get_ex()
         free = float((ex.fetch_balance()['free'] or {}).get(
-            ccxt_sym.split('/')[0], 0) or 0)
+            base_of(ccxt_sym), 0) or 0)
         if 0 < free < qty:
             qty = free
         qty = float(ex.amount_to_precision(ccxt_sym, qty))
@@ -818,6 +818,68 @@ def _log_trade(strategy: str, symbol: str, entry_price: float, exit_price: float
               entry_ts, datetime.now(timezone.utc).isoformat(),
               regime, round(fee, 4), is_dry, round(slip_pct, 6)))
     return pnl_usdt - fee
+
+
+def _settle_closed_position(strategy: str, symbol: str, *, entry_price: float,
+                            exit_price: float, qty: float, cost_usdt: float,
+                            reason: str, regime: str, entry_ts: str,
+                            sl_for_r: float, slip_pct: float = 0.0,
+                            round_hold: bool = False,
+                            ) -> tuple[float, float, float, float]:
+    """포지션 정산 공통부: PnL 계산 → 포지션 삭제 → 거래 기록 → day_pnl 반영.
+
+    같은 삼중주가 다섯 곳(_spot_sell 3경로·_handle_stop_order_state·검증
+    루프)에 복사돼 있었고, 사본마다 미세하게 달랐다. 차이는 전부 파라미터로
+    보존한다 — 이 함수 도입은 행동 변화가 아니다:
+      · sl_for_r  : R배수 분모의 기준 SL. 정상 경로는 orig_sl(진입 시점
+                    위험 — 추적으로 sl이 올라가도 불변이어야 R이 안 부푼다),
+                    검증 루프 사본은 역사적으로 pos['sl']을 썼다. 어느 쪽을
+                    쓸지는 **호출측이 명시**한다 — 발산을 침묵 속에 통일하면
+                    그게 곧 행동 변경이다(별도 커밋에서 다룬다).
+      · round_hold: 수동매도 계열 사본들은 보유시간을 round(,2) 했다.
+      · slip_pct  : 실체결 경로만 왕복 슬리피지를 기록한다.
+    pnl_r 가드는 사본들의 합집합(sl_dist>0 and qty>0)이다 — qty=0인
+    퇴화 상태에서 일부 사본은 ZeroDivisionError로 죽었는데, 죽는 것보다
+    0으로 기록하고 지나가는 쪽이 나머지 사본들의 기존 동작이다.
+
+    Returns: (net_pnl, pnl_usdt, pnl_pct, hold_h) — 호출측 알림 본문용.
+    보유시간을 같이 돌려주는 이유: 알림 문구가 기록과 **같은 값**을 보여야
+    하는데, 호출측이 다시 계산하면 시계가 두 번 읽혀 미세하게 어긋난다.
+    """
+    sl_dist  = abs(entry_price - sl_for_r)
+    pnl_usdt = (exit_price - entry_price) * qty
+    pnl_pct  = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+    pnl_r    = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
+    hold_h   = (datetime.now(timezone.utc) -
+                datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+    if round_hold:
+        hold_h = round(hold_h, 2)
+    _delete_position(strategy, symbol)
+    net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
+                         pnl_usdt, pnl_pct, pnl_r, hold_h, reason, regime, entry_ts,
+                         slip_pct)
+    with _state_lock:
+        _state['day_pnl'] += net_pnl
+    return net_pnl, pnl_usdt, pnl_pct, hold_h
+
+
+def _try_settle_via_stop_fill(strategy: str, symbol: str, ccxt_sym: str,
+                              pos: dict, log_prefix: str) -> bool:
+    """잔고 0의 가장 흔한 원인 — 거래소 보호주문 선체결 — 을 먼저 판정한다.
+
+    체결이 확인되면 _handle_stop_order_state 가 실제 체결가·정확한 사유로
+    기록·정리까지 마치고 True. 확인 불가(조회 실패)면 False 로 돌아가
+    호출측이 수동매도 경로를 계속 탄다 — 포지션이 DB에 떠돌면 안 된다.
+    같은 가드가 세 곳(_spot_sell 2경로·검증 루프)에 복사돼 있었다.
+    """
+    if not (pos.get('sl_order_id') or pos.get('tp_order_id')):
+        return False
+    try:
+        return _handle_stop_order_state(strategy, symbol, ccxt_sym, pos)
+    except Exception as e:
+        log.warning(f'{log_prefix} 보호주문 체결 확인 실패 '
+                    f'— 수동매도 경로로 진행: {e}')
+        return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1566,7 +1628,7 @@ def _bnb_discount_active() -> bool:
                 'ORDER BY id DESC LIMIT 1').fetchone()
         if not row or not row[0]:
             return False
-        ccxt_sym = str(row[0]).replace('USDT', '/USDT')
+        ccxt_sym = to_ccxt(str(row[0]))
         fills = _get_ex().fetch_my_trades(ccxt_sym, limit=10) or []
     except Exception as e:
         log.debug(f'[수수료] BNB 결제 여부 확인 실패: {e}')
@@ -2200,7 +2262,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
         _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
         # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
         try:
-            _base_asset = ccxt_sym.split('/')[0]
+            _base_asset = base_of(ccxt_sym)
             _pre_bal = _get_ex().fetch_balance()
             _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
             if _actual_free <= 0.0:
@@ -2209,33 +2271,20 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                 # 구분하지 않으면 살아있는 포지션을 허위 MANUAL_SOLD로 지운다.
                 _actual_free = _cancel_orphan_sell_orders(strategy, symbol, ccxt_sym,
                                                           _base_asset, _actual_free)
-            if _actual_free <= 0.0 and (pos.get('sl_order_id') or pos.get('tp_order_id')):
-                # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문이 먼저 체결된
-                # 것**이다. 이 함수는 매도 전에 스탑을 취소하지만, 이미 체결된
-                # 주문의 취소 실패는 조용히 무시되므로(_cancel_stop_order)
-                # 여기까지 흘러온다. 확인하지 않고 MANUAL_SOLD로 적으면 사유
-                # (SL/TP)와 체결가가 모두 틀어지고, 그 통계가 Kelly·전략
-                # 건강도의 입력이 된다(검증 루프에서 고친 것과 같은 결함).
-                try:
-                    if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
-                        return
-                except Exception as _e_chk:
-                    log.warning(f'[{strategy}] {symbol} 보호주문 체결 확인 실패 '
-                                f'— 수동매도 경로로 진행: {_e_chk}')
             if _actual_free <= 0.0:
-                _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
+                # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문이 먼저 체결된
+                # 것**이다(매도 전 스탑 취소는 이미 체결된 주문에선 조용히
+                # 무시된다). 체결이면 실제 체결가·정확한 사유로 기록된다.
+                if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
+                                             f'[{strategy}] {symbol}'):
+                    return
                 log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
                 _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
-                _pnl_u = (price - entry_price) * qty
-                _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                _sl_d = abs(entry_price - orig_sl)
-                _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
-                _delete_position(strategy, symbol)
-                _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                                  _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                                  'MANUAL_SOLD', regime, entry_ts)
-                with _state_lock:
-                    _state['day_pnl'] += _net
+                _settle_closed_position(
+                    strategy, symbol, entry_price=entry_price, exit_price=price,
+                    qty=qty, cost_usdt=cost_usdt, reason='MANUAL_SOLD',
+                    regime=regime, entry_ts=entry_ts, sl_for_r=orig_sl,
+                    round_hold=True)
                 return
             elif _actual_free < qty:
                 log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
@@ -2258,36 +2307,22 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
             if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
                 # 잔고가 없는 **가장 흔한 이유는 거래소 보호주문이 먼저
-                # 체결된 것**이다. 이 함수는 매도 전에 스탑을 취소하지만,
-                # 이미 체결된 주문의 취소 실패는 조용히 무시되므로 여기까지
-                # 온다. 확인하지 않고 MANUAL_SOLD로 적으면 사유(SL/TP)와
-                # 체결가가 모두 틀어지고, 그 통계가 Kelly·전략 건강도에
-                # 그대로 들어간다(검증 루프에서 고친 것과 같은 결함).
-                if pos.get('sl_order_id') or pos.get('tp_order_id'):
-                    try:
-                        if _handle_stop_order_state(strategy, symbol, ccxt_sym, pos):
-                            return
-                    except Exception as _e_chk:
-                        log.warning(f'[{strategy}] {symbol} 보호주문 체결 확인 실패 '
-                                    f'— 수동매도 경로로 진행: {_e_chk}')
+                # 체결된 것**이다. 체결이면 실제 체결가·정확한 사유로 기록된다.
+                if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
+                                             f'[{strategy}] {symbol}'):
+                    return
                 try:
-                    _base = ccxt_sym.split('/')[0]
+                    _base = base_of(ccxt_sym)
                     _bal = _get_ex().fetch_balance()
                     _actual_free = float(_bal['free'].get(_base, 0))
                     if _actual_free < qty * 0.05:
-                        _hold_h = (datetime.now(timezone.utc) - datetime.fromisoformat(entry_ts)).total_seconds() / 3600
                         log.warning(f'[{strategy}] {symbol} 수동매도 감지(잔고={_actual_free:.4f}) → DB자동정리')
                         _tg(f'ℹ️ [{strategy}] {symbol} 수동매도 감지 → DB 정리 완료')
-                        _delete_position(strategy, symbol)
-                        _pnl_u = (price - entry_price) * qty
-                        _pnl_p = (price - entry_price) / entry_price if entry_price > 0 else 0
-                        _sl_d = abs(entry_price - orig_sl)
-                        _pnl_r = _pnl_u / (_sl_d * qty) if _sl_d > 0 else 0
-                        _net = _log_trade(strategy, symbol, entry_price, price, qty, cost_usdt,
-                                          _pnl_u, _pnl_p, _pnl_r, round(_hold_h, 2),
-                                          'MANUAL_SOLD', regime, entry_ts)
-                        with _state_lock:
-                            _state['day_pnl'] += _net
+                        _settle_closed_position(
+                            strategy, symbol, entry_price=entry_price,
+                            exit_price=price, qty=qty, cost_usdt=cost_usdt,
+                            reason='MANUAL_SOLD', regime=regime,
+                            entry_ts=entry_ts, sl_for_r=orig_sl, round_hold=True)
                         return
                     elif _actual_free > 0:
                         # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
@@ -2320,24 +2355,13 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
             if not sold_ok:
                 return
 
-    sl_dist   = abs(entry_price - orig_sl)
-    pnl_usdt  = (exit_price - entry_price) * qty
-    pnl_pct   = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
-    pnl_r     = pnl_usdt / (sl_dist * qty) if sl_dist > 0 else 0
-
-    entry_dt   = datetime.fromisoformat(entry_ts)
-    hold_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
-
-    _delete_position(strategy, symbol)
     # 왕복 슬리피지 = 진입(비싸게 삼) + 청산(싸게 팜). 둘 다 양수면 손실.
     _exit_slip = (price - exit_price) / price if price > 0 else 0.0
     _slip_total = float(pos.get('entry_slip_pct') or 0.0) + _exit_slip
-    net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty, cost_usdt,
-                         pnl_usdt, pnl_pct, pnl_r, hold_hours, reason, regime, entry_ts,
-                         _slip_total)
-
-    with _state_lock:
-        _state['day_pnl'] += net_pnl
+    net_pnl, pnl_usdt, pnl_pct, hold_hours = _settle_closed_position(
+        strategy, symbol, entry_price=entry_price, exit_price=exit_price,
+        qty=qty, cost_usdt=cost_usdt, reason=reason, regime=regime,
+        entry_ts=entry_ts, sl_for_r=orig_sl, slip_pct=_slip_total)
 
     emoji = '✅' if pnl_usdt > 0 else '❌'
     msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason})\n'
@@ -2382,21 +2406,12 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
         qty         = float(order.get('filled') or pos['qty_tokens'])
         fallback_px = float(pos['sl']) if reason == 'SL' else float(pos.get('tp') or pos['sl'])
         exit_price  = float(order.get('average') or order.get('price') or fallback_px)
-        # R배수 분모는 진입 시점의 위험 (추적 손절로 sl이 올라가도 불변)
-        sl_dist     = abs(entry_price - (float(pos.get('orig_sl') or 0)
-                                         or float(pos['sl'])))
-        pnl_usdt    = (exit_price - entry_price) * qty
-        pnl_pct     = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
-        pnl_r       = pnl_usdt / (sl_dist * qty) if sl_dist > 0 and qty > 0 else 0
-        entry_ts    = pos['entry_ts']
-        hold_hours  = (datetime.now(timezone.utc) -
-                       datetime.fromisoformat(entry_ts)).total_seconds() / 3600
-        _delete_position(strategy, symbol)
-        net_pnl = _log_trade(strategy, symbol, entry_price, exit_price, qty,
-                             float(pos['cost_usdt']), pnl_usdt, pnl_pct, pnl_r,
-                             hold_hours, reason, pos.get('regime', ''), entry_ts)
-        with _state_lock:
-            _state['day_pnl'] += net_pnl
+        _net, pnl_usdt, pnl_pct, _hold = _settle_closed_position(
+            strategy, symbol, entry_price=entry_price, exit_price=exit_price,
+            qty=qty, cost_usdt=float(pos['cost_usdt']), reason=reason,
+            regime=pos.get('regime', ''), entry_ts=pos['entry_ts'],
+            # R배수 분모는 진입 시점의 위험 (추적 손절로 sl이 올라가도 불변)
+            sl_for_r=(float(pos.get('orig_sl') or 0) or float(pos['sl'])))
         # 반대 레그 정리 (OCO는 자동취소되지만 스탑 단독+소프트웨어 병행 대비)
         for other_id, _r in legs:
             if other_id and other_id != oid:
@@ -2836,9 +2851,9 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
 
         # 패스 시작 시 전 심볼 시세를 배치 1회로 확보.
         # 보유 포지션 심볼은 유니버스에서 빠졌더라도 SL/TP 판정에 필요하다.
-        _pass_syms = [s.replace('USDT', '/USDT') for s in universe]
+        _pass_syms = [to_ccxt(s) for s in universe]
         try:
-            _pass_syms += [p['symbol'].replace('USDT', '/USDT')
+            _pass_syms += [to_ccxt(p['symbol'])
                            for p in _load_all_positions()]
         except Exception as e:
             # 보유 심볼이 프리페치에서 빠지면 그 포지션의 SL/TP 판정이
@@ -2868,7 +2883,7 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
 
         for symbol in scan_syms:
             manage_only = symbol not in _uni_set
-            ccxt_sym = symbol.replace('USDT', '/USDT')
+            ccxt_sym = to_ccxt(symbol)
             ex = _get_ex()
 
             try:
@@ -3100,42 +3115,36 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                     # 전략 루프가 쓰는 판정 함수를 먼저 태운다 — 체결을 찾으면
                     # 실제 체결가와 올바른 사유로 기록하고 포지션까지 정리한다.
                     # (검증 루프가 5분 주기 전략 루프보다 먼저 도는 경합에서 발생)
-                    if pos.get('sl_order_id') or pos.get('tp_order_id'):
-                        try:
-                            if _handle_stop_order_state(
-                                    strategy, sym, sym.replace('USDT', '/USDT'), pos):
-                                continue
-                        except Exception as e:
-                            log.warning(f'[검증] {sym} 보호주문 체결 확인 실패 '
-                                        f'— 수동매도 경로로 진행: {e}')
+                    if _try_settle_via_stop_fill(strategy, sym, to_ccxt(sym), pos,
+                                                 f'[검증] {sym}'):
+                        continue
                     # 완전 소진 — 수동 매도로 간주, DB 포지션 삭제
                     log.warning(f'[검증] {sym} 잔고 없음 — DB 포지션 삭제')
                     _tg(f'⚠️ [{strategy}/{sym}] 잔고 0 감지 — 수동매도로 DB 정리')
                     # 고아 보호 주문 방지: 남아있으면 취소 (이미 체결/취소면 무시됨)
-                    _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
+                    _cancel_stop_order(strategy, sym, to_ccxt(sym),
                                        pos.get('sl_order_id') or '')
-                    _cancel_stop_order(strategy, sym, sym.replace('USDT', '/USDT'),
+                    _cancel_stop_order(strategy, sym, to_ccxt(sym),
                                        pos.get('tp_order_id') or '')
+                    # 시세 조회가 죽어도 포지션은 반드시 지워져야 하므로 아래
+                    # try 밖에서 먼저 삭제한다 (헬퍼 내부 삭제는 무해한 no-op).
                     _delete_position(strategy, sym)
                     # 거래 기록 — _spot_sell의 수동매도 경로와 동일하게 통계 보존
                     # (체결가 불명이므로 현재가로 추정, 조회 불가 시 진입가)
                     try:
-                        est_price = _get_price(sym.replace('USDT', '/USDT'))
+                        est_price = _get_price(to_ccxt(sym))
                         entry_price = float(pos['entry_price'])
                         if est_price <= 0:
                             est_price = entry_price
-                        sl_d   = abs(entry_price - float(pos['sl']))
-                        pnl_u  = (est_price - entry_price) * db_qty
-                        pnl_p  = (est_price - entry_price) / entry_price if entry_price > 0 else 0
-                        pnl_r  = pnl_u / (sl_d * db_qty) if sl_d > 0 and db_qty > 0 else 0
-                        hold_h = (datetime.now(timezone.utc) -
-                                  datetime.fromisoformat(pos['entry_ts'])).total_seconds() / 3600
-                        net = _log_trade(strategy, sym, entry_price, est_price, db_qty,
-                                         float(pos['cost_usdt']), pnl_u, pnl_p, pnl_r,
-                                         round(hold_h, 2), 'MANUAL_SOLD',
-                                         pos.get('regime', ''), pos['entry_ts'])
-                        with _state_lock:
-                            _state['day_pnl'] += net
+                        _settle_closed_position(
+                            strategy, sym, entry_price=entry_price,
+                            exit_price=est_price, qty=db_qty,
+                            cost_usdt=float(pos['cost_usdt']),
+                            reason='MANUAL_SOLD', regime=pos.get('regime', ''),
+                            entry_ts=pos['entry_ts'],
+                            # 역사적으로 이 사본만 조정 후 sl을 분모로 썼다.
+                            # 통일은 행동 변경이므로 별도 커밋에서 다룬다.
+                            sl_for_r=float(pos['sl']), round_hold=True)
                     except Exception as _le:
                         log.warning(f'[검증] {sym} 수동매도 거래기록 실패(무시): {_le}')
                 elif actual < db_qty * 0.90:
@@ -3201,7 +3210,7 @@ def _handle_tg_cmd(cmd: str) -> None:
             return
         lines = ['[Spot] 현재 포지션:']
         for p in all_pos:
-            price = _get_price(p['symbol'].replace('USDT', '/USDT'))
+            price = _get_price(to_ccxt(p['symbol']))
             pnl_pct = (price - p['entry_price']) / p['entry_price'] * 100 if price > 0 else 0
             lines.append(f"  {p['strategy']}/{p['symbol']}: {p['entry_price']:.4f} → "
                          f"{price:.4f} ({pnl_pct:+.1f}%)")
