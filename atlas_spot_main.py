@@ -2037,14 +2037,23 @@ def _spot_buy(strategy: str, symbol: str, ccxt_sym: str,
         return _spot_buy_locked(strategy, symbol, ccxt_sym, sig, price, regime)
 
 
-def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
-                     sig: dict, price: float, regime: str) -> bool:
+def _entry_gates(strategy: str, symbol: str, ccxt_sym: str,
+                 sig: dict, price: float, regime: str,
+                 ) -> Optional[tuple[float, float, float, float, float]]:
+    """진입 게이트 일괄 판정 + 사이징 (매수 주문 직전까지).
+
+    게이트 평가 순서·조기반환·로그 문구는 통합 전과 동일하다 — 차단
+    통계와 알림 부수효과가 여기 걸려 있다. 각 게이트가 자기 사유를
+    직접 로그하므로 반환은 결과만:
+    None = 차단(사유는 이미 로그됨), 통과 시 (adj_risk, qty, cost_usdt,
+    sl_dist, tp).
+    """
     if _state['paused']:
         log.info(f'[{strategy}] {symbol} 매수 차단 (일시정지)')
-        return False
+        return None
 
     if SPOT_KILL_SWITCH.exists():
-        return False
+        return None
 
     equity = _state['equity']
 
@@ -2055,11 +2064,11 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     all_pos = _load_all_positions()
     if len(all_pos) >= max_pos:
         log.info(f'[{strategy}] {symbol} 매수 차단 (최대 포지션 {max_pos}개 — 자본 연동)')
-        return False
+        return None
 
     # 중복 포지션 방지
     if _load_position(strategy, symbol):
-        return False
+        return None
 
     # 전략 건강도 자기교정: 실계좌 net PF 기준 감봉/차단
     # 학습기를 켜면 이 경로는 **비활성**이다 — 같은 일(성과 기반 감봉)을
@@ -2072,7 +2081,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
             _state[f'health_blocked_{strategy}'] = True
             _tg(f'⛔ [{strategy}] 실계좌 net PF < {SPOT_HEALTH_PF_HARD} — '
                 f'신규 진입 자동 차단 (성과 회복 시 자동 해제)')
-        return False
+        return None
     _state.pop(f'health_blocked_{strategy}', None)
 
     # 학습기 ON이면 Kelly 자리를 학습 배분이 대신한다(곱하지 않는다).
@@ -2099,20 +2108,20 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     tp          = sig['tp']
     sl_dist     = abs(entry_price - sl)
     if sl_dist <= 0:
-        return False
+        return None
 
     # SL 거리 상한 필터: 넓은 SL은 소형 계좌에서 최소 주문 미달 원인
     _sl_pct = sl_dist / entry_price
     if _sl_pct > SPOT_MAX_SL_PCT:
         log.info(f'[{strategy}] {symbol} 매수 차단: SL거리 {_sl_pct*100:.1f}% > 상한 {SPOT_MAX_SL_PCT*100:.0f}%')
-        return False
+        return None
 
     # 비용 대비 엣지: SL이 좁을수록 명목가가 커져 왕복비용이 R을 잠식한다.
     # 승률이 아무리 좋아도 비용이 avg_r을 넘으면 그 거래는 마이너스 기대값이다.
     _cost_ok, _cost_why = _cost_edge_ok(strategy, symbol, ccxt_sym, sl_dist, entry_price)
     if not _cost_ok:
         log.info(f'[{strategy}] {symbol} 매수 차단(비용): {_cost_why}')
-        return False
+        return None
 
     adj_risk, qty, cost_usdt = _size_position(
         equity, sl_dist, entry_price,
@@ -2123,7 +2132,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     ok, reason = _check_buying_power(cost_usdt)
     if not ok:
         log.info(f'[{strategy}] {symbol} 매수 차단: {reason}')
-        return False
+        return None
 
     # 일간 손실 한도
     day_loss_pct = _state['day_pnl'] / max(_state['day_start_eq'], 1)
@@ -2133,7 +2142,18 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
             _state['daily_loss_alerted'] = True
             _tg(f'🔴 [위험] 일간 손실 한도 초과 ({day_loss_pct*100:.1f}% ≤ '
                 f'{SPOT_DAILY_LOSS_LIMIT*100:.0f}%) — 오늘 신규 진입 차단')
-        return False
+        return None
+
+    return adj_risk, qty, cost_usdt, sl_dist, tp
+
+
+def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
+                     sig: dict, price: float, regime: str) -> bool:
+    gates = _entry_gates(strategy, symbol, ccxt_sym, sig, price, regime)
+    if gates is None:
+        return False                     # 차단 사유는 게이트가 이미 로그했다
+    adj_risk, qty, cost_usdt, sl_dist, tp = gates
+    entry_price = price
 
     log.info(f'[{strategy}] {symbol} 매수 시도 | {qty:.6f}개 @ {entry_price:,.4f} | '
              f'비용 ${cost_usdt:.2f} | 리스크 {adj_risk*100:.2f}%')
@@ -2239,121 +2259,153 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     return True
 
 
+def _sell_preflight(strategy: str, symbol: str, ccxt_sym: str, pos: dict,
+                    price: float, reason: str, qty: float) -> Optional[float]:
+    """매도 전 준비 (실거래 전용): 보호주문 취소 → 실잔고 확인 → qty 조정.
+
+    잔고 0이면 원인을 판정한다 — 고아 매도주문이 잠근 것이면 회수,
+    보호주문 선체결이면 체결가로 정산, 진짜 수동매도면 DB 정리.
+    Returns: 매도에 쓸 qty. None이면 이미 정산 완료 — 매도 불필요.
+    """
+    entry_price = float(pos['entry_price'])
+    cost_usdt   = float(pos['cost_usdt'])
+    orig_sl     = float(pos.get('orig_sl') or 0) or float(pos['sl'])
+    # 거래소 보호 주문(SL/TP) 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
+    # 시장가 매도가 실패하고, 아래 사전잔고 확인이 수동매도로 오판한다.
+    _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
+    _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
+    # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
+    try:
+        _base_asset = base_of(ccxt_sym)
+        _pre_bal = _get_ex().fetch_balance()
+        _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
+        if _actual_free <= 0.0:
+            # free=0의 원인이 "수동매도"가 아니라 **미체결 매도주문이 수량을
+            # 잠근 것**일 수 있다(DB에 ID가 없는 고아 OCO/스탑 등). 이를
+            # 구분하지 않으면 살아있는 포지션을 허위 MANUAL_SOLD로 지운다.
+            _actual_free = _cancel_orphan_sell_orders(strategy, symbol, ccxt_sym,
+                                                      _base_asset, _actual_free)
+        if _actual_free <= 0.0:
+            # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문이 먼저 체결된
+            # 것**이다(매도 전 스탑 취소는 이미 체결된 주문에선 조용히
+            # 무시된다). 체결이면 실제 체결가·정확한 사유로 기록된다.
+            if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
+                                         f'[{strategy}] {symbol}'):
+                return None
+            log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
+            _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
+            _settle_closed_position(
+                strategy, symbol, entry_price=entry_price, exit_price=price,
+                qty=qty, cost_usdt=cost_usdt, reason='MANUAL_SOLD',
+                regime=pos.get('regime', ''), entry_ts=pos['entry_ts'],
+                sl_for_r=orig_sl, round_hold=True)
+            return None
+        elif _actual_free < qty:
+            log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
+            qty = _actual_free
+    except Exception as _be:
+        log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
+    return qty
+
+
+def _execute_market_sell(strategy: str, symbol: str, ccxt_sym: str, pos: dict,
+                         qty: float, price: float,
+                         ) -> Optional[tuple[float, float]]:
+    """시장가 매도 실행 + 실패 복구 (실거래 전용).
+
+    Returns: (exit_price, 체결 qty) — 호출측이 공통 정산으로 내려간다.
+    None이면 정산 불필요: 포지션 유지(NOTIONAL·일시 오류) 또는 수동매도로
+    이미 정리됨.
+    """
+    entry_price = float(pos['entry_price'])
+    cost_usdt   = float(pos['cost_usdt'])
+    orig_sl     = float(pos.get('orig_sl') or 0) or float(pos['sl'])
+    try:
+        order = _get_ex().create_market_sell_order(ccxt_sym, qty)
+        return float(order.get('average') or order.get('price') or price), qty
+    except Exception as e:
+        err_str = str(e).lower()
+        log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
+        # 잔고 부족이 아닌 오류(거래정지·상장폐지·레이트리밋 등)면 포지션이
+        # 남고, 다음 관리 주기(5분)마다 같은 청산 판정 → 같은 실패 →
+        # 같은 알림이 반복된다. 로그는 매번 남기되 알림만 간격을 둔다.
+        if _stop_alert_due(strategy, symbol, 'sell_fail'):
+            _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
+        # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
+        if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
+            # 잔고가 없는 **가장 흔한 이유는 거래소 보호주문이 먼저
+            # 체결된 것**이다. 체결이면 실제 체결가·정확한 사유로 기록된다.
+            if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
+                                         f'[{strategy}] {symbol}'):
+                return None
+            try:
+                _base = base_of(ccxt_sym)
+                _bal = _get_ex().fetch_balance()
+                _actual_free = float(_bal['free'].get(_base, 0))
+                if _actual_free < qty * 0.05:
+                    log.warning(f'[{strategy}] {symbol} 수동매도 감지(잔고={_actual_free:.4f}) → DB자동정리')
+                    _tg(f'ℹ️ [{strategy}] {symbol} 수동매도 감지 → DB 정리 완료')
+                    _settle_closed_position(
+                        strategy, symbol, entry_price=entry_price,
+                        exit_price=price, qty=qty, cost_usdt=cost_usdt,
+                        reason='MANUAL_SOLD', regime=pos.get('regime', ''),
+                        entry_ts=pos['entry_ts'], sl_for_r=orig_sl,
+                        round_hold=True)
+                    return None
+                elif _actual_free > 0:
+                    # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
+                    # 계좌 전체 free이므로 다른 전략 보유분이 섞여 있을 수 있다.
+                    # 이 포지션의 DB 수량을 넘겨 팔면 남의 코인을 처분하고
+                    # 부풀린 손익을 확정 기록하게 된다 → 반드시 상한을 둔다.
+                    _retry_qty = min(_actual_free, qty)
+                    log.warning(f'[{strategy}] {symbol} 잔고재시도: {_retry_qty:.6f} '
+                                f'(가용 {_actual_free:.6f} / DB {qty:.6f})')
+                    try:
+                        _retry_order = _get_ex().create_market_sell_order(ccxt_sym, _retry_qty)
+                        exit_price = float(_retry_order.get('average') or _retry_order.get('price') or price)
+                        log.info(f'[{strategy}] {symbol} 잔고재시도 성공: {_actual_free:.6f}개 @ {exit_price:.4f}')
+                        # 실제 체결됨 → 호출측 공통 정산으로 내려가야 한다.
+                        # (여기서 None을 주면 코인은 팔렸는데 DB 포지션·거래기록이
+                        #  남지 않아, 다음 폴링에서 허위 MANUAL_SOLD로 잘못 기록된다.)
+                        return exit_price, _retry_qty
+                    except Exception as _e3:
+                        log.error(f'[{strategy}] {symbol} 잔고재시도도 실패: {_e3}')
+                        return None
+            except Exception as _e2:
+                log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
+        # NOTIONAL 미달: 가격 하락으로 포지션 가치 < $5 → Binance 거부
+        # _manage_position에서 사전 차단하지만, 혹시 도달하면 DB 유지 후 반환
+        # (가격 회복 시 _manage_position이 자동으로 SL/TP 재시도)
+        elif 'notional' in err_str or '-1013' in err_str:
+            log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — 포지션 유지, 가격 회복 대기')
+        return None  # DB 유지 — 다음 관리 주기가 재시도
+
+
 def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
                pos: dict, price: float, reason: str):
-    """현물 매도 실행."""
+    """현물 매도 실행: 사전점검 → 시장가 매도 → 공통 정산 + 알림."""
     entry_price = float(pos['entry_price'])
     qty         = float(pos['qty_tokens'])
     cost_usdt   = float(pos['cost_usdt'])
-    sl          = float(pos['sl'])
     # R배수는 **진입 시점의 위험**으로 재야 한다. 추적 손절로 sl이 올라간
     # 뒤 그 값을 분모로 쓰면 R이 부풀고, 그 pnl_r이 Kelly·건강도·avg_r과
     # 비용 가드까지 연쇄 오염시킨다.
-    orig_sl     = float(pos.get('orig_sl') or 0) or sl
+    orig_sl     = float(pos.get('orig_sl') or 0) or float(pos['sl'])
     entry_ts    = pos['entry_ts']
     regime      = pos.get('regime', '')
 
     exit_price = price
 
     if not _state['dry_run']:
-        # 거래소 보호 주문(SL/TP) 먼저 취소 — 미취소 시 해당 수량이 잠겨(free=0)
-        # 시장가 매도가 실패하고, 아래 사전잔고 확인이 수동매도로 오판한다.
-        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('sl_order_id') or '')
-        _cancel_stop_order(strategy, symbol, ccxt_sym, pos.get('tp_order_id') or '')
-        # 매도 전 실제 잔고 확인 (수수료 차감 등으로 DB qty > 실잔고 가능 → SL 실패 원인)
-        try:
-            _base_asset = base_of(ccxt_sym)
-            _pre_bal = _get_ex().fetch_balance()
-            _actual_free = float(_pre_bal['free'].get(_base_asset, 0))
-            if _actual_free <= 0.0:
-                # free=0의 원인이 "수동매도"가 아니라 **미체결 매도주문이 수량을
-                # 잠근 것**일 수 있다(DB에 ID가 없는 고아 OCO/스탑 등). 이를
-                # 구분하지 않으면 살아있는 포지션을 허위 MANUAL_SOLD로 지운다.
-                _actual_free = _cancel_orphan_sell_orders(strategy, symbol, ccxt_sym,
-                                                          _base_asset, _actual_free)
-            if _actual_free <= 0.0:
-                # 잔고가 0인 **가장 흔한 이유는 거래소 보호주문이 먼저 체결된
-                # 것**이다(매도 전 스탑 취소는 이미 체결된 주문에선 조용히
-                # 무시된다). 체결이면 실제 체결가·정확한 사유로 기록된다.
-                if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
-                                             f'[{strategy}] {symbol}'):
-                    return
-                log.warning(f'[{strategy}] {symbol} 실잔고 0 → 수동매도로 자동처리 ({reason})')
-                _tg(f'ℹ️ [{strategy}] {symbol} 잔고 없음 → 수동매도 DB정리')
-                _settle_closed_position(
-                    strategy, symbol, entry_price=entry_price, exit_price=price,
-                    qty=qty, cost_usdt=cost_usdt, reason='MANUAL_SOLD',
-                    regime=regime, entry_ts=entry_ts, sl_for_r=orig_sl,
-                    round_hold=True)
-                return
-            elif _actual_free < qty:
-                log.warning(f'[{strategy}] {symbol} qty조정: {qty:.6f} -> {_actual_free:.6f} (수수료 공제 등 잔고 부족)')
-                qty = _actual_free
-        except Exception as _be:
-            log.warning(f'[{strategy}] {symbol} 사전잔고확인 실패(무시): {_be}')
-        sold_ok = False
-        try:
-            order = _get_ex().create_market_sell_order(ccxt_sym, qty)
-            exit_price = float(order.get('average') or order.get('price') or price)
-            sold_ok = True
-        except Exception as e:
-            err_str = str(e).lower()
-            log.error(f'[{strategy}] {symbol} 매도 실패: {e}')
-            # 잔고 부족이 아닌 오류(거래정지·상장폐지·레이트리밋 등)면 포지션이
-            # 남고, 다음 관리 주기(5분)마다 같은 청산 판정 → 같은 실패 →
-            # 같은 알림이 반복된다. 로그는 매번 남기되 알림만 간격을 둔다.
-            if _stop_alert_due(strategy, symbol, 'sell_fail'):
-                _tg(f'⚠️ [{strategy}] {symbol} 매도 실패: {e}')
-            # insufficient balance: 실제 잔고 확인 후 0에 가까우면 수동매도로 자동 처리
-            if 'insufficient balance' in err_str or 'insufficient funds' in err_str:
-                # 잔고가 없는 **가장 흔한 이유는 거래소 보호주문이 먼저
-                # 체결된 것**이다. 체결이면 실제 체결가·정확한 사유로 기록된다.
-                if _try_settle_via_stop_fill(strategy, symbol, ccxt_sym, pos,
-                                             f'[{strategy}] {symbol}'):
-                    return
-                try:
-                    _base = base_of(ccxt_sym)
-                    _bal = _get_ex().fetch_balance()
-                    _actual_free = float(_bal['free'].get(_base, 0))
-                    if _actual_free < qty * 0.05:
-                        log.warning(f'[{strategy}] {symbol} 수동매도 감지(잔고={_actual_free:.4f}) → DB자동정리')
-                        _tg(f'ℹ️ [{strategy}] {symbol} 수동매도 감지 → DB 정리 완료')
-                        _settle_closed_position(
-                            strategy, symbol, entry_price=entry_price,
-                            exit_price=price, qty=qty, cost_usdt=cost_usdt,
-                            reason='MANUAL_SOLD', regime=regime,
-                            entry_ts=entry_ts, sl_for_r=orig_sl, round_hold=True)
-                        return
-                    elif _actual_free > 0:
-                        # 잔고가 DB qty보다 약간 부족(수수료 공제 등) → 실잔고로 재시도
-                        # 계좌 전체 free이므로 다른 전략 보유분이 섞여 있을 수 있다.
-                        # 이 포지션의 DB 수량을 넘겨 팔면 남의 코인을 처분하고
-                        # 부풀린 손익을 확정 기록하게 된다 → 반드시 상한을 둔다.
-                        _retry_qty = min(_actual_free, qty)
-                        log.warning(f'[{strategy}] {symbol} 잔고재시도: {_retry_qty:.6f} '
-                                    f'(가용 {_actual_free:.6f} / DB {qty:.6f})')
-                        try:
-                            _retry_order = _get_ex().create_market_sell_order(ccxt_sym, _retry_qty)
-                            exit_price = float(_retry_order.get('average') or _retry_order.get('price') or price)
-                            qty = _retry_qty
-                            sold_ok = True   # 실제 체결됨 → 아래 공통 정산으로 내려가야 한다
-                            log.info(f'[{strategy}] {symbol} 잔고재시도 성공: {_actual_free:.6f}개 @ {exit_price:.4f}')
-                        except Exception as _e3:
-                            log.error(f'[{strategy}] {symbol} 잔고재시도도 실패: {_e3}')
-                            return
-                except Exception as _e2:
-                    log.error(f'[{strategy}] {symbol} 수동매도 자동처리 실패: {_e2}')
-            # NOTIONAL 미달: 가격 하락으로 포지션 가치 < $5 → Binance 거부
-            # _manage_position에서 사전 차단하지만, 혹시 도달하면 DB 유지 후 반환
-            # (가격 회복 시 _manage_position이 자동으로 SL/TP 재시도)
-            elif 'notional' in err_str or '-1013' in err_str:
-                log.warning(f'[{strategy}] {symbol} NOTIONAL 미달(${qty*price:.2f}<$5) — 포지션 유지, 가격 회복 대기')
-                return  # DB 유지 (삭제하지 않음)
-            # 잔고 재시도로 체결된 경우에는 반환하지 않고 아래 공통 정산을 수행한다.
-            # (여기서 무조건 return하면 코인은 팔렸는데 DB 포지션·거래기록이
-            #  남지 않아, 다음 폴링에서 허위 MANUAL_SOLD로 잘못 기록됐다.)
-            if not sold_ok:
-                return
+        _adj_qty = _sell_preflight(strategy, symbol, ccxt_sym, pos,
+                                   price, reason, qty)
+        if _adj_qty is None:
+            return                       # 이미 정산됨 (보호주문 체결/수동매도)
+        qty = _adj_qty
+        _sold = _execute_market_sell(strategy, symbol, ccxt_sym, pos, qty, price)
+        if _sold is None:
+            return                       # 포지션 유지 또는 수동매도로 정리됨
+        exit_price, qty = _sold
 
     # 왕복 슬리피지 = 진입(비싸게 삼) + 청산(싸게 팜). 둘 다 양수면 손실.
     _exit_slip = (price - exit_price) / price if price > 0 else 0.0
@@ -2831,6 +2883,119 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
 #  전략 루프 (타임프레임별 통합)
 # ══════════════════════════════════════════════════════════════
 
+def _process_symbol_signal(strategy_id: str, symbol: str, ccxt_sym: str,
+                           ohlcv: list, manage_only: bool,
+                           cooldowns: dict, last_bar: dict) -> None:
+    """심볼 × 전략 1건 처리: 포지션 관리 → 신규 봉 판정 → 필터 → 매수.
+
+    _strategy_timeframe_loop 의 안쪽 본문 — 판정 순서·조기반환·로그
+    문구는 추출 전과 동일하다. cooldowns/last_bar 는 루프가 소유한
+    상태 dict 로, 여기서 직접 갱신한다.
+    """
+    key       = (strategy_id, symbol)
+    calc_fn   = CALC_FUNCS[strategy_id]
+    signal_fn = SIGNAL_FUNCS[strategy_id]
+    df        = calc_fn(ohlcv)
+    i         = len(df) - 1
+    price     = _get_price(ccxt_sym)
+
+    # 지표 판정은 **완성된 마지막 봉**으로 한다.
+    # 거래소가 돌려주는 마지막 봉(i)은 형성 중이라 BB·EMA가
+    # 폴링마다 흔들린다. 그 값으로 청산하면
+    #   ① 봉 마감 시점의 값과 달라 백테스트가 검증한 적 없는
+    #      동작이 되고(신호는 이미 i-1을 쓰므로 내부 불일치),
+    #   ② 봉 중간에 잠깐 뒤집힌 크로스에 휩쓸려 조기 청산된다.
+    # 가격 비교(SL/TP)는 여전히 실시간 price로 한다.
+    i_closed  = max(0, len(df) - 2)
+
+    # 포지션 관리 (매 폴링마다)
+    _manage_position(strategy_id, symbol, ccxt_sym, df, i_closed)
+
+    # 유니버스 밖 심볼은 관리 전용 — 신규 진입 금지.
+    # (유니버스에서 탈락했다는 건 거래량·모멘텀 기준을 더는
+    #  만족하지 않는다는 뜻이므로 새로 사지 않는다)
+    if manage_only:
+        return
+
+    # 신규 봉 확인 (새 봉이 닫혔을 때만 신호 체크)
+    cur_ts = int(df.iloc[i]['ts'].timestamp())
+    if last_bar.get(key) == cur_ts:
+        return
+    last_bar[key] = cur_ts  # 중복 방지 먼저 등록
+
+    # 재시작 보호: last_bar는 메모리라 재시작 시 초기화됨
+    # DB에서 이번 봉 이후 진입 기록 확인 → 동봉 재진입 방지
+    # 인덱스 사용을 위한 sargable 프리필터.
+    # datetime(entry_ts)로 컬럼을 감싸면 인덱스 범위 탐색이
+    # 불가능해 (strategy,symbol) 그룹 전체를 훑는다. 저장 형식이
+    # 다른 레거시 행이 있어도 잘라내지 않도록 2일 여유를 둔 문자열
+    # 하한을 함께 주고, 정확한 판정은 기존 datetime() 조건이 한다.
+    _cut_iso = datetime.fromtimestamp(
+        cur_ts - 172800, tz=timezone.utc).isoformat()
+    with _db_lock, _db_conn() as _rc:
+        _dupe = _rc.execute(
+            "SELECT 1 FROM spot_positions "
+            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
+            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') "
+            # UNION ALL: 존재 여부만 보므로 중복 제거가 불필요하다.
+            # UNION은 임시 b-tree를 만들어 LIMIT 1 조기 종료를 막는다.
+            "UNION ALL SELECT 1 FROM spot_trades "
+            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
+            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') LIMIT 1",
+            (strategy_id, symbol, _cut_iso, cur_ts,
+             strategy_id, symbol, _cut_iso, cur_ts)
+        ).fetchone()
+    if _dupe:
+        log.debug(f'[{strategy_id}] {symbol} 재시작 보호: 이번 봉 이미 처리됨')
+        return
+
+    # 쿨다운 체크 (S3 전용)
+    if cooldowns.get(key, 0) > 0:
+        cooldowns[key] -= 1
+        return
+
+    # 기존 포지션 있으면 신규 진입 스킵
+    if _load_position(strategy_id, symbol):
+        return
+
+    # 레짐 확인
+    regime_state = get_cached_regime()
+    regime = regime_state.regime if regime_state else REGIME_WEAK_TREND
+    if regime == REGIME_CRISIS:
+        return
+    allowed = REGIME_STRATEGY_MAP.get(regime, [])
+    if strategy_id not in allowed:
+        return
+
+    # 신호 체크 (이전봉 기준)
+    sig = signal_fn(df, i - 1)
+    if sig['signal'] != 1:
+        return
+
+    if strategy_id == 'S5' and _s5_safety_block(symbol):
+        return
+
+    # 모멘텀 RS Gate + 주도주 부스트
+    rs_scale = _rs_gate_scale(strategy_id, symbol)
+    if rs_scale is None:
+        return
+
+    # 펀딩비 필터: 추세추종 전략 롱 과밀 구간 차단
+    funding_scale = _funding_scale(strategy_id, symbol)
+    if funding_scale is None:
+        return
+
+    # sig에 스케일 반영 (risk는 _spot_buy에서 SPOT_BASE_RISK_PCT 기반이므로 플래그 전달)
+    sig['_funding_scale'] = funding_scale
+    sig['_rs_scale']      = rs_scale
+
+    # 매수 실행
+    ok = _spot_buy(strategy_id, symbol, ccxt_sym, sig, price, regime)
+    if ok and strategy_id == 'S3':
+        cd = S3_COOLDOWN_WEAK if regime == 'WEAK_TREND' else S3_COOLDOWN
+        cooldowns[key] = cd
+
+
 def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
                               stop_event: threading.Event) -> None:
     """
@@ -2898,111 +3063,10 @@ def _strategy_timeframe_loop(timeframe: str, strategies: list[str],
             for strategy_id in strategies:
                 if strategy_id not in _state.get('active_strategies', []):
                     continue
-
-                key     = (strategy_id, symbol)
                 try:
-                    calc_fn   = CALC_FUNCS[strategy_id]
-                    signal_fn = SIGNAL_FUNCS[strategy_id]
-                    df        = calc_fn(ohlcv)
-                    i         = len(df) - 1
-                    price     = _get_price(ccxt_sym)
-
-                    # 지표 판정은 **완성된 마지막 봉**으로 한다.
-                    # 거래소가 돌려주는 마지막 봉(i)은 형성 중이라 BB·EMA가
-                    # 폴링마다 흔들린다. 그 값으로 청산하면
-                    #   ① 봉 마감 시점의 값과 달라 백테스트가 검증한 적 없는
-                    #      동작이 되고(신호는 이미 i-1을 쓰므로 내부 불일치),
-                    #   ② 봉 중간에 잠깐 뒤집힌 크로스에 휩쓸려 조기 청산된다.
-                    # 가격 비교(SL/TP)는 여전히 실시간 price로 한다.
-                    i_closed  = max(0, len(df) - 2)
-
-                    # 포지션 관리 (매 폴링마다)
-                    _manage_position(strategy_id, symbol, ccxt_sym, df, i_closed)
-
-                    # 유니버스 밖 심볼은 관리 전용 — 신규 진입 금지.
-                    # (유니버스에서 탈락했다는 건 거래량·모멘텀 기준을 더는
-                    #  만족하지 않는다는 뜻이므로 새로 사지 않는다)
-                    if manage_only:
-                        continue
-
-                    # 신규 봉 확인 (새 봉이 닫혔을 때만 신호 체크)
-                    cur_ts = int(df.iloc[i]['ts'].timestamp())
-                    if last_bar.get(key) == cur_ts:
-                        continue
-                    last_bar[key] = cur_ts  # 중복 방지 먼저 등록
-
-                    # 재시작 보호: last_bar는 메모리라 재시작 시 초기화됨
-                    # DB에서 이번 봉 이후 진입 기록 확인 → 동봉 재진입 방지
-                    # 인덱스 사용을 위한 sargable 프리필터.
-                    # datetime(entry_ts)로 컬럼을 감싸면 인덱스 범위 탐색이
-                    # 불가능해 (strategy,symbol) 그룹 전체를 훑는다. 저장 형식이
-                    # 다른 레거시 행이 있어도 잘라내지 않도록 2일 여유를 둔 문자열
-                    # 하한을 함께 주고, 정확한 판정은 기존 datetime() 조건이 한다.
-                    _cut_iso = datetime.fromtimestamp(
-                        cur_ts - 172800, tz=timezone.utc).isoformat()
-                    with _db_lock, _db_conn() as _rc:
-                        _dupe = _rc.execute(
-                            "SELECT 1 FROM spot_positions "
-                            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
-                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') "
-                            # UNION ALL: 존재 여부만 보므로 중복 제거가 불필요하다.
-                            # UNION은 임시 b-tree를 만들어 LIMIT 1 조기 종료를 막는다.
-                            "UNION ALL SELECT 1 FROM spot_trades "
-                            "WHERE strategy=? AND symbol=? AND entry_ts >= ? "
-                            "AND datetime(entry_ts) >= datetime(?, 'unixepoch') LIMIT 1",
-                            (strategy_id, symbol, _cut_iso, cur_ts,
-                             strategy_id, symbol, _cut_iso, cur_ts)
-                        ).fetchone()
-                    if _dupe:
-                        log.debug(f'[{strategy_id}] {symbol} 재시작 보호: 이번 봉 이미 처리됨')
-                        continue
-
-                    # 쿨다운 체크 (S3 전용)
-                    if cooldowns.get(key, 0) > 0:
-                        cooldowns[key] -= 1
-                        continue
-
-                    # 기존 포지션 있으면 신규 진입 스킵
-                    if _load_position(strategy_id, symbol):
-                        continue
-
-                    # 레짐 확인
-                    regime_state = get_cached_regime()
-                    regime = regime_state.regime if regime_state else REGIME_WEAK_TREND
-                    if regime == REGIME_CRISIS:
-                        continue
-                    allowed = REGIME_STRATEGY_MAP.get(regime, [])
-                    if strategy_id not in allowed:
-                        continue
-
-                    # 신호 체크 (이전봉 기준)
-                    sig = signal_fn(df, i - 1)
-                    if sig['signal'] != 1:
-                        continue
-
-                    if strategy_id == 'S5' and _s5_safety_block(symbol):
-                        continue
-
-                    # 모멘텀 RS Gate + 주도주 부스트
-                    rs_scale = _rs_gate_scale(strategy_id, symbol)
-                    if rs_scale is None:
-                        continue
-
-                    # 펀딩비 필터: 추세추종 전략 롱 과밀 구간 차단
-                    funding_scale = _funding_scale(strategy_id, symbol)
-                    if funding_scale is None:
-                        continue
-
-                    # sig에 스케일 반영 (risk는 _spot_buy에서 SPOT_BASE_RISK_PCT 기반이므로 플래그 전달)
-                    sig['_funding_scale'] = funding_scale
-                    sig['_rs_scale']      = rs_scale
-
-                    # 매수 실행
-                    ok = _spot_buy(strategy_id, symbol, ccxt_sym, sig, price, regime)
-                    if ok and strategy_id == 'S3':
-                        cd = S3_COOLDOWN_WEAK if regime == 'WEAK_TREND' else S3_COOLDOWN
-                        cooldowns[key] = cd
-
+                    _process_symbol_signal(strategy_id, symbol, ccxt_sym,
+                                           ohlcv, manage_only,
+                                           cooldowns, last_bar)
                 except Exception as e:
                     log.error(f'[{tf_label}루프] {strategy_id}/{symbol} 오류: {e}')
 
