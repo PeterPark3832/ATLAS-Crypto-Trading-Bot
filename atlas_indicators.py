@@ -122,24 +122,6 @@ def calc_adx(ohlcv: list, period: int = 14) -> float:
 #  Alpha 지표
 # ══════════════════════════════════════════════════════════════
 
-def calc_oi_change_pct(oi_series: list) -> float:
-    """
-    4H OI 연속 2개 스냅샷의 변화율(%).
-    oi_series: [{'openInterestValue': float, ...}, ...] (ccxt fetch_open_interest_history 형식)
-    +값: 신규 자금 유입 (진짜 추세), -값: 청산/숏스퀴즈 의심
-    """
-    if len(oi_series) < 2:
-        return 0.0
-    try:
-        prev_oi = float(oi_series[-2].get('openInterestValue', 0))
-        curr_oi = float(oi_series[-1].get('openInterestValue', 0))
-        if prev_oi <= 0:
-            return 0.0
-        return (curr_oi - prev_oi) / prev_oi * 100
-    except Exception:
-        return 0.0
-
-
 # 동적 RR 기여 비중 — ADX가 2/3, EMA 갭이 1/3.
 # (원래 1.5 + adx*1.0 + gap*0.5 로 하드코딩돼 있던 가중치를 이름으로 뽑았다)
 RR_ADX_WEIGHT = 2.0 / 3.0

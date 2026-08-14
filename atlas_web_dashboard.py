@@ -57,7 +57,9 @@ TG_CHAT_ID      = os.getenv('TG_CHAT_ID', '')
 KILL_SWITCH     = Path('/tmp/ATLAS_SPOT_STOP')
 HTML_PATH       = BOT_DIR / 'dashboard_ui.html'
 
-STRAT_LABEL = {'S3': 'EMA Trend (4H)', 'S5': 'BB Bounce (1D)', 'S6': 'Donchian (1D)'}
+# 전략 표시명은 config의 STRATEGY_NAMES_KR을 단일 출처로 사용.
+# (예전엔 여기 하드코딩된 별도 영문 라벨이 있어 S4가 빠지는 등 drift가 났다)
+STRAT_LABEL = _STRAT_FULL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -881,8 +883,17 @@ def prices(token: str, symbols: str = ''):
     _auth(token)
     return _fetch_prices(symbols.split(',') if symbols else [])
 
+# UI 파일(98KB)을 매 요청마다 디스크에서 다시 읽지 않도록 mtime 캐시.
+# 파일이 배포로 바뀌면 mtime이 달라져 자동으로 다시 읽는다.
+_html_cache: dict = {'mtime': None, 'text': ''}
+
+
 @app.get('/', response_class=HTMLResponse)
 async def root():
     if HTML_PATH.exists():
-        return HTMLResponse(HTML_PATH.read_text(encoding='utf-8'))
+        mtime = HTML_PATH.stat().st_mtime
+        if mtime != _html_cache['mtime']:
+            _html_cache['text']  = HTML_PATH.read_text(encoding='utf-8')
+            _html_cache['mtime'] = mtime
+        return HTMLResponse(_html_cache['text'])
     return HTMLResponse('<h1>dashboard_ui.html not found</h1>', 500)
