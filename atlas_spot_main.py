@@ -3142,9 +3142,12 @@ def _position_reconcile_loop(stop_event: threading.Event) -> None:
                             cost_usdt=float(pos['cost_usdt']),
                             reason='MANUAL_SOLD', regime=pos.get('regime', ''),
                             entry_ts=pos['entry_ts'],
-                            # 역사적으로 이 사본만 조정 후 sl을 분모로 썼다.
-                            # 통일은 행동 변경이므로 별도 커밋에서 다룬다.
-                            sl_for_r=float(pos['sl']), round_hold=True)
+                            # R배수 분모는 진입 시점의 위험 — 추적손절로 sl이
+                            # 올라간 뒤 그 값을 쓰면 R이 부푼다 (다른 4개
+                            # 정산 경로와 동일한 기준. 레거시 행은 sl 폴백).
+                            sl_for_r=(float(pos.get('orig_sl') or 0)
+                                      or float(pos['sl'])),
+                            round_hold=True)
                     except Exception as _le:
                         log.warning(f'[검증] {sym} 수동매도 거래기록 실패(무시): {_le}')
                 elif actual < db_qty * 0.90:

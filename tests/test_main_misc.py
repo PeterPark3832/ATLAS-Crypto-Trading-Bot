@@ -424,6 +424,56 @@ class TestReconcilePrefersActualFill:
         assert called == []
 
 
+class TestReconcileRDenominator:
+    """검증 루프 정산의 R배수 분모는 **진입 시점 위험(orig_sl)** 이어야 한다.
+
+    다른 4개 정산 경로(_spot_sell 3경로·_handle_stop_order_state)는 모두
+    orig_sl을 쓰는데, 이 사본만 역사적으로 pos['sl'](추적조정 후)을 분모로
+    썼다. 추적손절이 SL을 진입가 근처까지 올린 포지션이 수동매도로 정리되면
+    위험 분모가 10→1로 줄어 pnl_r이 10배 부풀고, 그 값이 Kelly 사이징·
+    전략 건강도·학습기 입력에 그대로 들어갔다.
+    """
+
+    def test_pnl_r_uses_entry_time_risk_not_trailed_sl(self, monkeypatch,
+                                                       _no_telegram):
+        # 진입 100 / 원 SL 90 (위험 $10/개) → 추적손절이 SL을 99로 올린 상태
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        with sm._db_lock, sm._db_conn() as conn:
+            conn.execute("UPDATE spot_positions SET sl=99.0 "
+                         "WHERE strategy='S4' AND symbol='BTCUSDT'")
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_get_price', lambda s: 110.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1 and rows[0]['reason'] == 'MANUAL_SOLD'
+        # pnl_u = (110-100)×10 = $100, 진입 시점 위험 = (100-90)×10 = $100 → 1R.
+        # 조정 후 sl(99)을 분모로 쓰면 (100-99)×10 = $10 → 10R로 부푼다.
+        assert rows[0]['pnl_r'] == pytest.approx(1.0), (
+            f"pnl_r={rows[0]['pnl_r']} — 추적조정 후 sl을 분모로 써서 "
+            f"R배수가 부풀었다 (orig_sl 기준이어야 함)")
+
+    def test_legacy_position_without_orig_sl_falls_back_to_sl(self, monkeypatch,
+                                                              _no_telegram):
+        """orig_sl=0(마이그레이션 전 레거시 행)이면 기존 sl로 폴백한다
+        — main:2252의 `or sl` 관용구와 동일."""
+        sm._save_position('S4', 'BTCUSDT', 100.0, 95.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        with sm._db_lock, sm._db_conn() as conn:
+            conn.execute("UPDATE spot_positions SET orig_sl=0 "
+                         "WHERE strategy='S4' AND symbol='BTCUSDT'")
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_get_price', lambda s: 110.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        # 위험 = (100-95)×10 = $50, pnl_u = $100 → 2R
+        assert rows[0]['pnl_r'] == pytest.approx(2.0)
+
+
 class TestPositionReconcileLoop:
     def test_no_positions_does_nothing(self, monkeypatch, _no_telegram):
         ev = _OneShotEvent()
