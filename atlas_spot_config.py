@@ -32,13 +32,6 @@ def _opt(key: str, default: str = '') -> str:
     return os.getenv(key, default).strip()
 
 
-def _req(key: str) -> str:
-    v = os.getenv(key, '').strip()
-    if not v:
-        raise RuntimeError(f"[설정 오류] 환경변수 '{key}' 없음. .env 파일을 확인하세요.")
-    return v
-
-
 # ─────────────────────────────────────────────────────────────
 # API / Telegram (선물봇과 동일 키 재사용 가능)
 # ─────────────────────────────────────────────────────────────

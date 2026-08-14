@@ -1371,6 +1371,7 @@ def _get_spot_equity() -> tuple[float, float]:
         _check_bnb_fee_balance(bal)
         usdt = float(bal.get('USDT', {}).get('total', 0) or 0)
         total = usdt
+        holdings = []
         for currency, data in bal.items():
             if currency in ('USDT', 'info', 'free', 'used', 'total'):
                 continue
@@ -1379,8 +1380,30 @@ def _get_spot_equity() -> tuple[float, float]:
             qty = float(data.get('total', 0) or 0)
             if qty < 1e-8:
                 continue
+            holdings.append((currency, qty))
+        # 보유 통화 시세를 배치 1회로 확보 (60초마다 개별 fetch_ticker N회
+        # → weight 4짜리 다중조회 1회). 현물 마켓이 없는 자산(Simple Earn
+        # LD*, 상장폐지 등)이 배치에 섞이면 요청 전체가 거부되므로 마켓에
+        # 있는 심볼만 배치에 넣는다 — 빠진 자산은 아래 개별 경로가 기존과
+        # 동일하게 통화별 억제 간격으로 경고한다. 배치 실패도 개별 폴백.
+        batch_px: dict = {}
+        _known_markets = getattr(ex, 'markets', None) or {}
+        _batch_syms = [f'{c}/USDT' for c, _ in holdings
+                       if f'{c}/USDT' in _known_markets]
+        if _batch_syms:
             try:
-                sym = f'{currency}/USDT'
+                for s, row in (ex.fetch_last_prices(_batch_syms) or {}).items():
+                    px = float((row or {}).get('price') or 0)
+                    if px > 0:
+                        batch_px[s] = px
+            except Exception as e:
+                log.warning(f'[자산평가] 배치 시세 조회 실패(개별 조회로 폴백): {e}')
+        for currency, qty in holdings:
+            sym = f'{currency}/USDT'
+            if sym in batch_px:
+                total += qty * batch_px[sym]
+                continue
+            try:
                 ticker = ex.fetch_ticker(sym)
                 price = float(ticker['last'] or 0)
                 total += qty * price

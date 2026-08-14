@@ -77,34 +77,7 @@ from atlas_regime import classify_regime, REGIME_BTC_LOOKBACK
 
 
 # ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
-
-def _fetch_futures(symbol: str, timeframe: str,
-                   since_ms: Optional[int] = None,
-                   max_bars: int = 20000) -> list:
-    """Binance 스팟 퍼블릭 API로 OHLCV 전체 페이지네이션."""
-    try:
-        import ccxt
-        ex = ccxt.binance({'options': {'defaultType': 'spot'}})
-        ccxt_sym = symbol.replace('USDT', '/USDT')
-        all_data: list = []
-        since = since_ms
-        while len(all_data) < max_bars:
-            batch = ex.fetch_ohlcv(ccxt_sym, timeframe, since=since, limit=1000)
-            if not batch:
-                break
-            if all_data:
-                batch = [b for b in batch if b[0] > all_data[-1][0]]
-            if not batch:
-                break
-            all_data.extend(batch)
-            if len(batch) < 1000:
-                break
-            since = batch[-1][0] + 1
-        return all_data
-    except Exception as e:
-        print(f'  [오류] {symbol} {timeframe} 데이터 로드 실패: {e}')
-        return []
-
+# (_fetch_futures 는 fetch_ohlcv_spot 과 중복인 0참조 사본이라 삭제했다)
 
 def load_ohlcv_csv(path: str) -> list:
     """CSV에서 OHLCV 로드. 컬럼: timestamp(ms/datetime), open, high, low, close, volume"""
@@ -286,12 +259,18 @@ def _funding_asof(funding_map: dict, ts_ms: int) -> Optional[float]:
 
 
 def build_funding_map(symbol: str, since_ms: int,
-                      data_dir: Optional[Path] = None) -> dict:
+                      data_dir: Optional[Path] = None,
+                      mem_cache: Optional[dict] = None) -> dict:
     """심볼의 과거 펀딩비를 {ts_ms: rate} 로. 실패·미지원이면 빈 dict.
 
     OHLCV와 같은 방식으로 CSV 캐시한다 — 5년치가 심볼당 약 5,500건이라
     매 실행마다 받으면 백테스트가 느려지고 레이트리밋도 낭비된다.
+    mem_cache 는 _load_or_fetch 와 같은 규약(WFO split 간 재파싱 방지).
     """
+    if mem_cache is not None:
+        hit = mem_cache.get((symbol, 'funding'))
+        if hit and hit[0] <= since_ms:
+            return hit[1]
     csv_path = (data_dir / f'{symbol}_FUNDING.csv') if data_dir else None
     rows: list = []
     if csv_path and csv_path.exists():
@@ -309,7 +288,10 @@ def build_funding_map(symbol: str, since_ms: int,
     if not rows:
         return {}
     rows.sort()
-    return {'_keys': [t for t, _ in rows], 'rates': dict(rows)}
+    fm = {'_keys': [t for t, _ in rows], 'rates': dict(rows)}
+    if mem_cache is not None:
+        mem_cache[(symbol, 'funding')] = (since_ms, fm)
+    return fm
 
 
 def _fetch_funding_history(symbol: str, since_ms: int) -> list:
@@ -573,14 +555,30 @@ def fetch_ohlcv_spot(symbol: str, timeframe: str,
 
 
 def _load_or_fetch(symbol: str, timeframe: str,
-                   since_ms: int, data_dir: Optional[Path]) -> list:
-    """CSV 캐시 → API 순으로 데이터 로드."""
+                   since_ms: int, data_dir: Optional[Path],
+                   mem_cache: Optional[dict] = None) -> list:
+    """CSV 캐시 → API 순으로 데이터 로드.
+
+    mem_cache 가 있으면 (symbol, timeframe) 단위로 재사용한다 — WFO가
+    split마다(--rolling이면 10회) 같은 CSV를 통째로 재파싱하던 것을 1회로.
+    캐시는 처음 로드했을 때의 since_ms 를 함께 저장하고, **그때보다 같거나
+    이른 시점을 요청한 경우만** 적중시킨다 (더 이른 데이터가 필요한 요청에
+    부분 데이터를 주면 안 된다 — CSV 경로는 since 무관 전체 로드라 항상
+    안전하고, API 경로만 이 조건이 실효를 가진다).
+    """
+    if mem_cache is not None:
+        hit = mem_cache.get((symbol, timeframe))
+        if hit and hit[0] <= since_ms:
+            return hit[1]
     if data_dir:
         tf_label = timeframe.replace('h', 'H').replace('d', 'D')
         csv_path = data_dir / f'{symbol}_{tf_label}.csv'
         if csv_path.exists():
             print(f'    [CSV] {csv_path.name} 로드')
-            return load_ohlcv_csv(str(csv_path))
+            data = load_ohlcv_csv(str(csv_path))
+            if mem_cache is not None and data:
+                mem_cache[(symbol, timeframe)] = (since_ms, data)
+            return data
 
     print(f'    [API] {symbol} {timeframe} 다운로드 중...')
     data = fetch_ohlcv_spot(symbol, timeframe, since_ms=since_ms)
@@ -591,6 +589,8 @@ def _load_or_fetch(symbol: str, timeframe: str,
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df.to_csv(csv_path, index=False)
         print(f'    [CSV] {csv_path.name} 저장 완료')
+    if mem_cache is not None and data:
+        mem_cache[(symbol, timeframe)] = (since_ms, data)
     return data
 
 
@@ -1092,18 +1092,20 @@ def run_spot_backtest(
     data_dir:    Optional[Path] = None,
     risk_pct:    float = SPOT_BASE_RISK_PCT,
     initial_equity: float = BT_INITIAL_EQ,
+    mem_cache:   Optional[dict] = None,
 ) -> dict:
     """
     전략 × 심볼 조합 전체 백테스트.
     Returns: {strategy_id: {symbol: {'trades': [...], 'metrics': {...}}}}
+    mem_cache: WFO처럼 같은 데이터로 여러 번 부를 때 디스크 재파싱 방지.
     """
     since_ms = _since_ms(start_date)
     # BTC 1D (레짐 맵용, 스팟 데이터 사용)
     print(f'\n[레짐맵] BTC 1D 데이터 로드...')
-    btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir)
+    btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir, mem_cache)
     # 4H도 함께 로드 — 라이브가 adx_4h로 MICRO_RANGING을 판정하므로,
     # 넘기지 않으면 백테스트만 다른 레짐 경로를 걷는다.
-    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir)
+    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir, mem_cache)
     regime_map = build_regime_map(btc_1d, btc_4h) if btc_1d else {}
     print(f'  레짐맵 생성: {len(regime_map)}일'
           + ('' if btc_4h else ' (4H 없음 — MICRO_RANGING 미반영)'))
@@ -1119,7 +1121,7 @@ def run_spot_backtest(
     if need_4h:
         print(f'\n[데이터] 4H 심볼 로드 ({len(symbols)}개)...')
         for sym in symbols:
-            data = _load_or_fetch(sym, '4h', since_ms, data_dir)
+            data = _load_or_fetch(sym, '4h', since_ms, data_dir, mem_cache)
             if data:
                 ohlcv_4h[sym] = data
 
@@ -1132,7 +1134,7 @@ def run_spot_backtest(
         for sym in symbols:
             if sym in ohlcv_1d:
                 continue
-            data = _load_or_fetch(sym, '1d', since_ms, data_dir)
+            data = _load_or_fetch(sym, '1d', since_ms, data_dir, mem_cache)
             if data:
                 ohlcv_1d[sym] = data
 
@@ -1148,7 +1150,7 @@ def run_spot_backtest(
     if any(s in FUNDING_APPLY_STRATS for s in strategies):
         print(f'\n[데이터] 펀딩비 로드 ({len(symbols)}개)...')
         for sym in symbols:
-            fm = build_funding_map(sym, since_ms, data_dir)
+            fm = build_funding_map(sym, since_ms, data_dir, mem_cache)
             if fm:
                 funding_maps[sym] = fm
         print(f'  펀딩맵: {len(funding_maps)}/{len(symbols)}심볼'
@@ -1239,10 +1241,15 @@ def run_walk_forward(
             ('R4_OOS', '2024-01-01', datetime.now(timezone.utc).strftime('%Y-%m-%d')),
         ]
 
+    # split 간 데이터 재사용: IS가 가장 이른 시작(2021-01-01)이라 첫 로드가
+    # 이후 모든 split의 상위집합이 된다 — --rolling이면 CSV 전체 재파싱
+    # 10회가 1회로 준다.
+    mem_cache: dict = {}
     for label, start, end in splits:
         print(f'\n[Walk-Forward] {label}: {start} ~ {end}')
         res = run_spot_backtest(strategies, symbols, start, end, data_dir,
-                                initial_equity=initial_equity)
+                                initial_equity=initial_equity,
+                                mem_cache=mem_cache)
         wf_results[label] = {
             sid: res[sid].get('_combined', {}) for sid in strategies
         }
