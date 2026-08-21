@@ -9,14 +9,7 @@ atlas_spot_strategies.py의 get_signal_sN()이 의도한 조건에서
   pytest tests/test_strategies.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import pandas as pd

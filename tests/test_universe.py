@@ -7,14 +7,7 @@ atlas_spot_universe.py의 심볼 필터링/랭킹 로직을 검증합니다.
   pytest tests/test_universe.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from atlas_spot_universe import (
     _is_excluded, _is_stable_price,

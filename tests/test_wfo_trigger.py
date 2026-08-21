@@ -13,14 +13,8 @@ ATLAS — WFO → 재최적화 트리거 체인
   pytest tests/test_wfo_trigger.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -83,9 +77,16 @@ class TestDeployUnits:
         assert (self.ROOT / 'atlas-wfo-report.timer').exists()
 
     def test_reopt_has_no_timer_by_design(self):
-        """재최적화는 리포트가 트리거한다 — 독립 타이머가 있으면 중복 실행된다."""
-        timers = list(self.ROOT.glob('*.timer'))
-        assert [t.name for t in timers] == ['atlas-wfo-report.timer']
+        """재최적화는 리포트가 트리거한다 — 독립 타이머가 있으면 중복 실행된다.
+
+        지키려는 불변식은 '재최적화에 타이머가 없다'는 것 하나다. 예전에는
+        deploy 디렉터리의 타이머가 **정확히 1개**인지로 검사했는데, 그러면
+        무관한 잡(주간 리포트 등)을 타이머로 등록하는 것만으로 깨진다.
+        의도한 적 없는 제약이라 실제로 정상 추가를 막았다.
+        """
+        assert not (self.ROOT / 'atlas-wfo-reopt.timer').exists(), (
+            '재최적화에 독립 타이머가 생기면 리포트 트리거와 겹쳐 '
+            '메모리 피크가 중복된다(RAM 951MB 서버)')
 
     def test_reopt_runs_after_report(self):
         unit = (self.ROOT / 'atlas-wfo-reopt.service').read_text()
@@ -102,3 +103,45 @@ class TestDeployUnits:
         """라이브 봇을 지키기 위한 cgroup 상한이 두 잡 모두에 있어야 한다."""
         for name in ('atlas-wfo-report.service', 'atlas-wfo-reopt.service'):
             assert 'MemoryMax=' in (self.ROOT / name).read_text(), name
+
+
+class TestLogRotation:
+    """systemd가 append 하는 로그에도 회전이 있어야 한다.
+
+    봇의 RotatingFileHandler는 logs/atlas_spot_<날짜>.log 를 회전시킨다.
+    그런데 systemd 유닛은 stdout/stderr를 logs/spot_main.log 에 append 하고,
+    **대시보드가 파싱하는 건 후자**다(atlas_web_dashboard.LOG_FILE).
+    즉 보호가 필요한 파일에 회전이 없었다 — 실측 1.4MB/일로 무한 증가.
+    """
+
+    ROOT = Path(__file__).parent.parent / 'deploy'
+
+    def test_logrotate_config_exists(self):
+        assert (self.ROOT / 'atlas-logrotate.conf').exists(), (
+            'systemd append 로그(spot_main.log·dashboard.log)에 회전이 없다')
+
+    def test_uses_copytruncate(self):
+        """systemd가 fd를 붙잡고 있어 rename 방식은 새 파일을 비워 둔다."""
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        assert 'copytruncate' in conf, (
+            'copytruncate 없이 회전하면 systemd가 옛 inode에 계속 쓴다 — '
+            '새 로그가 영원히 비고 대시보드는 상태를 못 읽는다')
+
+    def test_covers_the_file_dashboard_parses(self):
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        assert '/root/atlas_spot/logs/*.log' in conf
+
+    def test_rotates_by_size_not_daily(self):
+        """일 단위 회전은 대시보드 레짐 표시를 매일 끊는다.
+
+        대시보드는 spot_main.log의 *내용*을 파싱해 레짐을 뽑으므로, 회전으로
+        파일이 비면 다음 레짐 로그(시간당 1회)까지 표시가 사라진다. 실제로
+        강제 회전 직후 /api/status의 regime이 null로 떨어지는 것을 확인했다.
+        """
+        conf = (self.ROOT / 'atlas-logrotate.conf').read_text(encoding='utf-8')
+        body = '\n'.join(ln for ln in conf.splitlines()
+                         if not ln.lstrip().startswith('#'))
+        assert 'size 20M' in body
+        assert not any(ln.strip() in ('daily', 'hourly', 'weekly')
+                       for ln in body.splitlines()), (
+            '시간 기준 회전은 대시보드 표시 공백을 주기적으로 만든다')

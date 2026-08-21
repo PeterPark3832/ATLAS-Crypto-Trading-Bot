@@ -3,21 +3,24 @@ ATLAS Spot Trading Bot — 설정
 ==============================
 현물(Spot) 전용 파라미터. 선물 config(atlas_config.py)와 완전히 분리.
 
-전략 목록:
-  S1: Buy & Hold (벤치마크)
-  S2: SMA Golden Cross       1D
-  S3: EMA Trend Follow       4H  (v2 Module A 롱 전용 변환)
-  S4: RSI Mean Reversion     1D  (v2 Module B 롱 전용 변환)
-  S5: Bollinger Band Bounce  1D
-  S6: Donchian Breakout      1D  (터틀 트레이딩)
-  S7: MACD Momentum          4H
+전략 목록 (구현 8개 — 라이브 진입은 아래 레짐 맵에 배정된 4개뿐):
+  S1  : Buy & Hold (벤치마크)
+  S2  : SMA Golden Cross       1D
+  S3  : EMA Trend Follow       4H  (v2 Module A 롱 전용 변환)
+  S4  : RSI Mean Reversion     1D  (v2 Module B 롱 전용 변환)
+  S5  : Bollinger Band Bounce  1D
+  S6  : Donchian Breakout      1D  (터틀 트레이딩)
+  S7  : MACD Momentum          4H
+  S7V4: MACD Momentum(강화)    4H  (b470232에서 벤치 — 레짐 미배정)
 
-레짐별 활성 전략:
+레짐별 활성 전략 (REGIME_STRATEGY_MAP 이 단일 출처):
   TRENDING_UP  : S6            (돌파)
   RANGING      : S4, S5        (평균회귀)
-  WEAK_TREND   : S3, S5, S6    (추세 형성 초기, 리스크 70%)
-  TRENDING_DOWN: S4            (과매도 반등 한정 — S5는 실전 0승으로 제외)
+  WEAK_TREND   : S3, S5, S6    (추세 형성 초기, 리스크 50%)
+  TRENDING_DOWN: S4            (과매도 반등 한정 — S5는 실전 0승으로 제외, 리스크 30%)
+  MICRO_RANGING: 전면 차단     (1D는 추세인데 4H ADX<20 — 실제로는 횡보)
   CRISIS       : 전면 차단
+  UNKNOWN      : 전면 차단
 """
 
 import os
@@ -30,13 +33,6 @@ load_dotenv(_env_path if _env_path.exists() else None)
 
 def _opt(key: str, default: str = '') -> str:
     return os.getenv(key, default).strip()
-
-
-def _req(key: str) -> str:
-    v = os.getenv(key, '').strip()
-    if not v:
-        raise RuntimeError(f"[설정 오류] 환경변수 '{key}' 없음. .env 파일을 확인하세요.")
-    return v
 
 
 # ─────────────────────────────────────────────────────────────
@@ -415,7 +411,11 @@ SPOT_PRICE_POLL_SEC  = 60
 # 백테스트 비용 모델
 # ─────────────────────────────────────────────────────────────
 BT_SPOT_FEE      = 0.001    # 스팟 수수료 0.1% (Taker)
-BT_SPOT_SLIPPAGE = 0.0003   # 슬리피지 0.03% (BTCUSDT 기준 폴백 — 티어 미매칭 시)
+BT_SPOT_SLIPPAGE = 0.0003   # (미사용) 슬리피지는 BT_SLIPPAGE_BY_TIER 로 결정된다.
+                            # '티어 미매칭 시 폴백'으로 적혀 있었으나
+                            # _get_slippage 의 tier3 가 catch-all 이라 이 값에
+                            # 도달하는 경로가 없다. 존재하지 않는 폴백을
+                            # 설명하던 주석이라 사실대로 고친다.
 BT_INITIAL_EQ    = 10_000.0 # 초기 자본 $10,000
 
 # 심볼별 슬리피지 티어 (백테스트 비용 현실화)

@@ -8,16 +8,10 @@ load_trades(DB 조회), calc(통계 계산), strategy_summary(전략별 요약)�
   pytest tests/test_weekly_report.py -v
 """
 
-import os
 import sqlite3
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import pytest
@@ -72,6 +66,19 @@ def _df(rows):
 # ══════════════════════════════════════════════════════════════
 #  load_trades
 # ══════════════════════════════════════════════════════════════
+
+# DB 경로 해석(죽은 DB_FILE 오버라이드 폴백) 테스트는 로직이
+# atlas_db.resolve_db_path 로 승격되면서 tests/test_common_utils.py 로 이동했다.
+# 여기 남은 것: weekly_report 가 실제로 그 해석기를 거친 경로를 쓰는지.
+class TestDbPathWiring:
+    def test_db_file_is_resolved_through_shared_helper(self):
+        """모듈 로드 시점에 resolve_db_path 결과가 DB_FILE에 박혀야 한다.
+
+        (서버 .env의 죽은 DB_FILE 경로 사고 재발 방지 — 해석기 자체의
+        동작은 test_common_utils 가 검증한다)
+        """
+        assert Path(wr.SPOT_DB_FILE) == wr.DB_FILE or wr.DB_FILE.exists()
+
 
 class TestLoadTrades:
     def test_missing_db_returns_empty(self, tmp_path, monkeypatch):

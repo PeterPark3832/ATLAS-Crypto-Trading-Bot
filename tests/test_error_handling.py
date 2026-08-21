@@ -18,15 +18,9 @@ ATLAS — 예외 처리 규율
 """
 
 import ast
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).parent.parent   # 소스 스캔 기준 경로 (경로 삽입은 conftest)
 
 import pytest
 

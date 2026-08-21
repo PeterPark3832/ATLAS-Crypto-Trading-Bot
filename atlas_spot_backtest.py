@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from atlas_spot_config import (
     BT_SPOT_FEE, BT_INITIAL_EQ,
     BT_SLIPPAGE_BY_TIER, BT_TIER1_SYMBOLS, BT_TIER2_SYMBOLS,
-    SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT,
+    SPOT_BASE_RISK_PCT, SPOT_MAX_ALLOC_PCT, SPOT_MIN_ORDER_USDT,
     SPOT_KELLY_MIN_TRADES, SPOT_KELLY_SCALE_MIN, SPOT_KELLY_SCALE_MAX,
     SPOT_KELLY_WR_THRESH, SPOT_KELLY_PF_THRESH, SPOT_KELLY_FRACTION,
     SPOT_MAX_SL_PCT, SPOT_MAX_COST_PER_R,
@@ -61,46 +61,23 @@ from atlas_spot_config import (
     STRATEGY_NAMES, STRATEGY_TIMEFRAMES,
     REGIME_STRATEGY_MAP, WEAK_TREND_RISK_SCALE, TRENDING_DOWN_RISK_SCALE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
-    S3_COOLDOWN,
+    S3_COOLDOWN, S5_SL_COOLDOWN_BARS,
+    FUNDING_LONG_BLOCK, FUNDING_SHORT_BOOST, FUNDING_APPLY_STRATS,
 )
 from atlas_spot_strategies import (
     CALC_FUNCS, SIGNAL_FUNCS, EXIT_CHECK_FUNCS,
 )
-from atlas_spot_main import trailing_sl   # 추적 손절 규칙 단일 출처(라이브와 공유)
+# 추적 손절 규칙 단일 출처(라이브와 공유). atlas_rules 는 leaf 라서
+# 이 import 는 부수효과가 없다 — 예전처럼 atlas_spot_main 을 거치면
+# 백테스트를 import만 해도 라이브 봇의 로그 핸들러·mkdir가 실행됐다.
+from atlas_rules import trailing_sl
 from atlas_spot_universe import get_backtest_universe
 from atlas_indicators import _ohlcv_to_df
 from atlas_regime import classify_regime, REGIME_BTC_LOOKBACK
 
 
 # ── 인라인 유틸리티 (구 atlas_backtest 공유 코드) ─────────────────
-
-def _fetch_futures(symbol: str, timeframe: str,
-                   since_ms: Optional[int] = None,
-                   max_bars: int = 20000) -> list:
-    """Binance 스팟 퍼블릭 API로 OHLCV 전체 페이지네이션."""
-    try:
-        import ccxt
-        ex = ccxt.binance({'options': {'defaultType': 'spot'}})
-        ccxt_sym = symbol.replace('USDT', '/USDT')
-        all_data: list = []
-        since = since_ms
-        while len(all_data) < max_bars:
-            batch = ex.fetch_ohlcv(ccxt_sym, timeframe, since=since, limit=1000)
-            if not batch:
-                break
-            if all_data:
-                batch = [b for b in batch if b[0] > all_data[-1][0]]
-            if not batch:
-                break
-            all_data.extend(batch)
-            if len(batch) < 1000:
-                break
-            since = batch[-1][0] + 1
-        return all_data
-    except Exception as e:
-        print(f'  [오류] {symbol} {timeframe} 데이터 로드 실패: {e}')
-        return []
-
+# (_fetch_futures 는 fetch_ohlcv_spot 과 중복인 0참조 사본이라 삭제했다)
 
 def load_ohlcv_csv(path: str) -> list:
     """CSV에서 OHLCV 로드. 컬럼: timestamp(ms/datetime), open, high, low, close, volume"""
@@ -244,6 +221,111 @@ def _bt_rs_gate(rs_applies: bool, rank_map, rank_keys: list,
     return 1.0, None
 
 
+def _bt_funding_scale(applies: bool, funding_map: Optional[dict],
+                      ts_ms: int) -> tuple:
+    """펀딩비 판정. Returns: (리스크 배수 or **None(차단)**, 진단키 or None).
+
+    라이브 `_funding_scale` 패리티. 롱 과밀(펀딩 ≥ FUNDING_LONG_BLOCK)이면
+    진입을 막고, 숏 쏠림(≤ FUNDING_SHORT_BOOST)이면 리스크를 키운다.
+
+    데이터가 없으면 **1.0(통과)** 이다 — 라이브의 `_get_spot_funding` 도
+    조회 실패 시 0.0을 돌려 통과시키므로 같은 동작이다. 퍼프가 없는 현물
+    전용 심볼(MATIC·EOS 등)이 여기 해당한다. 하위권 취급으로 영구 차단하면
+    라이브와 어긋난다.
+    """
+    if not applies or not funding_map:
+        return 1.0, None
+    rate = _funding_asof(funding_map, ts_ms)
+    if rate is None:
+        return 1.0, None
+    if rate >= FUNDING_LONG_BLOCK:
+        return None, 'funding_block'
+    if rate <= FUNDING_SHORT_BOOST:
+        return 1.20, 'funding_boost'
+    return 1.0, None
+
+
+def _funding_asof(funding_map: dict, ts_ms: int) -> Optional[float]:
+    """그 시점에 **이미 확정된** 가장 최근 펀딩비.
+
+    펀딩은 8시간마다 확정되고 봉은 4H/1D다. 봉 시각 이후의 펀딩을 쓰면
+    미래를 보는 것이므로, ts 이하의 마지막 값만 쓴다(선행편향 차단).
+    """
+    keys = funding_map.get('_keys')
+    if not keys:
+        return None
+    i = bisect.bisect_right(keys, ts_ms) - 1
+    return funding_map['rates'][keys[i]] if i >= 0 else None
+
+
+def build_funding_map(symbol: str, since_ms: int,
+                      data_dir: Optional[Path] = None,
+                      mem_cache: Optional[dict] = None) -> dict:
+    """심볼의 과거 펀딩비를 {ts_ms: rate} 로. 실패·미지원이면 빈 dict.
+
+    OHLCV와 같은 방식으로 CSV 캐시한다 — 5년치가 심볼당 약 5,500건이라
+    매 실행마다 받으면 백테스트가 느려지고 레이트리밋도 낭비된다.
+    mem_cache 는 _load_or_fetch 와 같은 규약(WFO split 간 재파싱 방지).
+    """
+    if mem_cache is not None:
+        hit = mem_cache.get((symbol, 'funding'))
+        if hit and hit[0] <= since_ms:
+            return hit[1]
+    csv_path = (data_dir / f'{symbol}_FUNDING.csv') if data_dir else None
+    rows: list = []
+    if csv_path and csv_path.exists():
+        try:
+            df = pd.read_csv(csv_path)
+            rows = [(int(t), float(r)) for t, r in zip(df['ts'], df['rate'], strict=True)]
+        except Exception as e:
+            print(f'    [펀딩] {symbol} 캐시 읽기 실패 — 재수집: {e}')
+            rows = []
+    if not rows:
+        rows = _fetch_funding_history(symbol, since_ms)
+        if rows and csv_path:
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(rows, columns=['ts', 'rate']).to_csv(csv_path, index=False)
+    if not rows:
+        return {}
+    rows.sort()
+    fm = {'_keys': [t for t, _ in rows], 'rates': dict(rows)}
+    if mem_cache is not None:
+        mem_cache[(symbol, 'funding')] = (since_ms, fm)
+    return fm
+
+
+def _fetch_funding_history(symbol: str, since_ms: int) -> list:
+    """선물 펀딩비 이력 전체 페이지네이션. 퍼프 미지원이면 빈 리스트."""
+    try:
+        import ccxt
+        ex = ccxt.binance({'options': {'defaultType': 'future'},
+                           'enableRateLimit': True})
+        ccxt_sym = symbol.replace('USDT', '/USDT:USDT')
+        out: list = []
+        since = since_ms
+        while True:
+            batch = ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=1000)
+            if not batch:
+                break
+            new = [(int(b['timestamp']), float(b['fundingRate']))
+                   for b in batch if b.get('fundingRate') is not None]
+            if out:
+                new = [x for x in new if x[0] > out[-1][0]]
+            if not new:
+                break
+            out.extend(new)
+            if len(batch) < 1000:
+                break
+            since = new[-1][0] + 1
+        print(f'    [펀딩] {symbol} {len(out)}건 수집')
+        return out
+    except Exception as e:
+        # 퍼프가 없는 현물 전용 심볼이 여기 온다 — 라이브도 통과시키므로
+        # 실패가 아니라 '해당 없음'이다.
+        print(f'    [펀딩] {symbol} 미지원/실패 — 필터 미적용: {e}')
+        return []
+
+
 def _bt_entry_filters(sl_dist: float, entry_price: float,
                       slip: float) -> Optional[str]:
     """라이브 진입 필터 패리티. 차단되면 진단키를, 통과하면 None을 낸다.
@@ -365,7 +447,11 @@ def build_momentum_rank_map(ohlcv_by_symbol: dict,
 
     px = pd.DataFrame(closes).sort_index()
     mom = px / px.shift(momentum_days) - 1.0
-    vol = px.pct_change().rolling(vol_days).std()
+    # ffill 후 fill_method=None — 지금 동작(pad 후 계산)을 그대로 보존하면서
+    # FutureWarning을 없앤다. pct_change의 fill_method 인자 자체가 제거 예정이라,
+    # 그대로 두면 pandas 업그레이드 시 **기본 동작이 바뀌어** 변동성·RS 순위가
+    # 조용히 달라진다(requirements는 pandas<4.0.0까지 허용한다).
+    vol = px.ffill().pct_change(fill_method=None).rolling(vol_days).std()
     score = mom / vol.replace(0, np.nan)
     # 높을수록 상위 → 내림차순 순위(0-based)를 심볼 수로 나눠 백분위화
     ranks = score.rank(axis=1, ascending=False, method='first', na_option='bottom')
@@ -469,14 +555,30 @@ def fetch_ohlcv_spot(symbol: str, timeframe: str,
 
 
 def _load_or_fetch(symbol: str, timeframe: str,
-                   since_ms: int, data_dir: Optional[Path]) -> list:
-    """CSV 캐시 → API 순으로 데이터 로드."""
+                   since_ms: int, data_dir: Optional[Path],
+                   mem_cache: Optional[dict] = None) -> list:
+    """CSV 캐시 → API 순으로 데이터 로드.
+
+    mem_cache 가 있으면 (symbol, timeframe) 단위로 재사용한다 — WFO가
+    split마다(--rolling이면 10회) 같은 CSV를 통째로 재파싱하던 것을 1회로.
+    캐시는 처음 로드했을 때의 since_ms 를 함께 저장하고, **그때보다 같거나
+    이른 시점을 요청한 경우만** 적중시킨다 (더 이른 데이터가 필요한 요청에
+    부분 데이터를 주면 안 된다 — CSV 경로는 since 무관 전체 로드라 항상
+    안전하고, API 경로만 이 조건이 실효를 가진다).
+    """
+    if mem_cache is not None:
+        hit = mem_cache.get((symbol, timeframe))
+        if hit and hit[0] <= since_ms:
+            return hit[1]
     if data_dir:
         tf_label = timeframe.replace('h', 'H').replace('d', 'D')
         csv_path = data_dir / f'{symbol}_{tf_label}.csv'
         if csv_path.exists():
             print(f'    [CSV] {csv_path.name} 로드')
-            return load_ohlcv_csv(str(csv_path))
+            data = load_ohlcv_csv(str(csv_path))
+            if mem_cache is not None and data:
+                mem_cache[(symbol, timeframe)] = (since_ms, data)
+            return data
 
     print(f'    [API] {symbol} {timeframe} 다운로드 중...')
     data = fetch_ohlcv_spot(symbol, timeframe, since_ms=since_ms)
@@ -487,6 +589,8 @@ def _load_or_fetch(symbol: str, timeframe: str,
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df.to_csv(csv_path, index=False)
         print(f'    [CSV] {csv_path.name} 저장 완료')
+    if mem_cache is not None and data:
+        mem_cache[(symbol, timeframe)] = (since_ms, data)
     return data
 
 
@@ -631,6 +735,7 @@ def backtest_strategy(
     risk_pct:     float = SPOT_BASE_RISK_PCT,
     initial_equity: float = BT_INITIAL_EQ,
     rank_map:     Optional[dict] = None,
+    funding_map:  Optional[dict] = None,
 ) -> tuple[list, dict]:
     """
     단일 전략 × 단일 심볼 bar-by-bar 시뮬레이션.
@@ -640,6 +745,9 @@ def backtest_strategy(
                   주도주 리스크 부스트가 라이브와 동일하게 적용된다.
                   None이면 두 규칙 모두 비활성 — 그 경우 백테스트는
                   라이브보다 낙관적이다(막혔을 진입까지 체결로 센다).
+        funding_map: `build_funding_map()` 결과. 넘기면 롱 과밀 구간의
+                  진입 차단·숏 쏠림 부스트가 라이브와 동일하게 적용된다.
+                  None이면 비활성 — 역시 낙관 편향이 남는다.
 
     Returns:
         (trades: list[SpotTrade], diagnostics: dict)
@@ -649,6 +757,7 @@ def backtest_strategy(
 
     rank_keys = sorted(rank_map) if rank_map else []
     rs_applies = bool(rank_keys) and strategy_id in MOMENTUM_RS_GATE_STRATS
+    fund_applies = bool(funding_map) and strategy_id in FUNDING_APPLY_STRATS
 
     # 시작/종료 타임스탬프 필터
     ts_start = _since_ms(start_date)
@@ -676,7 +785,7 @@ def backtest_strategy(
     learn_at             = None   # 마지막 학습 시각(시뮬레이션 시계)
     learn_cfg = _bt_learn_config() if SPOT_LEARN_ENABLED else None
     position = None      # 현재 포지션 dict or None
-    cooldown = 0         # 쿨다운 카운터 (S3용)
+    cooldown = 0         # 쿨다운 카운터 (S3 청산 후 / S5 손절 후)
     diag     = defaultdict(int)
     diag['total_bars'] = 0
 
@@ -745,6 +854,15 @@ def backtest_strategy(
                 position = None
                 if strategy_id == 'S3':
                     cooldown = S3_COOLDOWN
+                elif strategy_id == 'S5' and reason == 'SL':
+                    # 라이브 패리티: _s5_safety_block 의 SL 쿨다운.
+                    # 평균회귀는 '더 싸졌으니 또 산다'가 되기 쉬워, 손절 직후
+                    # 같은 종목에 재진입하면 같은 하락에 연속으로 맞는다.
+                    # 라이브는 이 재진입을 막는데 백테스트가 세면, **라이브가
+                    # 절대 하지 않는 거래**로 성과를 평가하게 된다.
+                    # (막는 이유가 '나쁜 거래'이므로 편향은 비관 쪽이다 —
+                    #  S5는 지금 OOS 기준 미달로 재최적화 대상이라 특히 중요)
+                    cooldown = S5_SL_COOLDOWN_BARS
                 diag['exits'] += 1
                 continue
 
@@ -797,6 +915,17 @@ def backtest_strategy(
         if rs_flag:
             diag[rs_flag] = diag.get(rs_flag, 0) + 1
         if rs_scale is None:
+            continue
+
+        # ── 펀딩비 필터 (라이브 진입 경로 패리티) ──────────────────────
+        # 라이브는 롱이 과밀할 때(펀딩 ≥ 0.05%/8h) 추세추종 진입을 막는다.
+        # 백테스트가 이걸 모르면 라이브가 실제로는 걸렀을 구간까지 거래한
+        # 것으로 계산해 **낙관 편향**이 된다. 특히 S6는 현재 OOS PF가 가장
+        # 높은 전략이라 그 수치가 부풀려져 있으면 판단이 통째로 흔들린다.
+        fund_scale, fund_flag = _bt_funding_scale(fund_applies, funding_map, ts)
+        if fund_flag:
+            diag[fund_flag] = diag.get(fund_flag, 0) + 1
+        if fund_scale is None:
             continue
 
         slip        = _get_slippage(symbol)
@@ -855,7 +984,8 @@ def backtest_strategy(
                 diag['learn_blocked'] = diag.get('learn_blocked', 0) + 1
                 continue
 
-        adj_risk_pct = risk_pct * regime_scale * kelly_scale * health_scale * rs_scale
+        adj_risk_pct = (risk_pct * regime_scale * kelly_scale * health_scale
+                        * rs_scale * fund_scale)
         risk_usd     = equity * adj_risk_pct
         qty          = risk_usd / sl_dist
         cost_usdt    = qty * entry_price
@@ -865,6 +995,19 @@ def backtest_strategy(
             cost_usdt = equity * SPOT_MAX_ALLOC_PCT
             qty       = cost_usdt / entry_price
             adj_risk_pct = (qty * sl_dist) / equity
+
+        # 거래소 최소 주문금액(NOTIONAL) — 라이브 `_spot_buy` 패리티.
+        # 한도 축소 **이후**에 본다(라이브와 같은 순서). 미달이면 주문 자체가
+        # 거부되므로 진입이 아니라 미체결이다.
+        #
+        # 기본 자본($10,000)에서는 주문이 수백 달러라 이 바닥이 걸리지 않아
+        # 오랫동안 드러나지 않았다. 그러나 소액 계좌에서는 상시로 걸린다 —
+        # 실계좌 $565 기준 사이징 진단이 레짐별 주문금액을 $3.26~$10.81로
+        # 보고했고, 하락장 담당 S4는 $3.26으로 아예 진입 불가였다.
+        # 모델링하지 않으면 WFO는 **그 계좌가 실행할 수 없는 조합**을 검증한다.
+        if cost_usdt < SPOT_MIN_ORDER_USDT:
+            diag['notional_block'] = diag.get('notional_block', 0) + 1
+            continue
 
         fee_cost = cost_usdt * BT_SPOT_FEE
         equity  -= fee_cost  # 매수 수수료
@@ -948,18 +1091,21 @@ def run_spot_backtest(
     end_date:    str,
     data_dir:    Optional[Path] = None,
     risk_pct:    float = SPOT_BASE_RISK_PCT,
+    initial_equity: float = BT_INITIAL_EQ,
+    mem_cache:   Optional[dict] = None,
 ) -> dict:
     """
     전략 × 심볼 조합 전체 백테스트.
     Returns: {strategy_id: {symbol: {'trades': [...], 'metrics': {...}}}}
+    mem_cache: WFO처럼 같은 데이터로 여러 번 부를 때 디스크 재파싱 방지.
     """
     since_ms = _since_ms(start_date)
     # BTC 1D (레짐 맵용, 스팟 데이터 사용)
     print(f'\n[레짐맵] BTC 1D 데이터 로드...')
-    btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir)
+    btc_1d = _load_or_fetch('BTCUSDT', '1d', since_ms, data_dir, mem_cache)
     # 4H도 함께 로드 — 라이브가 adx_4h로 MICRO_RANGING을 판정하므로,
     # 넘기지 않으면 백테스트만 다른 레짐 경로를 걷는다.
-    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir)
+    btc_4h = _load_or_fetch('BTCUSDT', '4h', since_ms, data_dir, mem_cache)
     regime_map = build_regime_map(btc_1d, btc_4h) if btc_1d else {}
     print(f'  레짐맵 생성: {len(regime_map)}일'
           + ('' if btc_4h else ' (4H 없음 — MICRO_RANGING 미반영)'))
@@ -975,7 +1121,7 @@ def run_spot_backtest(
     if need_4h:
         print(f'\n[데이터] 4H 심볼 로드 ({len(symbols)}개)...')
         for sym in symbols:
-            data = _load_or_fetch(sym, '4h', since_ms, data_dir)
+            data = _load_or_fetch(sym, '4h', since_ms, data_dir, mem_cache)
             if data:
                 ohlcv_4h[sym] = data
 
@@ -988,7 +1134,7 @@ def run_spot_backtest(
         for sym in symbols:
             if sym in ohlcv_1d:
                 continue
-            data = _load_or_fetch(sym, '1d', since_ms, data_dir)
+            data = _load_or_fetch(sym, '1d', since_ms, data_dir, mem_cache)
             if data:
                 ohlcv_1d[sym] = data
 
@@ -997,6 +1143,18 @@ def run_spot_backtest(
         rank_map = build_momentum_rank_map(ohlcv_1d)
         print(f'  모멘텀 순위맵: {len(rank_map)}일 × {len(ohlcv_1d)}심볼'
               + ('' if rank_map else ' — 데이터 부족, RS Gate 미적용'))
+
+    # 펀딩비는 추세추종 전략에만 쓰인다. 대상이 없으면 받지 않는다
+    # (심볼당 5년치 약 5,500건 — 불필요하게 받으면 첫 실행이 크게 느려진다).
+    funding_maps: dict = {}
+    if any(s in FUNDING_APPLY_STRATS for s in strategies):
+        print(f'\n[데이터] 펀딩비 로드 ({len(symbols)}개)...')
+        for sym in symbols:
+            fm = build_funding_map(sym, since_ms, data_dir, mem_cache)
+            if fm:
+                funding_maps[sym] = fm
+        print(f'  펀딩맵: {len(funding_maps)}/{len(symbols)}심볼'
+              + ('' if funding_maps else ' — 데이터 없음, 펀딩 필터 미적용'))
 
     # 백테스트 실행
     results = {}
@@ -1014,10 +1172,11 @@ def run_spot_backtest(
                 continue
             trades, diag = backtest_strategy(
                 strategy_id, sym, ohlcv, regime_map,
-                start_date, end_date, risk_pct,
+                start_date, end_date, risk_pct, initial_equity,
                 rank_map=rank_map or None,
+                funding_map=funding_maps.get(sym) or None,
             )
-            metrics = calc_spot_metrics(trades, BT_INITIAL_EQ, start_date, end_date)
+            metrics = calc_spot_metrics(trades, initial_equity, start_date, end_date)
             results[strategy_id][sym] = {
                 'trades':  [asdict(t) for t in trades],
                 'metrics': metrics,
@@ -1032,7 +1191,7 @@ def run_spot_backtest(
             print(f'    {sym:<14} {n:>4}건  PnL {pnl:+6.1f}%  WR {wr:.0f}%')
 
         # 전략 합산 지표
-        combined = calc_spot_metrics(all_trades, BT_INITIAL_EQ, start_date, end_date)
+        combined = calc_spot_metrics(all_trades, initial_equity, start_date, end_date)
         results[strategy_id]['_combined'] = combined
         print(f'  → 합계: {len(all_trades)}건  '
               f'PnL {combined.get("total_pnl_pct", 0):+.1f}%  '
@@ -1057,6 +1216,7 @@ def run_walk_forward(
     symbols:     list[str],
     data_dir:    Optional[Path] = None,
     rolling:     bool = False,
+    initial_equity: float = BT_INITIAL_EQ,
 ) -> dict:
     """
     IS(2021~2023) / OOS(2024~현재) Walk-Forward 검증.
@@ -1081,9 +1241,15 @@ def run_walk_forward(
             ('R4_OOS', '2024-01-01', datetime.now(timezone.utc).strftime('%Y-%m-%d')),
         ]
 
+    # split 간 데이터 재사용: IS가 가장 이른 시작(2021-01-01)이라 첫 로드가
+    # 이후 모든 split의 상위집합이 된다 — --rolling이면 CSV 전체 재파싱
+    # 10회가 1회로 준다.
+    mem_cache: dict = {}
     for label, start, end in splits:
         print(f'\n[Walk-Forward] {label}: {start} ~ {end}')
-        res = run_spot_backtest(strategies, symbols, start, end, data_dir)
+        res = run_spot_backtest(strategies, symbols, start, end, data_dir,
+                                initial_equity=initial_equity,
+                                mem_cache=mem_cache)
         wf_results[label] = {
             sid: res[sid].get('_combined', {}) for sid in strategies
         }

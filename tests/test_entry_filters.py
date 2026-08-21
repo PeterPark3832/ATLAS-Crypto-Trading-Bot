@@ -15,15 +15,9 @@ ATLAS — 진입 필터 (S5 안전 · RS Gate · 펀딩비)
   pytest tests/test_entry_filters.py -v
 """
 
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -99,12 +93,20 @@ class TestFundingScale:
         monkeypatch.setattr(sm, '_get_spot_funding', lambda s: mid)
         assert sm._funding_scale(sid, 'X') == 1.0
 
-    def test_backtest_does_not_model_funding(self):
-        """백테스트는 과거 펀딩비를 받지 않아 이 필터가 없다 — 낙관 편향."""
-        src = Path(bt.__file__).read_text()
-        assert 'FUNDING_APPLY_STRATS' not in src
-        assert '펀딩비' in (sm._funding_scale.__doc__ or ''), (
-            '모델링 격차가 코드에 적혀 있어야 다음 사람이 안다')
+    def test_backtest_models_funding(self):
+        """백테스트도 이 필터를 반영해야 한다.
+
+        예전에는 과거 펀딩비를 받지 않아 필터 자체가 없었고, 이 테스트는 그
+        **격차를 사실로 고정**하고 있었다(낙관 편향을 문서화만 한 상태).
+        지금은 build_funding_map 으로 이력을 받아 캐시하므로, 라이브가 걸렀을
+        구간을 백테스트도 거른다. 다시 빠지면 성과가 조용히 부풀려진다.
+        """
+        src = Path(bt.__file__).read_text(encoding='utf-8')
+        assert 'FUNDING_APPLY_STRATS' in src, (
+            '백테스트가 펀딩 필터를 잃었다 — 라이브가 막았을 진입까지 '
+            '체결로 세어 성과가 낙관 편향된다')
+        assert bt.FUNDING_LONG_BLOCK is cfg.FUNDING_LONG_BLOCK, (
+            '상수를 복제하면 한쪽만 바뀌어 조용히 어긋난다')
 
 
 # ══════════════════════════════════════════════════════════════

@@ -16,14 +16,7 @@ ATLAS — 사이징 실행 가능성 진단
   pytest tests/test_sizing_capability.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -193,3 +186,140 @@ class TestReport:
                             lambda eq: (_ for _ in ()).throw(Exception('boom')))
         sm._report_sizing_capability(134.0)      # 예외가 새어나오면 기동이 죽는다
         assert not _no_telegram
+
+
+class TestRegimeIdleDetection:
+    """'지금 이 레짐에서는 아무것도 못 산다'를 알린다.
+
+    기동 진단은 죽은 **조합**을 나열하지만 그 상태 자체는 말해주지 않는다.
+    소액 계좌가 하락장에 들어가면 담당 전략이 통째로 최소주문액 아래로
+    떨어져 봇이 **조용히 논다** — 로그도 정상이고 프로세스도 살아 있어
+    운영자는 계속 매매 중이라 믿는다. 실측: 자산 $217에서 TRENDING_DOWN의
+    유일한 전략 S4가 주문 $3.26으로 최소 $5 미달이었다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_regime_idle_alerted', set())
+
+    def _rows(self, monkeypatch, tradable):
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN',
+             'tradable': tradable, 'cost_usdt': 3.26, 'risk_pct': 0.0009},
+            {'strategy': 'S6', 'regime': 'TRENDING_UP',
+             'tradable': True, 'cost_usdt': 10.7, 'risk_pct': 0.003},
+        ])
+
+    def test_alerts_when_no_strategy_can_enter(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        msg = sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        assert 'TRENDING_DOWN' in msg and '진입 가능한 전략이 없습니다' in msg
+
+    def test_silent_when_some_strategy_works(self, monkeypatch):
+        self._rows(monkeypatch, tradable=True)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0) == ''
+
+    def test_alerts_once_per_regime(self, monkeypatch):
+        """5초 루프에서 점검하므로 억제가 없으면 폭주한다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0) == ''
+
+    def test_rearms_after_recovery(self, monkeypatch):
+        """자본이 늘어 해소됐다가 다시 나빠지면 또 알려야 한다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+        self._rows(monkeypatch, tradable=True)
+        assert sm.check_regime_idle('TRENDING_DOWN', 400.0) == ''
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+
+    def test_crisis_is_not_reported(self, monkeypatch):
+        """CRISIS는 설계상 전면 차단 — 정상 동작이므로 알리지 않는다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle(sm.REGIME_CRISIS, 217.0) == ''
+
+    def test_empty_regime_is_safe(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('', 217.0) == ''
+
+    def test_unknown_regime_is_not_reported(self, monkeypatch):
+        """기동 직후 RegimeLoop가 첫 분류를 내기 전 상태.
+
+        UNKNOWN은 REGIME_STRATEGY_MAP에 없어 '담당 전략 0개'로 읽힌다.
+        걸러내지 않으면 **재시작할 때마다** 허위 경보가 나간다.
+        실측: 11:14:56 '레짐(UNKNOWN)에서 진입 가능한 전략이 없습니다'.
+        """
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('UNKNOWN', 217.0) == ''
+
+    def test_unmapped_regime_is_not_reported(self, monkeypatch):
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('NOT_A_REGIME', 217.0) == ''
+
+    def test_known_regime_still_reported(self, monkeypatch):
+        """가드가 정상 경보까지 막으면 안 된다."""
+        self._rows(monkeypatch, tradable=False)
+        assert sm.check_regime_idle('TRENDING_DOWN', 217.0)
+
+    def test_regimes_with_no_assigned_strategies_are_silent(self, monkeypatch):
+        """맵에 빈 레짐이 셋 있다 — 전부 '설계상 쉬는 중'이지 자본 문제가 아니다.
+
+        CRISIS(변동성 폭발) · MICRO_RANGING(동작 보존) · UNKNOWN(판별 실패).
+        """
+        self._rows(monkeypatch, tradable=False)
+        empty = [rg for rg, strats in sm.REGIME_STRATEGY_MAP.items() if not strats]
+        assert empty, '빈 레짐이 하나도 없다면 이 가드의 전제가 바뀐 것이다'
+        for rg in empty:
+            assert sm.check_regime_idle(rg, 217.0) == '', f'{rg}에서 허위 경보'
+
+
+class TestDeadComboExplainsCause:
+    """진입 불가 알림은 **어느 배수 때문인지**를 말해야 한다.
+
+    금액만 알리면 운영자는 어느 레버를 당길지 정할 수 없다. 실측 사례에서
+    주원인은 Kelly가 하한(0.15)까지 내려간 것이었고, 그건 그 전략의 실적이
+    나쁘다는 뜻이라 '배수를 올려 해결할 문제'가 아니었다 —
+    성적 나쁜 전략을 하락장에서 최소로 줄이는 건 설계대로 동작한 것이다.
+    """
+
+    def test_alert_includes_multiplier_breakdown(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN', 'tradable': False,
+             'cost_usdt': 3.21, 'risk_pct': 0.0009,
+             'kelly': 0.15, 'health': 1.0, 'regime_scale': 0.30},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert sent, '진입 불가 조합이 있는데 알림이 없다'
+        msg = sent[0]
+        assert 'kelly' in msg and '0.15' in msg, '주원인(배수)이 안 보인다'
+        assert '레짐' in msg and '0.30' in msg
+        assert '1.56x 부족' in msg, '얼마나 모자란지 없으면 판단 불가'
+
+    def test_alert_suggests_required_equity(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S4', 'regime': 'TRENDING_DOWN', 'tradable': False,
+             'cost_usdt': 3.21, 'risk_pct': 0.0009,
+             'kelly': 0.15, 'health': 1.0, 'regime_scale': 0.30},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert '$338' in sent[0] or '$337' in sent[0], (
+            f'필요 자산 금액이 없다: {sent[0]}')
+
+    def test_no_alert_when_all_tradable(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        monkeypatch.setattr(sm, '_typical_sl_pct', lambda: 0.061)
+        monkeypatch.setattr(sm, '_diagnose_sizing_capability', lambda eq: [
+            {'strategy': 'S6', 'regime': 'TRENDING_UP', 'tradable': True,
+             'cost_usdt': 10.7, 'risk_pct': 0.003,
+             'kelly': 1.0, 'health': 1.0, 'regime_scale': 1.0},
+        ])
+        sm._report_sizing_capability(216.7)
+        assert not sent

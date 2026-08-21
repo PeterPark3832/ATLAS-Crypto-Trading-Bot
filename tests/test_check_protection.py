@@ -14,19 +14,23 @@ DB의 sl_order_id가 채워져 있다는 것만으로는 부족하다 — 그 �
   pytest tests/test_check_protection.py -v
 """
 
-import os
 import sqlite3
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
 import check_protection as cp
+
+
+@pytest.fixture(autouse=True)
+def _creds(monkeypatch):
+    """이 도구는 프라이빗 API를 쓰므로 자격증명 가드가 있다.
+
+    로직 테스트에서는 통과시키고, 가드 자체는 TestCredentialGuard가 본다.
+    """
+    monkeypatch.setattr(cp, 'BINANCE_API_KEY', 'live-key')
+    monkeypatch.setattr(cp, 'BINANCE_API_SECRET', 'live-secret')
 
 
 @pytest.fixture
@@ -52,14 +56,24 @@ def db(tmp_path, monkeypatch):
 
 
 class _Ex:
-    def __init__(self, free, orders=None, fail_orders=False):
+    """가짜 거래소.
+
+    total은 free + locked다. 보호주문이 걸린 포지션은 물량이 잠겨 있어
+    free가 0에 가깝다 — 도구는 total로 판정해야 한다.
+    """
+
+    def __init__(self, free, orders=None, fail_orders=False, locked=None):
         self._free, self._orders = free, orders or []
         self._fail = fail_orders
+        self._locked = locked or {}
 
     def fetch_balance(self):
-        return {'free': self._free}
+        total = {k: v + self._locked.get(k, 0.0) for k, v in self._free.items()}
+        for k, v in self._locked.items():
+            total.setdefault(k, v)
+        return {'free': self._free, 'used': self._locked, 'total': total}
 
-    def fetch_open_orders(self):
+    def fetch_open_orders(self, symbol=None):
         if self._fail:
             raise RuntimeError('권한 없음')
         return self._orders
@@ -67,11 +81,84 @@ class _Ex:
 
 @pytest.fixture
 def ex(monkeypatch):
-    def _set(free, orders=None, fail_orders=False):
-        e = _Ex(free, orders, fail_orders)
+    def _set(free, orders=None, fail_orders=False, locked=None):
+        e = _Ex(free, orders, fail_orders, locked)
         monkeypatch.setattr(cp, '_exchange', lambda: e)
         return e
     return _set
+
+
+class TestCredentialGuard:
+    """환경변수 스텁이 .env의 실제 키를 가리면 도구 전체가 죽는다.
+
+    실제로 배포판에서 발생했다 — 모듈 상단의
+    `os.environ.setdefault('BINANCE_API_KEY', 'CHECK')`가 먼저 실행되고,
+    atlas_spot_config는 load_dotenv를 override 없이 부르기 때문에 더미가
+    실제 키를 가렸다. 키는 _opt라 검증 없이 통과해 그대로 거래소로 나갔고,
+    운영자에게는 원인을 알 수 없는 ccxt -2008 스택트레이스만 남았다.
+    """
+
+    def test_missing_key_reports_clearly(self, monkeypatch):
+        monkeypatch.setattr(cp, 'BINANCE_API_KEY', '')
+        assert 'API 키가 없습니다' in cp.credential_error()
+
+    def test_dummy_key_is_detected(self, monkeypatch):
+        monkeypatch.setattr(cp, 'BINANCE_API_KEY', 'CHECK')
+        assert '더미' in cp.credential_error()
+
+    def test_valid_credentials_pass(self):
+        assert cp.credential_error() == ''
+
+    def test_main_exits_before_touching_exchange(self, db, monkeypatch):
+        """가드는 네트워크 호출 **전에** 걸려야 한다."""
+        monkeypatch.setattr(cp, 'BINANCE_API_KEY', 'CHECK')
+
+        def _boom():
+            raise AssertionError('자격증명 확인 전에 거래소를 호출했다')
+        monkeypatch.setattr(cp, '_exchange', _boom)
+        assert cp.main([]) == 2
+
+    def test_module_never_stubs_credentials(self):
+        """회귀 방지 — 스텁이 다시 들어오면 잡는다(주석은 제외)."""
+        src = Path(cp.__file__).read_text(encoding='utf-8')
+        code = '\n'.join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith('#'))
+        assert 'environ.setdefault' not in code, (
+            '자격증명 스텁이 다시 추가됐다 — .env의 실제 키를 가려 '
+            '도구가 -2008로 죽는다')
+
+
+class TestLockedBalanceCountsAsHeld:
+    """보호주문이 잠근 물량도 그 포지션의 보유량이다.
+
+    free만 보면 **제대로 보호된 포지션일수록** free가 0에 가까워
+    '수량 초과 99.9%'로 판정된다. 그 상태에서 --fix를 돌리면 DB 수량이
+    먼지 값으로 덮여 포지션 기록이 파괴된다(청산 시 그만큼만 팔고
+    나머지는 거래소에 방치). 라이브 3포지션에서 실제로 재현됐다.
+    """
+
+    def test_locked_position_is_healthy(self, db, ex, capsys):
+        # SOL 2.0 전량이 자기 손절 주문에 잠겨 있다 (free 0)
+        ex({'ADA': 44.9, 'SOL': 0.0}, [{'id': '111'}], locked={'SOL': 2.0})
+        cp.main([])
+        out = capsys.readouterr().out
+        assert '수량 초과' not in out.split('SOLUSDT')[1].split('\n')[0], (
+            '잠긴 물량을 보유량에서 누락해 정상 포지션을 문제로 판정했다')
+
+    def test_locked_position_is_not_offered_for_fix(self, db, ex, capsys):
+        ex({'ADA': 44.9, 'SOL': 0.0}, [{'id': '111'}], locked={'SOL': 2.0})
+        cp.main([])
+        out = capsys.readouterr().out
+        assert 'SOLUSDT: 2.00000000 → 0.00000000' not in out, (
+            '--fix가 포지션 수량을 0으로 덮어쓰려 한다 — 데이터 파괴'
+        )
+
+    def test_real_shortfall_still_detected_when_locked(self, db, ex, capsys):
+        """잠금을 감안해도 실제로 모자라면 여전히 잡아야 한다."""
+        # DB 44.9인데 free 0.05 + locked 44.0 = 44.05 → 실제 부족
+        ex({'ADA': 0.05, 'SOL': 2.0}, [{'id': '111'}], locked={'ADA': 44.0})
+        cp.main([])
+        assert '수량 초과' in capsys.readouterr().out
 
 
 class TestDetection:

@@ -13,15 +13,9 @@ ATLAS — 재최적화 과최적화 방지 장치
   pytest tests/test_reoptimize_guards.py -v
 """
 
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -105,14 +99,24 @@ class TestGlobalParamOverride:
     """추적 손절 같은 **실행 규칙**은 전략 모듈이 아니라 라이브·백테스트
     양쪽 전역에 있다. 한쪽만 바꾸면 검증이 실제 동작과 어긋난다."""
 
-    def test_patches_both_live_and_backtest(self):
+    def test_patches_every_holder_of_the_flag(self):
+        """SPOT_TRAIL_ENABLED 를 실제로 읽는 모든 모듈이 함께 치환돼야 한다.
+
+        trailing_sl 이 atlas_rules 로 이사하면서 호출 시점 조회처는
+        rules 전역이 됐고, 백테스트의 peak 갱신 게이트는 여전히 bt 전역을
+        읽는다. 한쪽만 바꾸면 '켰다고 믿는데 절반만 켜진' 검증이 된다.
+        (main 은 이제 이 플래그를 읽지 않으므로 보유하지 않는 것이 맞다)
+        """
+        import atlas_rules as rules
         import atlas_spot_backtest as bt
         import atlas_spot_main as sm
-        before = (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        assert not hasattr(sm, 'SPOT_TRAIL_ENABLED'), (
+            'main 이 다시 플래그를 들면 override 대상이 조용히 갈라진다')
+        before = (rules.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
         with ro.override_params({'SPOT_TRAIL_ENABLED': True}):
-            assert sm.SPOT_TRAIL_ENABLED is True
+            assert rules.SPOT_TRAIL_ENABLED is True
             assert bt.SPOT_TRAIL_ENABLED is True
-        assert before == (sm.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
+        assert before == (rules.SPOT_TRAIL_ENABLED, bt.SPOT_TRAIL_ENABLED)
 
     def test_strategy_constants_still_work(self):
         before = ro.strat.S3_ADX_MIN
@@ -135,8 +139,8 @@ class TestGlobalParamOverride:
     def test_current_params_reads_right_module(self):
         cur = ro.current_params('S3')
         assert 'SPOT_TRAIL_ENABLED' in cur
-        import atlas_spot_main as sm
-        assert cur['SPOT_TRAIL_ENABLED'] == sm.SPOT_TRAIL_ENABLED
+        import atlas_rules as rules
+        assert cur['SPOT_TRAIL_ENABLED'] == rules.SPOT_TRAIL_ENABLED
 
 
 class TestPlateauExclusion:
@@ -276,3 +280,32 @@ class TestPlateauThreshold:
     ])
     def test_isolation_rule(self, plateau, peak, expected):
         assert bool(peak > 0 and plateau < peak * ro.PLATEAU_MIN_RATIO) is expected
+
+
+class TestProgressVisibility:
+    """무인 실행에서 '작업 중'과 '멈춤'을 구분할 수 있어야 한다.
+
+    조합 하나가 25심볼 × 5년 백테스트라 전체가 수십 분 걸린다. 실측으로
+    S6 54조합이 15분 넘게 한 줄도 내지 않았다 — 월간 systemd 실행에서
+    운영자는 잡이 살아 있는지 알 방법이 없다.
+    """
+
+    def test_grid_loop_emits_progress(self, monkeypatch, capsys):
+        calls = {'n': 0}
+
+        def _fake_window(sid, symbols, ohlcv, regime_map, start, end, rank_map=None):
+            calls['n'] += 1
+            return {'total_trades': 50, 'profit_factor': 1.5, 'sharpe': 1.0}
+
+        monkeypatch.setattr(ro, 'run_window', _fake_window)
+        monkeypatch.setattr(ro, 'load_symbol_data',
+                            lambda *a, **k: ({'BTCUSDT': [1]}, {}, {}))
+        monkeypatch.setattr(ro, 'GRIDS', {'S6': {'S6_VOL_MULT': [1.5, 2.0, 2.5],
+                                                 'S6_ATR_SL': [1.5, 2.0, 2.5]}})
+        ro.optimize_strategy('S6', ['BTCUSDT'], None, '2026-01-01')
+        out = capsys.readouterr().out
+        assert '그리드' in out and '/9' in out, (
+            f'진행 표시가 없어 멈춤과 구분되지 않는다: {out!r}')
+
+    def test_progress_interval_is_sane(self):
+        assert 1 <= ro.PROGRESS_EVERY <= 20

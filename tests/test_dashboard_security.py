@@ -8,14 +8,8 @@ BOT_START_ARGS 기동 인자 보존을 검증합니다.
   pytest tests/test_dashboard_security.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 from fastapi import HTTPException
@@ -93,3 +87,114 @@ class TestStartArgsPreserved:
     def test_default_empty_args(self):
         import shlex
         assert shlex.split('') == []
+
+
+class TestNoCommittedCredentials:
+    """추적 대상 파일에 실제 자격증명이 들어가면 안 된다.
+
+    운영 서버의 git remote URL에 GitHub PAT가 평문으로 박혀 있었다
+    (.git/config). 저장소가 공개라 pull에는 애초에 인증이 필요 없었는데도
+    토큰이 남아 있었다 — 서버를 백업하거나 이미지를 뜨면 그대로 새어 나간다.
+    같은 실수가 **추적 파일**에 들어오는 것을 여기서 막는다.
+
+    .env는 gitignore 대상이라 검사 범위 밖이다(추적되지 않는다).
+    """
+
+    # 실제 키 형태만 잡는다. 문서의 placeholder(`...`, `<your-key>`)는 통과시켜야
+    # 설치 안내를 쓸 수 있다.
+    PATTERNS = {
+        'GitHub PAT':      r'gh[pousr]_[A-Za-z0-9]{30,}',
+        'GitHub fine PAT': r'github_pat_[A-Za-z0-9_]{50,}',
+        'AWS access key':  r'AKIA[0-9A-Z]{16}',
+        'Slack token':     r'xox[baprs]-[A-Za-z0-9-]{10,}',
+        'Private key':     r'-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----',
+    }
+
+    def _tracked_files(self):
+        import subprocess
+        root = Path(__file__).parent.parent
+        out = subprocess.run(['git', 'ls-files'], cwd=root,
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            pytest.skip('git 저장소가 아니다')
+        return [root / p for p in out.stdout.splitlines() if p.strip()]
+
+    def test_no_credentials_in_tracked_files(self):
+        import re
+        hits = []
+        for path in self._tracked_files():
+            if not path.is_file() or path.suffix in ('.png', '.jpg', '.ico', '.db'):
+                continue
+            try:
+                text = path.read_text(encoding='utf-8', errors='ignore')
+            except OSError:
+                continue
+            # 이 테스트 파일 자신의 패턴 정의는 제외
+            if path.name == Path(__file__).name:
+                continue
+            for label, pat in self.PATTERNS.items():
+                if re.search(pat, text):
+                    hits.append(f'{path.name}: {label}')
+        assert not hits, f'추적 파일에 자격증명으로 보이는 값: {hits}'
+
+    def test_no_credentials_in_remote_url_docs(self):
+        """설치 안내가 토큰 박힌 URL을 예시로 쓰면 그대로 따라 하게 된다."""
+        import re
+        root = Path(__file__).parent.parent
+        for name in ('README.md',):
+            p = root / name
+            if not p.exists():
+                continue
+            text = p.read_text(encoding='utf-8', errors='ignore')
+            assert not re.search(r'https://[^\s/]*:[^\s/]*@github\.com', text), (
+                f'{name}에 자격증명이 박힌 remote URL 예시가 있다')
+
+
+class TestAccessLogRedactsToken:
+    """접근 로그에 토큰이 평문으로 남으면 안 된다.
+
+    토큰은 쿼리스트링으로 전달되므로 uvicorn 접근 로그에 그대로 기록된다.
+    유효기간이 24시간이라, 로그를 읽을 수 있는 사람은 그동안 로그인 없이
+    대시보드를 열 수 있다 — 봇 중지·재시작 권한까지 포함된다.
+    실제로 운영 서버의 logs/dashboard.log 에 유효한 토큰이 쌓여 있었고,
+    로그는 회전·압축되며 백업에도 함께 담기므로 노출 경로가 넓다.
+    """
+
+    def _record(self, path):
+        import logging
+        return logging.LogRecord(
+            'uvicorn.access', logging.INFO, __file__, 1,
+            '%s - "%s %s HTTP/%s" %d',
+            ('1.2.3.4:5', 'GET', path, '1.1', 200), None)
+
+    def test_token_is_redacted(self):
+        rec = self._record('/api/dashboard?token=deadbeefcafe1234&period=0')
+        assert wd._RedactToken().filter(rec) is True
+        assert 'deadbeefcafe1234' not in rec.args[2]
+        assert '<redacted>' in rec.args[2]
+
+    def test_other_params_survive(self):
+        """가리기가 과해서 진단에 필요한 정보까지 지우면 안 된다."""
+        rec = self._record('/api/dashboard?token=secret123&period=30')
+        wd._RedactToken().filter(rec)
+        assert 'period=30' in rec.args[2]
+        assert '/api/dashboard' in rec.args[2]
+
+    def test_path_without_token_untouched(self):
+        rec = self._record('/api/status')
+        wd._RedactToken().filter(rec)
+        assert rec.args[2] == '/api/status'
+
+    def test_malformed_record_does_not_crash(self):
+        """로그 필터가 예외를 내면 요청 처리까지 깨진다."""
+        import logging
+        rec = logging.LogRecord('uvicorn.access', logging.INFO, __file__, 1,
+                                'no args', None, None)
+        assert wd._RedactToken().filter(rec) is True
+
+    def test_filter_is_installed(self):
+        """정의만 하고 붙이지 않으면 아무 효과가 없다."""
+        import logging
+        assert any(isinstance(f, wd._RedactToken)
+                   for f in logging.getLogger('uvicorn.access').filters), \
+            'uvicorn.access 로거에 리댁션 필터가 붙어 있지 않다'

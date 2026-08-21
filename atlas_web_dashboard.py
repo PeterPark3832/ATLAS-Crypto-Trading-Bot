@@ -4,11 +4,11 @@ uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
 import io
 import os
+import re
 import time
 import json
 import secrets
 import shlex
-import sqlite3
 import subprocess
 import logging
 import hashlib
@@ -20,9 +20,12 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+
+import atlas_bootstrap
+from atlas_db import connect_ro, resolve_db_path
+from atlas_notify import send_telegram
 
 # 전략/레짐 표시 메타데이터는 config를 단일 출처로 사용 (수동 복사 금지 — drift 방지)
 from atlas_spot_config import (
@@ -32,9 +35,11 @@ from atlas_spot_config import (
     REGIME_DESCRIPTIONS as _REGIME_DESC,
 )
 
-load_dotenv(Path(__file__).parent / '.env')
+atlas_bootstrap.load_env(__file__)
 
-DB_FILE         = Path(__file__).parent / 'state' / 'atlas_spot.db'
+# DB 경로는 공용 해석기를 쓴다 — 죽은 DB_FILE 오버라이드 방어 포함
+# (weekly_report가 겪은 '조용한 빈 데이터' 사고의 재발 방지).
+DB_FILE         = resolve_db_path(Path(__file__).parent / 'state' / 'atlas_spot.db')
 LOG_FILE        = Path(__file__).parent / 'logs'  / 'spot_main.log'
 LOG_DIR         = Path(__file__).parent / 'logs'
 BOT_DIR         = Path(__file__).parent
@@ -52,7 +57,9 @@ TG_CHAT_ID      = os.getenv('TG_CHAT_ID', '')
 KILL_SWITCH     = Path('/tmp/ATLAS_SPOT_STOP')
 HTML_PATH       = BOT_DIR / 'dashboard_ui.html'
 
-STRAT_LABEL = {'S3': 'EMA Trend (4H)', 'S5': 'BB Bounce (1D)', 'S6': 'Donchian (1D)'}
+# 전략 표시명은 config의 STRATEGY_NAMES_KR을 단일 출처로 사용.
+# (예전엔 여기 하드코딩된 별도 영문 라벨이 있어 S4가 빠지는 등 drift가 났다)
+STRAT_LABEL = _STRAT_FULL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +70,33 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+
+
+class _RedactToken(logging.Filter):
+    """접근 로그에서 token 질의문자열을 가린다.
+
+    토큰은 쿼리스트링으로 전달되므로 uvicorn 접근 로그에 **평문 그대로**
+    남는다. 유효기간이 24시간이라, 로그를 읽을 수 있는 사람은 그동안
+    로그인 없이 대시보드를 열 수 있다(봇 중지·재시작 권한 포함).
+    실제로 logs/dashboard.log 에 유효한 토큰이 쌓여 있었다.
+
+    로그는 회전·압축되며 백업에도 함께 담기므로 노출 경로가 넓다.
+    API 계약을 바꾸지 않고 기록 시점에만 가린다.
+    """
+
+    _PAT = re.compile(r'(token=)[^&\s"]+')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        # uvicorn.access 포맷: (client, method, full_path, http_version, status)
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) \
+                and 'token=' in args[2]:
+            record.args = (args[:2] + (self._PAT.sub(r'\1<redacted>', args[2]),)
+                           + args[3:])
+        return True
+
+
+logging.getLogger('uvicorn.access').addFilter(_RedactToken())
 
 if not os.getenv('DASH_PASSWORD'):
     log.warning('DASH_PASSWORD 미설정 — 무작위 비밀번호가 생성되어 사실상 로그인 불가 '
@@ -126,11 +160,18 @@ def _try_login(password: str, client_ip: str) -> str:
     raise HTTPException(401, 'Invalid password')
 
 # ── 총 자산 (USDT + 오픈 포지션 시가) ───────────────────────────────
-_bal_cache: dict = {'val': None, 'ts': 0.0}
+_bal_cache: dict = {'val': None, 'ts': 0.0, 'other': 0.0}
 
 def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
-    """USDT 잔고 + 오픈 포지션 현재가 합산 = 총 자산 (60s TTL).
-    pos_df를 넘기면 DB 재조회를 생략한다."""
+    """USDT 잔고 + 오픈 포지션 현재가 합산 = **거래 가능 자산** (60s TTL).
+
+    포지션 밖 보유분(수수료용 BNB·더스트)은 여기 포함되지 않는다. 그 금액은
+    _bal_cache['other']에 따로 담아 payload의 other_assets로 내보낸다 —
+    봇은 그것까지 포함해 사이징하므로(_get_spot_equity), 두 숫자를 함께
+    보여야 화면과 봇 로그의 '총자산'이 서로 설명된다.
+
+    pos_df를 넘기면 DB 재조회를 생략한다.
+    """
     now = time.time()
     if _bal_cache['val'] is not None and now - _bal_cache['ts'] < 60:
         return _bal_cache['val']
@@ -147,10 +188,15 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
         if not r.ok:
             raise ValueError(f'HTTP {r.status_code}')
         usdt = 0.0
+        _holdings: dict = {}
         for b in r.json().get('balances', []):
+            _q = float(b['free']) + float(b['locked'])
+            if _q <= 0:
+                continue
             if b['asset'] == 'USDT':
-                usdt = float(b['free']) + float(b['locked'])
-                break
+                usdt = _q
+            else:
+                _holdings[b['asset']] = _q
 
         # 오픈 포지션 시가 합산 (가격 1회 배치 조회)
         total = usdt
@@ -164,6 +210,23 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
                 pr = prices.get(sym)
                 total += qty * pr if pr else risk
 
+        # 포지션 밖 보유분(수수료용 BNB·더스트 등)의 시가.
+        # 봇은 이것까지 포함한 금액으로 사이징한다(_get_spot_equity). 화면이
+        # USDT+포지션만 보여주면 로그·텔레그램의 '총자산'과 어긋나 보인다 —
+        # 실측 $197.32(화면) vs $217.02(봇), 차이는 대부분 수수료용 BNB였다.
+        # 헤드라인 의미는 그대로 두고 차액을 함께 노출해 두 숫자가 설명되게 한다.
+        _in_pos = {str(p['symbol']).replace('USDT', '')
+                   for _, p in pos_df.iterrows()} if not pos_df.empty else set()
+        _rest = {a: q for a, q in _holdings.items() if a not in _in_pos}
+        other = 0.0
+        if _rest:
+            _px = _fetch_prices([f'{a}USDT' for a in _rest])
+            for a, q in _rest.items():
+                p = _px.get(f'{a}USDT')
+                if p:
+                    other += q * p
+        _bal_cache['other'] = round(other, 2)
+
         val = round(total, 2)
         _bal_cache.update({'val': val, 'ts': now})
         return val
@@ -173,18 +236,14 @@ def _spot_balance(pos_df: pd.DataFrame | None = None) -> float | None:
 
 # ── Telegram ──────────────────────────────────────────────────────
 def _tg(msg: str):
-    if not TG_TOKEN or not TG_CHAT_ID: return
-    try:
-        requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-                      data={'chat_id': TG_CHAT_ID, 'text': msg}, timeout=8)
-    except Exception as e:
-        log.error(f'TG 전송 실패: {e}')
+    # 데몬 계약: print 폴백 없이 조용히, 실패는 log.error (atlas_notify 위임)
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID, timeout=8, logger=log)
 
 # ── DB 쿼리 ──────────────────────────────────────────────────────
 def _q(sql: str, params=()) -> pd.DataFrame:
     if not DB_FILE.exists(): return pd.DataFrame()
     try:
-        con = sqlite3.connect(f'file:{DB_FILE}?mode=ro', uri=True, timeout=10)
+        con = connect_ro(DB_FILE)
         df  = pd.read_sql_query(sql, con, params=params)
         con.close()
         return df
@@ -771,6 +830,10 @@ def dashboard(token: str, period: int = 0):
         'metrics': m, 'regime': regime, 'streak': streak,
         'briefing': briefing,
         'actual_balance': actual_bal,
+        # 포지션 밖 보유분(수수료용 BNB·더스트) 시가. 봇은 이것까지 포함해
+        # 사이징하므로, 이 값을 함께 보여야 화면 숫자와 봇 로그의 '총자산'이
+        # 서로 설명된다. actual_balance + other_assets = 봇 기준 총자산.
+        'other_assets': _bal_cache.get('other', 0.0),
         'bot_alive': bot_alive, 'log_time': log_time, 'alerts': alerts,
         'eq_curve': _downsample(eq_curve, 'eq'), 'daily': daily,
         'module_stats': module_stats,
@@ -820,8 +883,17 @@ def prices(token: str, symbols: str = ''):
     _auth(token)
     return _fetch_prices(symbols.split(',') if symbols else [])
 
+# UI 파일(98KB)을 매 요청마다 디스크에서 다시 읽지 않도록 mtime 캐시.
+# 파일이 배포로 바뀌면 mtime이 달라져 자동으로 다시 읽는다.
+_html_cache: dict = {'mtime': None, 'text': ''}
+
+
 @app.get('/', response_class=HTMLResponse)
 async def root():
     if HTML_PATH.exists():
-        return HTMLResponse(HTML_PATH.read_text(encoding='utf-8'))
+        mtime = HTML_PATH.stat().st_mtime
+        if mtime != _html_cache['mtime']:
+            _html_cache['text']  = HTML_PATH.read_text(encoding='utf-8')
+            _html_cache['mtime'] = mtime
+        return HTMLResponse(_html_cache['text'])
     return HTMLResponse('<h1>dashboard_ui.html not found</h1>', 500)

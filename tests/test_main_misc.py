@@ -8,16 +8,11 @@ _handle_tg_cmd, _position_reconcile_loop을 검증합니다.
   pytest tests/test_main_misc.py -v
 """
 
-import os
-import sys
+import re
 import threading
 import time
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -76,6 +71,40 @@ def _state(monkeypatch):
 # ══════════════════════════════════════════════════════════════
 #  _get_price
 # ══════════════════════════════════════════════════════════════
+
+class TestValuationWarnThrottle:
+    """평가 실패 경고는 통화별로 간격을 둔다.
+
+    현물 마켓이 없는 자산(Simple Earn LD*, 상장폐지, 스테이킹)은 **영원히**
+    실패한다. 잔고 폴러가 60초마다 도므로 억제가 없으면 같은 줄이 하루
+    1,440회 쌓인다 — 실측으로 LDUSDT 한 건이 7일간 1,470회를 남겼고,
+    그 사이 정작 중요한 경고가 묻혔다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_valuation_warned', {})
+
+    def test_first_warning_passes(self):
+        assert sm._valuation_warn_due('LDUSDT') is True
+
+    def test_repeat_is_suppressed(self):
+        sm._valuation_warn_due('LDUSDT')
+        assert sm._valuation_warn_due('LDUSDT') is False, (
+            '60초 폴링마다 같은 줄이 쌓여 로그가 뒤덮인다')
+
+    def test_other_currency_not_suppressed(self):
+        """한 통화의 억제가 다른 통화의 경고를 가리면 안 된다."""
+        sm._valuation_warn_due('LDUSDT')
+        assert sm._valuation_warn_due('PENGU') is True
+
+    def test_warns_again_after_interval(self, monkeypatch):
+        """사실은 계속 유효하므로 완전히 숨기지는 않는다."""
+        sm._valuation_warn_due('LDUSDT')
+        aged = time.time() - sm._VALUATION_WARN_INTERVAL - 1
+        monkeypatch.setitem(sm._valuation_warned, 'LDUSDT', aged)
+        assert sm._valuation_warn_due('LDUSDT') is True
+
 
 class _FakeTickerExchange:
     def __init__(self, prices=None, raises_times=0):
@@ -318,6 +347,133 @@ class _FakeBalanceExchange:
         return self._balances
 
 
+class TestReconcilePrefersActualFill:
+    """잔고 0의 가장 흔한 이유는 **거래소 보호주문 체결**이다.
+
+    확인하지 않고 MANUAL_SOLD로 적으면 사유(SL/TP)와 체결가가 모두 틀어진다.
+    체결가를 몰라 '현재가'로 추정하는데, 체결과 검증 사이에 가격이 움직인다.
+    이 통계는 Kelly 사이징과 전략 건강도(net PF)에 그대로 들어가므로 오염되면
+    배분 판단까지 흔들린다. 실제로 라이브 42건 중 6건이 MANUAL_SOLD로 남았고,
+    그중 하나는 pnl_r +1.31로 익절처럼 보였다.
+
+    검증 루프가 5분 주기 전략 루프보다 먼저 도는 경합에서 발생한다.
+    """
+
+    def _pos(self, sl_id='STOP-9'):
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        sm._update_position_order_id('S4', 'BTCUSDT', sl_id)
+
+    def test_filled_stop_recorded_as_sl_with_real_price(self, monkeypatch,
+                                                        _no_telegram):
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        # 거래소에는 체결 정보가 남아 있다 — 실제 체결가 92.5
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'closed', 'filled': 10.0,
+                                          'average': 92.5})
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)   # 그 사이 반등
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1
+        assert rows[0]['reason'] == 'SL', (
+            f"체결된 손절이 {rows[0]['reason']}로 기록됐다 — 사유 통계 오염")
+        assert rows[0]['exit_price'] == pytest.approx(92.5), (
+            '현재가(105)로 추정해 손익이 왜곡됐다 — 실제 체결가는 92.5')
+
+    def test_falls_back_to_manual_when_order_not_filled(self, monkeypatch,
+                                                        _no_telegram):
+        """진짜 수동매도(주문 미체결)면 기존 경로를 그대로 탄다."""
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'open'})
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert rows[0]['reason'] == 'MANUAL_SOLD'
+
+    def test_order_lookup_failure_still_cleans_up(self, monkeypatch, _no_telegram):
+        """체결 확인이 불가능해도 포지션이 DB에 남아 떠돌면 안 된다."""
+        self._pos()
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+
+        def _boom(strategy, symbol, ccxt_sym, pos):
+            raise RuntimeError('조회 불가')
+        monkeypatch.setattr(sm, '_handle_stop_order_state', _boom)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        assert sm._load_position('S4', 'BTCUSDT') is None
+
+    def test_no_order_id_skips_lookup(self, monkeypatch, _no_telegram):
+        """추적 주문이 없으면 조회 없이 기존 경로로 간다(불필요한 API 호출 방지)."""
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        called = []
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_handle_stop_order_state',
+                            lambda *a: called.append(1) or False)
+        monkeypatch.setattr(sm, '_get_price', lambda s: 105.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        assert called == []
+
+
+class TestReconcileRDenominator:
+    """검증 루프 정산의 R배수 분모는 **진입 시점 위험(orig_sl)** 이어야 한다.
+
+    다른 4개 정산 경로(_spot_sell 3경로·_handle_stop_order_state)는 모두
+    orig_sl을 쓰는데, 이 사본만 역사적으로 pos['sl'](추적조정 후)을 분모로
+    썼다. 추적손절이 SL을 진입가 근처까지 올린 포지션이 수동매도로 정리되면
+    위험 분모가 10→1로 줄어 pnl_r이 10배 부풀고, 그 값이 Kelly 사이징·
+    전략 건강도·학습기 입력에 그대로 들어갔다.
+    """
+
+    def test_pnl_r_uses_entry_time_risk_not_trailed_sl(self, monkeypatch,
+                                                       _no_telegram):
+        # 진입 100 / 원 SL 90 (위험 $10/개) → 추적손절이 SL을 99로 올린 상태
+        sm._save_position('S4', 'BTCUSDT', 100.0, 90.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        with sm._db_lock, sm._db_conn() as conn:
+            conn.execute("UPDATE spot_positions SET sl=99.0 "
+                         "WHERE strategy='S4' AND symbol='BTCUSDT'")
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_get_price', lambda s: 110.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        assert len(rows) == 1 and rows[0]['reason'] == 'MANUAL_SOLD'
+        # pnl_u = (110-100)×10 = $100, 진입 시점 위험 = (100-90)×10 = $100 → 1R.
+        # 조정 후 sl(99)을 분모로 쓰면 (100-99)×10 = $10 → 10R로 부푼다.
+        assert rows[0]['pnl_r'] == pytest.approx(1.0), (
+            f"pnl_r={rows[0]['pnl_r']} — 추적조정 후 sl을 분모로 써서 "
+            f"R배수가 부풀었다 (orig_sl 기준이어야 함)")
+
+    def test_legacy_position_without_orig_sl_falls_back_to_sl(self, monkeypatch,
+                                                              _no_telegram):
+        """orig_sl=0(마이그레이션 전 레거시 행)이면 기존 sl로 폴백한다
+        — main:2252의 `or sl` 관용구와 동일."""
+        sm._save_position('S4', 'BTCUSDT', 100.0, 95.0, 120.0, 10.0, 1000.0,
+                          0.02, 'sl_tp', 0, 'TRENDING_UP')
+        with sm._db_lock, sm._db_conn() as conn:
+            conn.execute("UPDATE spot_positions SET orig_sl=0 "
+                         "WHERE strategy='S4' AND symbol='BTCUSDT'")
+        monkeypatch.setattr(sm, '_get_ex',
+                            lambda: _FakeBalanceExchange({'BTC': {'total': 0}}))
+        monkeypatch.setattr(sm, '_get_price', lambda s: 110.0)
+        sm._position_reconcile_loop(_OneShotEvent())
+        with sm._db_lock, sm._db_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT * FROM spot_trades').fetchall()]
+        # 위험 = (100-95)×10 = $50, pnl_u = $100 → 2R
+        assert rows[0]['pnl_r'] == pytest.approx(2.0)
+
+
 class TestPositionReconcileLoop:
     def test_no_positions_does_nothing(self, monkeypatch, _no_telegram):
         ev = _OneShotEvent()
@@ -398,3 +554,55 @@ class TestPositionReconcileLoop:
 
         monkeypatch.setattr(sm, '_get_ex', lambda: _RaisingExchange())
         sm._position_reconcile_loop(ev)  # 예외가 전파되지 않아야 함
+
+
+class _FakeThread:
+    def __init__(self, name, alive=True):
+        self.name, self._alive = name, alive
+
+    def is_alive(self):
+        return self._alive
+
+
+class TestDeadThreadDetection:
+    """스레드가 조용히 죽는 것을 잡는다.
+
+    감시견(_bot_alive)은 pgrep 기반이라 프로세스 생존만 본다. 봇은 10개
+    데몬 스레드로 도는데, Loop1D가 예외로 죽어도 프로세스는 살아 있으므로
+    감시견은 계속 녹색을 보고한다. 그 사이 SL/TP 판정과 청산이 멈춘다 —
+    무인 운영에서 가장 위험한 실패 형태다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_thread_alerted', set())
+
+    def test_detects_dead_thread(self):
+        ts = [_FakeThread('Loop1D', alive=False), _FakeThread('TgWorker')]
+        assert sm.find_dead_threads(ts) == ['Loop1D']
+
+    def test_all_alive_reports_nothing(self):
+        assert sm.find_dead_threads([_FakeThread('Loop1D')]) == []
+
+    def test_reports_each_thread_once(self):
+        """5초마다 도는 루프에서 검사하므로 억제가 없으면 알림이 폭주한다."""
+        ts = [_FakeThread('Loop1D', alive=False)]
+        assert sm.find_dead_threads(ts) == ['Loop1D']
+        assert sm.find_dead_threads(ts) == []
+
+    def test_survives_broken_thread_object(self):
+        """감시 자체가 봇을 멈추면 안 된다."""
+        class _Broken:
+            name = 'X'
+
+            def is_alive(self):
+                raise RuntimeError('boom')
+        assert sm.find_dead_threads([_Broken(), _FakeThread('Loop1D', alive=False)]) \
+            == ['Loop1D']
+
+    def test_every_spawned_thread_has_a_role_description(self):
+        """알림은 '무엇이 멈췄는지'를 말해야 우선순위를 정할 수 있다."""
+        src = Path(sm.__file__).read_text(encoding='utf-8')
+        spawned = set(re.findall(r"_t\([_a-zA-Z]+,\s*'([A-Za-z0-9]+)'", src))
+        missing = spawned - set(sm._THREAD_ROLE)
+        assert not missing, f'역할 설명이 없는 스레드: {missing}'

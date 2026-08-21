@@ -15,16 +15,9 @@ ATLAS — 정확성 감사 수정 회귀 테스트
   pytest tests/test_audit_fixes.py -v
 """
 
-import os
-import sys
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -646,3 +639,125 @@ class TestSavePositionFailure:
         sig = {'sl': 95.0, 'tp': 110.0, 'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 10}
         assert sm._spot_buy('S3', 'BTCUSDT', 'BTC/USDT', sig, 100.0, 'TRENDING_UP') is True
         assert sm._load_position('S3', 'BTCUSDT') is not None
+
+
+class TestSellDetectsStopFillFirst:
+    """잔고 부족의 가장 흔한 이유는 **거래소 보호주문이 먼저 체결된 것**이다.
+
+    _spot_sell 은 매도 전에 스탑을 취소하지만, 이미 체결된 주문의 취소 실패는
+    조용히 무시된다(_cancel_stop_order). 그래서 스탑이 먼저 체결된 상황이
+    여기까지 흘러와 '잔고 없음 → MANUAL_SOLD'로 기록됐다.
+
+    그러면 사유(SL/TP)와 체결가가 모두 틀어지고, 그 통계가 Kelly·전략
+    건강도의 입력이 된다. 검증 루프(_position_reconcile_loop)에서 고친 것과
+    같은 결함이 매도 경로에도 있었다.
+    """
+
+    def test_filled_stop_recorded_as_sl_not_manual(self, _state, _ex, monkeypatch):
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}            # 스탑이 이미 다 팔았다
+        _ex.sell_errors = [Exception('Account has insufficient balance for requested action')]
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: {'status': 'closed', 'filled': 10.0,
+                                          'average': 94.5})
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+
+        rows = _trades()
+        assert len(rows) == 1
+        assert rows[0]['reason'] == 'SL', (
+            f"체결된 손절이 {rows[0]['reason']}로 기록됐다 — 사유 통계 오염")
+        assert rows[0]['exit_price'] == pytest.approx(94.5), (
+            '추정가(105)로 적혀 손익이 왜곡됐다 — 실제 체결가는 94.5')
+        assert sm._load_position('S3', 'BTCUSDT') is None
+
+    def test_open_stop_falls_back_to_existing_path(self, _state, _ex, monkeypatch):
+        """스탑이 체결되지 않았으면 기존 경로를 그대로 탄다."""
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+        monkeypatch.setattr(sm, '_fetch_stop_order', lambda c, o: {'status': 'open'})
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        rows = _trades()
+        assert len(rows) == 1 and rows[0]['reason'] == 'MANUAL_SOLD'
+
+    def test_no_stop_id_skips_lookup(self, _state, _ex, monkeypatch):
+        """추적 주문이 없으면 조회하지 않는다(불필요한 API 호출 방지)."""
+        called = []
+        monkeypatch.setattr(sm, '_fetch_stop_order',
+                            lambda c, o: called.append(1) or None)
+        pos = _save_pos(qty=10.0)
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert called == []
+
+    def test_lookup_failure_still_cleans_up(self, _state, _ex, monkeypatch):
+        """체결 확인이 불가능해도 포지션이 DB에 남아 떠돌면 안 된다."""
+        pos = _save_pos(qty=10.0, sl_id='STOP-7')
+        _ex.free = {'BTC': 0.0}
+        _ex.sell_errors = [Exception('insufficient balance')]
+
+        def _boom(strategy, symbol, ccxt_sym, position):
+            raise RuntimeError('조회 불가')
+        monkeypatch.setattr(sm, '_handle_stop_order_state', _boom)
+        sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert sm._load_position('S3', 'BTCUSDT') is None
+
+
+class TestSellFailureAlertThrottle:
+    """매도 실패는 포지션이 남아 **주기마다 반복**된다.
+
+    잔고 부족이 아닌 오류(거래정지·상장폐지·레이트리밋)면 청산이 계속
+    실패하고 포지션도 그대로 남는다. 관리 주기가 5분이므로 매번 알리면
+    하루 288건이 되어, 오늘 겪은 보호주문 알림 폭주와 같은 상황이 된다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(sm, '_stop_alert_at', {})
+
+    def _tg_spy(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sm, '_tg', lambda m: sent.append(m))
+        return sent
+
+    def test_repeated_failure_alerts_once(self, _state, _ex, monkeypatch):
+        sent = self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0}
+        for _ in range(5):
+            pos = _save_pos(qty=10.0)
+            _ex.sell_errors = [Exception('Market is closed')]
+            sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        fails = [m for m in sent if '매도 실패' in m]
+        assert len(fails) == 1, f'5회 실패에 알림 {len(fails)}건 — 주기마다 반복 발송'
+
+    def test_kinds_do_not_suppress_each_other(self):
+        """성격이 다른 사건은 서로를 가리면 안 된다.
+
+        하나의 키를 공유하면 보호주문 실패 알림이 매도 실패 알림을
+        삼킨다(또는 그 반대) — 더 중요한 쪽이 조용히 사라질 수 있다.
+        """
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'stop') is True
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'sell_fail') is True, (
+            '다른 종류의 알림이 억제됐다')
+        assert sm._stop_alert_due('S3', 'BTCUSDT', 'stop') is False
+
+    def test_other_symbol_not_suppressed(self, _state, _ex, monkeypatch):
+        sent = self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0, 'ETH': 10.0}
+        for sym, cs in (('BTCUSDT', 'BTC/USDT'), ('ETHUSDT', 'ETH/USDT')):
+            pos = _save_pos(symbol=sym, qty=10.0)
+            _ex.sell_errors = [Exception('Market is closed')]
+            sm._spot_sell('S3', sym, cs, pos, 105.0, 'CROSS')
+        assert len([m for m in sent if '매도 실패' in m]) == 2
+
+    def test_log_still_records_every_failure(self, _state, _ex, monkeypatch, caplog):
+        """알림은 줄이되 로그는 매번 남아야 추적이 가능하다."""
+        self._tg_spy(monkeypatch)
+        _ex.free = {'BTC': 10.0}
+        with caplog.at_level('ERROR'):
+            for _ in range(3):
+                pos = _save_pos(qty=10.0)
+                _ex.sell_errors = [Exception('Market is closed')]
+                sm._spot_sell('S3', 'BTCUSDT', 'BTC/USDT', pos, 105.0, 'CROSS')
+        assert len([r for r in caplog.records if '매도 실패' in r.message]) == 3

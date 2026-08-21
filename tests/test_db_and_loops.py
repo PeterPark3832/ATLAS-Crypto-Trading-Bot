@@ -9,16 +9,9 @@ _balance_poller, _daily_reset_loop, _db_backup_loop, _tg_cmd_loop을 검증합�
   pytest tests/test_db_and_loops.py -v
 """
 
-import os
-import sys
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

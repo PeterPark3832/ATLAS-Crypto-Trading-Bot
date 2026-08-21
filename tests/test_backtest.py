@@ -7,14 +7,7 @@ atlas_spot_backtest.py의 순수 유틸리티 + bar-by-bar 시뮬레이터를 �
   pytest tests/test_backtest.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from collections import defaultdict
 from datetime import datetime, timezone

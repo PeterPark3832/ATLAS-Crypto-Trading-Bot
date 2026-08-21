@@ -1,46 +1,48 @@
 """
-ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC crontab 실행
-  0 0 * * 1 python3 /root/atlas_bot/weekly_report.py
+ATLAS Spot 주간 성과 요약 — 매주 월요일 00:00 UTC 실행
+
+설치(systemd 타이머):
+  sudo cp deploy/atlas-weekly-report.service \
+          deploy/atlas-weekly-report.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now atlas-weekly-report.timer
+
+수동 실행:
+  python3 weekly_report.py
 """
 
 import os
-import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / '.env')
+import atlas_bootstrap
+
+atlas_bootstrap.load_env(__file__)   # config import 전 — raw os.getenv 순서 보존
+
+from atlas_db import connect_ro, resolve_db_path   # noqa: E402
+from atlas_notify import send_telegram        # noqa: E402
+from atlas_spot_config import SPOT_DB_FILE    # noqa: E402  (.env 로드 후여야 한다)
 
 TG_TOKEN        = os.getenv('TG_TOKEN', '')
 TG_CHAT_ID      = os.getenv('TG_CHAT_ID', '')
-DB_FILE         = Path(os.getenv('DB_FILE',
-                    str(Path(__file__).parent / 'state' / 'atlas_spot.db')))
+
+# 죽은 DB_FILE 오버라이드 방어는 atlas_db.resolve_db_path 로 승격됐다
+# (여기서 겪은 '조용한 빈 리포트' 사고가 그 함수의 존재 이유다).
+DB_FILE         = resolve_db_path(SPOT_DB_FILE)
 INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '1000'))
 
 
 def tg(msg: str):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print(msg)
-        return
-    try:
-        requests.post(
-            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': msg},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f'TG 전송 실패: {e}')
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID, timeout=10, print_fallback=True)
 
 
 def load_trades(days: int) -> pd.DataFrame:
     if not DB_FILE.exists():
         return pd.DataFrame()
     try:
-        con = sqlite3.connect(f'file:{DB_FILE}?mode=ro', uri=True, timeout=10)
+        con = connect_ro(DB_FILE)
         df  = pd.read_sql_query(f"""
             SELECT strategy, symbol,
                    pnl_usdt - COALESCE(fee_usdt, 0) AS pnl_usdt,

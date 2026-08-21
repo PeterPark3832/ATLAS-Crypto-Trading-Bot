@@ -34,18 +34,21 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
-from dotenv import load_dotenv
+import atlas_bootstrap
 
 sys.path.insert(0, str(Path(__file__).parent))
-load_dotenv(Path(__file__).parent / '.env')
+atlas_bootstrap.load_env(__file__)   # config import 전 — raw os.getenv 순서 보존
 
+from atlas_db import connect_ro, resolve_db_path   # noqa: E402
+from atlas_notify import send_telegram             # noqa: E402
 from atlas_spot_backtest import run_walk_forward
 from atlas_spot_config import (
     LIVE_STRATEGIES, STRATEGY_NAMES,
     WF_IS_START, WF_IS_END, WF_OOS_START,
     WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE,
     SPOT_DATA_DIR, SPOT_RESULTS_DIR,
+    SPOT_MAX_POSITIONS, SPOT_EQUITY_PER_SLOT, SPOT_DB_FILE,
+    BT_INITIAL_EQ,
 )
 from atlas_spot_universe import get_backtest_universe
 
@@ -56,19 +59,14 @@ LATEST_PATH = SPOT_RESULTS_DIR / 'wfo_latest.json'
 
 
 def tg(msg: str) -> None:
-    """텔레그램 전송 (자격증명 없으면 print). weekly_report.tg 와 동일 규약."""
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print(msg)
-        return
-    try:
-        requests.post(
-            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': msg},
-            timeout=15,
-        )
-    except Exception as e:
-        print(f'TG 전송 실패: {e}')
-        print(msg)
+    """텔레그램 전송 — 공통부(atlas_notify)로 위임.
+
+    실패·자격증명 부재 시 print 폴백(reprint_on_error 포함)은 cron 출력에
+    리포트가 남게 하는 계약이다. TG_TOKEN을 호출 시점에 읽는 것도 계약 —
+    --no-tg 가 `global TG_TOKEN = ''` 로 구현돼 있다.
+    """
+    send_telegram(msg, TG_TOKEN, TG_CHAT_ID,
+                  timeout=15, print_fallback=True, reprint_on_error=True)
 
 
 def evaluate(wf_results: dict, strategies: list[str]) -> list[dict]:
@@ -108,7 +106,33 @@ def evaluate(wf_results: dict, strategies: list[str]) -> list[dict]:
     return rows
 
 
-def format_message(rows: list[dict], now: datetime, oos_end: str) -> str:
+def live_equity() -> float | None:
+    """슬롯 수 계산에 쓸 자산. 조회 실패는 치명적이지 않다(단서만 일반화).
+
+    봇이 기록해 둔 값을 읽는다 — 리포트는 격리된 oneshot 잡이라 거래소를
+    직접 부르지 않는 편이 가볍고 자격증명도 필요 없다.
+
+    현재 자산(`equity`)은 DB에 저장되지 않는다(메모리 상태로만 산다).
+    남는 것은 그날 시작 자산과 피크뿐이므로 day_start_eq 를 쓴다 — 슬롯 수는
+    $20 단위의 계단 함수라 하루 등락으로는 거의 바뀌지 않아 이 근사로 충분하다.
+    """
+    try:
+        # weekly와 같은 해석기를 쓴다 — 죽은 DB_FILE 오버라이드 방어 포함.
+        con = connect_ro(resolve_db_path(SPOT_DB_FILE))
+        try:
+            row = con.execute(
+                "SELECT value FROM spot_config WHERE key='day_start_eq'").fetchone()
+        finally:
+            con.close()
+        val = float(row[0]) if row and row[0] else 0.0
+        return val if val > 0 else None
+    except Exception as e:
+        print(f'[자산 조회 실패 — 단서를 일반 문구로 대체] {e}')
+        return None
+
+
+def format_message(rows: list[dict], now: datetime, oos_end: str,
+                   equity: float | None = None) -> str:
     """텔레그램용 요약 메시지 생성."""
     n_pass = sum(1 for r in rows if r['verdict'] == 'PASS')
     n_eval = sum(1 for r in rows if r['has_data'])
@@ -139,7 +163,30 @@ def format_message(rows: list[dict], now: datetime, oos_end: str) -> str:
         tail += f"\n⚠️ 재최적화 후보: {', '.join(failing)} (OOS 기준 미달)"
     else:
         tail += "\n✅ 전 전략 OOS 기준 통과"
+    tail += '\n' + portfolio_caveat(equity)
     return head + '\n\n'.join(body) + tail
+
+
+def portfolio_caveat(equity: float | None) -> str:
+    """이 수치를 '상한선'으로 읽어야 하는 이유를 함께 알린다.
+
+    backtest_strategy 는 (전략 × 심볼) 단위로 독립 실행되므로 동시 포지션
+    수 상한·슬롯당 최소 자본·USDT 예비금을 반영하지 못한다(코드에 한계로
+    명시돼 있다). 즉 신호가 몰리는 구간에서 라이브는 일부 진입을 포기하는데
+    백테스트는 전부 잡는다 — 결과가 구조적으로 낙관적이다.
+
+    그런데 정작 판정을 전달하는 리포트에는 이 단서가 없었다. PASS/FAIL로
+    전략 존폐를 결정하는 사람이 수치를 액면 그대로 믿게 된다.
+    현재 자본으로 계산한 **실제 슬롯 수**를 함께 보여 낙관 정도를 가늠하게 한다.
+    """
+    base = ('※ 백테스트는 포트폴리오 제약(동시 포지션 한도·슬롯당 최소자본·'
+            'USDT 예비금)을 모델링하지 않아 실제보다 낙관적입니다.')
+    if not equity or equity <= 0:
+        return base + f'\n   라이브 한도: 최대 {SPOT_MAX_POSITIONS}슬롯'
+    slots = min(SPOT_MAX_POSITIONS, int(equity // SPOT_EQUITY_PER_SLOT))
+    return (base + f'\n   현재 라이브 한도: {slots}슬롯 '
+            f'(자산 ${equity:,.0f} ÷ 슬롯당 ${SPOT_EQUITY_PER_SLOT:.0f}, '
+            f'상한 {SPOT_MAX_POSITIONS})')
 
 
 def save_latest(rows: list[dict], wf_results: dict, meta: dict) -> None:
@@ -208,6 +255,11 @@ def main() -> int:
     ap.add_argument('--no-tg', action='store_true', help='텔레그램 없이 콘솔만')
     ap.add_argument('--strategies', default='', help='쉼표구분 전략 (기본: LIVE_STRATEGIES)')
     ap.add_argument('--data-dir', default=str(SPOT_DATA_DIR), help='OHLCV CSV 캐시 경로')
+    ap.add_argument('--equity', type=float, default=None,
+                    help='백테스트 초기 자본. 기본값은 BT_INITIAL_EQ($10,000)이라 '
+                         '거래소 최소주문금액($5)이 걸리지 않는다. 실계좌 규모를 '
+                         '넣으면 "이 자본으로 실제 실행 가능한가"를 본다. '
+                         "'live'를 주면 봇이 기록한 현재 자산을 쓴다.")
     args = ap.parse_args()
 
     if args.no_tg:
@@ -221,17 +273,20 @@ def main() -> int:
     now      = datetime.now(timezone.utc)
     oos_end  = now.strftime('%Y-%m-%d')
 
-    print(f'[WFO] 전략 {strategies} · 심볼 {len(symbols)}개 · data_dir={data_dir}')
+    bt_equity = args.equity if args.equity and args.equity > 0 else BT_INITIAL_EQ
+    print(f'[WFO] 전략 {strategies} · 심볼 {len(symbols)}개 · data_dir={data_dir} '
+          f'· 초기자본 ${bt_equity:,.0f}')
     try:
         wf_results = run_walk_forward(strategies, symbols, data_dir=data_dir,
-                                      rolling=args.rolling)
+                                      rolling=args.rolling,
+                                      initial_equity=bt_equity)
     except Exception as e:
         tg(f'🧪 ATLAS WFO 월간 리포트\n❌ 실행 실패: {e}')
         traceback.print_exc()
         return 1
 
     rows = evaluate(wf_results, strategies)
-    msg  = format_message(rows, now, oos_end)
+    msg  = format_message(rows, now, oos_end, live_equity())
     tg(msg)
     print(msg)
 

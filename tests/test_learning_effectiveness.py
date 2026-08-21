@@ -19,16 +19,9 @@ ATLAS — 학습기가 **실제로 돈을 더 버는가**
   python tests/test_learning_effectiveness.py        # 성과 비교표 출력
 """
 
-import os
 import random
-import sys
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

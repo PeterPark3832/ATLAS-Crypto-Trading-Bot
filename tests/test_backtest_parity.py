@@ -11,14 +11,8 @@ ATLAS — 라이브/백테스트 패리티
   pytest tests/test_backtest_parity.py -v
 """
 
-import os
-import sys
 from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import pytest
@@ -265,3 +259,163 @@ class TestKnownGaps:
         assert '포트폴리오 제약' in src, (
             '백테스트가 모델링하지 못하는 제약(동시 포지션 수, 슬롯당 자본, '
             'USDT 예비금)이 문서화돼 있어야 한다')
+
+
+class TestS5SlCooldownParity:
+    """라이브의 S5 손절 쿨다운이 백테스트에도 있어야 한다.
+
+    라이브(_s5_safety_block)는 S5가 손절로 나간 종목에 2일간 재진입하지
+    않는다 — 평균회귀는 '더 싸졌으니 또 산다'가 되기 쉬워, 같은 하락에
+    연속으로 맞기 때문이다.
+
+    백테스트가 이 규칙을 무시하면 **라이브가 절대 하지 않는 거래**로 성과를
+    평가하게 된다. 막는 이유가 '나쁜 거래'이므로 편향은 비관 쪽이고,
+    S5는 지금 OOS 기준 미달로 재최적화 대상이라 판정이 뒤집힐 수 있다.
+    """
+
+    @pytest.fixture
+    def s5_always_sl(self, monkeypatch):
+        """진입하면 곧 손절되는 S5 신호 — 재진입 간격만 본다."""
+        def _sig(df, i):
+            close = float(df['close'].iloc[i])
+            return {'signal': 1, 'sl': close * 0.97, 'tp': close * 1.20,
+                    'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 0}
+        monkeypatch.setitem(bt.SIGNAL_FUNCS, 'S5', _sig)
+        monkeypatch.setitem(bt.CALC_FUNCS, 'S5', bt.CALC_FUNCS['S3'])
+
+    def _s5(self, rows):
+        return bt.backtest_strategy('S5', 'BTCUSDT', rows, {},
+                                    '2021-01-01', '2022-12-31', risk_pct=0.02)
+
+    def test_no_reentry_on_bar_right_after_sl(self, s5_always_sl):
+        trades, _ = self._s5(_falling_ohlcv())
+        sl_bars = {t.exit_bar for t in trades if t.reason == 'SL'}
+        entries = [t.entry_bar for t in trades]
+        violations = [b for b in entries
+                      if any(0 < b - x <= cfg.S5_SL_COOLDOWN_BARS for x in sl_bars)]
+        assert not violations, (
+            f'손절 후 {cfg.S5_SL_COOLDOWN_BARS}봉 이내 재진입 {len(violations)}건 — '
+            f'라이브는 막는 거래다')
+
+    def test_cooldown_constant_is_shared(self):
+        """상수를 복제하면 한쪽만 바뀌어 조용히 어긋난다."""
+        src = Path(bt.__file__).read_text(encoding='utf-8')
+        assert 'S5_SL_COOLDOWN_BARS' in src, (
+            '백테스트가 라이브와 같은 상수를 참조해야 한다')
+
+    def test_non_sl_exit_does_not_trigger_cooldown(self, s5_always_sl, monkeypatch):
+        """쿨다운은 **손절 후에만** 건다 — 익절까지 막으면 과도 제약이다."""
+        def _tp_sig(df, i):
+            close = float(df['close'].iloc[i])
+            return {'signal': 1, 'sl': close * 0.80, 'tp': close * 1.005,
+                    'rr': 2.0, 'exit_type': 'sl_tp', 'max_hold': 0}
+        monkeypatch.setitem(bt.SIGNAL_FUNCS, 'S5', _tp_sig)
+        trades, _ = self._s5(_flat_ohlcv())
+        tp_trades = [t for t in trades if t.reason == 'TP']
+        if len(tp_trades) >= 2:
+            gaps = [b.entry_bar - a.exit_bar
+                    for a, b in zip(tp_trades, tp_trades[1:], strict=False)]
+            assert min(gaps) <= cfg.S5_SL_COOLDOWN_BARS, (
+                '익절 후에도 쿨다운이 걸려 진입 기회를 과도하게 막는다')
+
+
+class TestFundingParity:
+    """라이브의 펀딩비 필터가 백테스트에도 있어야 한다.
+
+    라이브(_funding_scale)는 롱이 과밀할 때(펀딩 ≥ FUNDING_LONG_BLOCK)
+    추세추종 진입을 막고, 숏 쏠림(≤ FUNDING_SHORT_BOOST)이면 리스크를 키운다.
+    백테스트가 이걸 모르면 라이브가 실제로는 걸렀을 구간까지 거래한 것으로
+    계산해 **낙관 편향**이 된다 — 특히 S6는 현재 OOS PF가 가장 높은 전략이라
+    그 수치가 부풀려져 있으면 판단이 통째로 흔들린다.
+    """
+
+    def _fm(self, pairs):
+        return {'_keys': [t for t, _ in pairs], 'rates': dict(pairs)}
+
+    def test_blocks_when_longs_crowded(self):
+        fm = self._fm([(1000, cfg.FUNDING_LONG_BLOCK)])
+        scale, flag = bt._bt_funding_scale(True, fm, 2000)
+        assert scale is None and flag == 'funding_block'
+
+    def test_boosts_when_shorts_crowded(self):
+        fm = self._fm([(1000, cfg.FUNDING_SHORT_BOOST)])
+        scale, flag = bt._bt_funding_scale(True, fm, 2000)
+        assert scale == pytest.approx(1.20) and flag == 'funding_boost'
+
+    def test_neutral_in_between(self):
+        fm = self._fm([(1000, 0.0)])
+        assert bt._bt_funding_scale(True, fm, 2000) == (1.0, None)
+
+    def test_missing_data_passes_like_live(self):
+        """퍼프가 없는 심볼은 라이브도 0.0으로 통과시킨다 — 차단하면 어긋난다."""
+        assert bt._bt_funding_scale(True, None, 2000) == (1.0, None)
+        assert bt._bt_funding_scale(True, self._fm([]), 2000) == (1.0, None)
+
+    def test_not_applied_to_other_strategies(self):
+        fm = self._fm([(1000, cfg.FUNDING_LONG_BLOCK)])
+        assert bt._bt_funding_scale(False, fm, 2000) == (1.0, None)
+
+    def test_uses_only_past_funding(self):
+        """봉 시각 이후의 펀딩을 쓰면 선행편향이다."""
+        fm = self._fm([(1000, 0.0), (5000, cfg.FUNDING_LONG_BLOCK)])
+        # ts=2000 시점엔 5000의 과밀을 알 수 없다
+        assert bt._bt_funding_scale(True, fm, 2000) == (1.0, None)
+        assert bt._bt_funding_scale(True, fm, 6000)[0] is None
+
+    def test_before_first_funding_is_neutral(self):
+        fm = self._fm([(5000, cfg.FUNDING_LONG_BLOCK)])
+        assert bt._bt_funding_scale(True, fm, 1000) == (1.0, None)
+
+    def test_constants_shared_with_live(self):
+        """상수를 복제하면 한쪽만 바뀌어 조용히 어긋난다."""
+        assert bt.FUNDING_LONG_BLOCK is cfg.FUNDING_LONG_BLOCK
+        assert bt.FUNDING_SHORT_BOOST is cfg.FUNDING_SHORT_BOOST
+        assert bt.FUNDING_APPLY_STRATS is cfg.FUNDING_APPLY_STRATS
+
+
+class TestNotionalParity:
+    """거래소 최소 주문금액(NOTIONAL)을 백테스트도 반영해야 한다.
+
+    라이브 `_spot_buy` 는 cost_usdt < SPOT_MIN_ORDER_USDT($5) 이면 진입을
+    막는다 — 주문 자체가 거부되기 때문이다. 백테스트는 이 상수를 아예
+    참조하지 않았다.
+
+    기본 자본($10,000)에서는 주문이 수백 달러라 바닥이 걸리지 않아 오랫동안
+    드러나지 않았다. 그러나 실계좌는 $565이고, 사이징 진단은 레짐별 주문금액을
+    $3.26~$10.81로 보고했다 — 하락장 담당 S4는 $3.26으로 아예 진입 불가다.
+    모델링하지 않으면 WFO는 **그 계좌가 실행할 수 없는 조합**을 검증하게 된다.
+    """
+
+    def test_tiny_equity_blocks_entries(self, always_signal):
+        """자본이 작으면 주문이 최소금액에 못 미쳐 진입이 막힌다."""
+        always_signal(0.03)
+        trades, diag = bt.backtest_strategy(
+            'S3', 'BTCUSDT', _flat_ohlcv(), {}, '2021-01-01', '2022-12-31',
+            risk_pct=0.02, initial_equity=50.0)
+        assert diag.get('notional_block', 0) > 0, (
+            '자본 $50에서 주문이 $5 미만인데 진입이 체결됐다 — '
+            '라이브가 거부할 거래로 성과를 계산한다')
+
+    def test_normal_equity_unaffected(self, always_signal):
+        """기본 자본에서는 바닥이 걸리지 않아 기존 동작 그대로다."""
+        always_signal(0.03)
+        _, diag = _run()
+        assert diag.get('notional_block', 0) == 0
+
+    def test_constant_shared_with_live(self):
+        assert bt.SPOT_MIN_ORDER_USDT is cfg.SPOT_MIN_ORDER_USDT
+
+    def test_no_recorded_trade_is_below_minimum(self, always_signal):
+        """미체결은 진입이 아니다 — 거래로 세면 통계가 오염된다.
+
+        자본이 줄면 주문금액도 줄어드는데, 바닥 미만인 주문이 거래로
+        기록되면 라이브가 거부했을 체결로 성과를 계산하게 된다.
+        """
+        always_signal(0.03)
+        trades, _ = bt.backtest_strategy(
+            'S3', 'BTCUSDT', _flat_ohlcv(), {}, '2021-01-01', '2022-12-31',
+            risk_pct=0.02, initial_equity=50.0)
+        tiny = [t for t in trades if t.cost_usdt < cfg.SPOT_MIN_ORDER_USDT]
+        assert not tiny, (
+            f'최소주문금액(${cfg.SPOT_MIN_ORDER_USDT}) 미만 거래 {len(tiny)}건이 '
+            f'기록됐다 — 최소 {min(t.cost_usdt for t in tiny):.2f}')

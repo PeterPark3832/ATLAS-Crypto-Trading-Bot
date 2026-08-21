@@ -7,15 +7,9 @@ _auth, _q, _trades, _positions, _spot_balance를 검증합니다.
   pytest tests/test_web_dashboard_db.py -v
 """
 
-import os
-import sys
+import json
 import time
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import sqlite3
 
@@ -198,3 +192,61 @@ class TestSpotBalance:
         monkeypatch.setattr(wd.requests, 'get', _fake_get)
         result = wd._spot_balance()
         assert result == pytest.approx(100.0 + 500.0)
+
+
+class TestOtherAssetsReconciliation:
+    """화면 숫자와 봇 로그의 '총자산'이 서로 설명돼야 한다.
+
+    화면은 USDT+포지션(거래 가능 자산)을, 봇은 보유 코인 전부를 기준으로
+    사이징한다. 실측 $197.32(화면) vs $217.02(봇) — 차이는 대부분 수수료용
+    BNB였다. 둘 다 내부적으로는 맞지만 같은 이름으로 불려 혼란을 준다.
+    차액을 함께 내보내 actual_balance + other_assets = 봇 기준이 되게 한다.
+    """
+
+    def _setup(self, monkeypatch, balances, prices):
+        monkeypatch.setattr(wd, 'API_KEY', 'key')
+        monkeypatch.setattr(wd, 'API_SECRET', 'secret')
+        monkeypatch.setattr(wd, '_bal_cache', {'val': None, 'ts': 0.0, 'other': 0.0})
+        monkeypatch.setattr(wd, '_positions',
+                            lambda: __import__('pandas').DataFrame(
+                                [{'symbol': 'ADAUSDT', 'qty': 44.8, 'risk_usd': 8.5}]))
+
+        def _fake_get(url, params=None, headers=None, timeout=None):
+            if 'account' in url:
+                return _FakeResp(json_data={'balances': balances})
+            want = json.loads(params['symbols'])
+            return _FakeResp(json_data=[{'symbol': s, 'price': str(prices[s])}
+                                        for s in want if s in prices])
+
+        monkeypatch.setattr(wd.requests, 'get', _fake_get)
+
+    def test_counts_holdings_outside_positions(self, monkeypatch):
+        self._setup(
+            monkeypatch,
+            balances=[{'asset': 'USDT', 'free': '132.28', 'locked': '0'},
+                      {'asset': 'ADA',  'free': '0.05', 'locked': '44.8'},
+                      {'asset': 'BNB',  'free': '0.033', 'locked': '0'}],
+            prices={'ADAUSDT': 0.17, 'BNBUSDT': 596.0})
+        wd._spot_balance()
+        assert wd._bal_cache['other'] == pytest.approx(0.033 * 596.0, rel=1e-3), (
+            '포지션 밖 보유분(수수료용 BNB)이 누락되면 두 숫자가 계속 어긋난다')
+
+    def test_position_asset_not_double_counted(self, monkeypatch):
+        """포지션 자산은 이미 시가로 더해졌으므로 other에 또 넣으면 안 된다."""
+        self._setup(
+            monkeypatch,
+            balances=[{'asset': 'USDT', 'free': '100', 'locked': '0'},
+                      {'asset': 'ADA',  'free': '0', 'locked': '44.8'}],
+            prices={'ADAUSDT': 0.17})
+        wd._spot_balance()
+        assert wd._bal_cache['other'] == 0.0
+
+    def test_unpriceable_asset_is_skipped(self, monkeypatch):
+        """현물 마켓이 없는 자산(Simple Earn LD*, 상장폐지)은 건너뛴다."""
+        self._setup(
+            monkeypatch,
+            balances=[{'asset': 'USDT', 'free': '100', 'locked': '0'},
+                      {'asset': 'LDUSDT', 'free': '50', 'locked': '0'}],
+            prices={})
+        wd._spot_balance()
+        assert wd._bal_cache['other'] == 0.0

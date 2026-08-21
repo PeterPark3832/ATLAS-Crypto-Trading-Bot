@@ -15,14 +15,7 @@ Kelly의 목적은 **성과가 좋은 전략에 자본을 더 배분**하는 것
   pytest tests/test_kelly_effectiveness.py -v
 """
 
-import os
-import sys
-from pathlib import Path
 
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
