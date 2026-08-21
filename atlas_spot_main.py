@@ -1858,20 +1858,77 @@ def _diagnose_sizing_capability(equity: float) -> list[dict]:
         for sid in strats:
             kelly  = _get_kelly_scale(sid)
             health = _get_strategy_health_scale(sid)
-            risk   = SPOT_BASE_RISK_PCT * kelly * r_scale * health
-            cost   = (equity * risk / sl_pct) if sl_pct > 0 else 0.0
-            cost   = min(cost, equity * SPOT_MAX_ALLOC_PCT)
+            intended = SPOT_BASE_RISK_PCT * kelly * r_scale * health
+            want     = (equity * intended / sl_pct) if sl_pct > 0 else 0.0
+            cost     = min(want, equity * SPOT_MAX_ALLOC_PCT)
+            # ⚠️ 상한이 걸리면 **실제로 건 위험은 의도보다 작다.** 예전에는
+            # 의도값(intended)을 그대로 보고해서, 배분 상한이 리스크를
+            # 3분의 1로 줄이고 있다는 사실이 진단에서 전혀 보이지 않았다.
+            risk     = (cost * sl_pct / equity) if equity > 0 else 0.0
             out.append({
                 'strategy': sid, 'regime': regime,
-                'risk_pct': risk, 'cost_usdt': cost,
+                'risk_pct': risk, 'intended_risk_pct': intended,
+                'alloc_capped': cost < want - 1e-12,
+                'cost_usdt': cost,
                 'tradable': cost >= SPOT_MIN_ORDER_USDT,
                 'kelly': kelly, 'health': health, 'regime_scale': r_scale,
             })
     return out
 
 
+def _risk_profile(equity: float = 1000.0) -> list[dict]:
+    """SL 거리별 **실효 리스크** 프로파일. 부수효과 없음.
+
+    리스크 기반 사이징의 전제는 "SL 거리와 무관하게 리스크가 일정하다"는
+    것이다. 배분 상한이 걸리는 구간에서는 그 전제가 깨지고, 리스크가
+    SL 거리에 **비례**하게 된다 — 불확실한 거래일수록 크게 거는 셈이다.
+
+    실제로 그 상태가 오래 방치돼 있었다(리스크 2%/상한 15% 조합).
+    설정만 봐서는 드러나지 않으므로 기동 시 숫자로 남긴다.
+    """
+    out = []
+    for sl_pct in (0.02, 0.03, 0.05, 0.08, 0.10, 0.15, 0.20):
+        # 기준가 100.0에서 SL거리 = sl_pct × 100.0 (리스크는 비율이라
+        # 기준가·자본이 달라져도 프로파일은 같다 — 테스트가 고정한다)
+        adj, _, cost = _size_position(equity, sl_pct * 100.0, 100.0)
+        want = equity * SPOT_BASE_RISK_PCT / sl_pct
+        out.append({
+            'sl_pct':   sl_pct,
+            'risk_pct': adj,
+            'capped':   cost < want - 1e-9,
+        })
+    return out
+
+
+def _report_risk_profile(equity: float = 1000.0) -> None:
+    """SL 거리별 실효 리스크를 로그로 남긴다(기동 1회)."""
+    try:
+        rows = _risk_profile(equity)
+    except Exception as e:
+        log.warning(f'[진단] 리스크 프로파일 계산 실패(무시): {e}')
+        return
+    free = [r['risk_pct'] for r in rows if not r['capped']]
+    log.info(f'[진단] SL 거리별 실효 리스크 (설정 {SPOT_BASE_RISK_PCT*100:.3f}%, '
+             f'배분상한 {SPOT_MAX_ALLOC_PCT*100:.0f}%)')
+    for r in rows:
+        mark = ' ← 배분상한' if r['capped'] else ''
+        log.info(f'    SL {r["sl_pct"]*100:>5.1f}% → 리스크 '
+                 f'{r["risk_pct"]*100:.3f}%{mark}')
+    if free and max(free) - min(free) > 1e-9:
+        log.warning('[진단] 상한에 걸리지 않는 구간에서도 리스크가 일정하지 않다 '
+                    '— 사이징 로직을 확인할 것')
+    elif not free:
+        # 조언까지 적지 않는다 — "리스크를 내려라"는 소액 구간에서
+        # 오히려 조합을 죽인다(config 주석의 ①② 참조). 사실만 남긴다.
+        log.warning(f'[진단] **모든 SL 구간에서 배분상한이 걸린다** — '
+                    f'SPOT_BASE_RISK_PCT({SPOT_BASE_RISK_PCT*100:.3f}%)는 '
+                    f'상한으로만 작동하고, 실효 리스크는 SL 거리에 비례한다. '
+                    f'조정 판단 기준은 atlas_spot_config.py 사이징 주석 참조.')
+
+
 def _report_sizing_capability(equity: float) -> None:
     """진단 결과를 로그·텔레그램으로 알린다."""
+    _report_risk_profile(equity)
     try:
         rows = _diagnose_sizing_capability(equity)
     except Exception as e:
