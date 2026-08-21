@@ -6,9 +6,10 @@ ATLAS Spot — 라이브 트레이딩 엔진
 [아키텍처]
   ┌─ balance_poller ──────── 60초마다 총자산 갱신 (USDT + 보유코인 평가)
   ├─ regime_loop ─────────── 1시간마다 BTC 레짐 갱신
-  ├─ universe_refresh_loop ─ 24시간마다 유니버스 갱신
+  ├─ universe_refresh_loop ─ 4시간마다 유니버스 갱신 (UNIVERSE_REFRESH_HOURS)
   ├─ daily_reset_loop ────── 00:00 UTC 일일 리셋 + 브리핑
   ├─ position_reconcile_loop 10분마다 DB↔거래소 포지션 검증
+  ├─ db_backup_loop ──────── 6시간마다 DB 스냅샷 (최근 28개 보관)
   ├─ tg_cmd_loop ─────────── Telegram 명령 수신
   └─ strategy_loop × N ───── 4H/1D 타임프레임별 통합 루프
 
@@ -22,7 +23,9 @@ ATLAS Spot — 라이브 트레이딩 엔진
 [스팟 특화]
   - 레버리지 없음 (leverage=1)
   - 롱 전용 (매수/매도만)
-  - SL: 소프트웨어 기반 (1분 폴링)
+  - SL: 거래소 STOP_LOSS_LIMIT(+OCO로 TP 동봉)이 1차, 소프트웨어 판정(60초
+        폴링)이 백업. 봇이 죽어도 거래소가 손절을 집행한다.
+        S5는 TP가 매 봉 갱신되는 동적 목표라 OCO 제외(스탑 단독).
   - 잔고: USDT + 보유 코인 현재가 합산
   - 수수료: 0.1% (BNB 보유 시 0.075%)
 
