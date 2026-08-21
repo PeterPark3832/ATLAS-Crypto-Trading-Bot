@@ -3,28 +3,27 @@ ATLAS — 실효 리스크 프로파일 진단
 ================================
 리스크 기반 사이징의 전제는 **"SL 거리와 무관하게 리스크가 일정하다"** 이다.
 배분 상한(`SPOT_MAX_ALLOC_PCT`)이 걸리는 구간에서는 그 전제가 깨지고,
-리스크가 SL 거리에 **비례**하게 된다 — 불확실한 거래(넓은 SL)일수록
-크게 거는 셈으로, 사이징이 존재하는 이유의 정반대다.
+리스크가 SL 거리에 **비례**하게 된다.
 
-현재 설정(리스크 2.0% / 상한 15%)에서 실제로 그 상태다:
-    SL  2%(타이트=확신)  → 0.30%
-    SL 10%(넓음=불확실)  → 1.50%
+현재 설정(리스크 2.0% / 상한 15%)에서 상한이 걸리는 조건은
+SL거리 < 0.020/0.15 = **13.3%** — 전형 SL이 5% 안팎이므로 거의 모든
+거래가 여기 해당한다:
+    SL  2%   → 0.30%   ← 배분상한
+    SL  5%   → 0.75%   ← 배분상한 (전형)
+    SL 10%   → 1.50%   ← 배분상한
+    SL 13.3%+ → 2.00%  (설정값 그대로)
 
-설정만 봐서는 드러나지 않는다. `SPOT_BASE_RISK_PCT`는 2%라고 적혀 있지만
-SL 15% 미만에서는 아무 일도 하지 않는다. 그래서 기동 시 숫자로 남긴다.
+이 상태를 "고쳐야 할 결함"으로 단정하지 않는다 — 포트폴리오 관점에서는
+6종목 × 0.75% = 4.5%로 일간 손실 한도(-4%)와 눈금이 맞고, 값을 내리면
+소액 구간에서 조합이 죽는다. 판단 근거는 atlas_spot_config.py의 사이징
+주석에 있다. 여기서 하는 일은 **그 상태를 숫자로 고정**해, 누가 리스크나
+상한을 바꾸면 테스트가 실패하며 주석을 함께 갱신하도록 강제하는 것이다.
 
 실행:
   pytest tests/test_risk_profile.py -v
 """
 
-import os
-import sys
 from pathlib import Path
-
-for _k in ('BINANCE_API_KEY', 'BINANCE_API_SECRET', 'TG_TOKEN', 'TG_CHAT_ID'):
-    os.environ.setdefault(_k, 'TEST')
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -60,10 +59,12 @@ class TestRiskProfile:
 
 
 class TestDetectsTheInversion:
-    """이 클래스가 현재 결함을 **테스트로 고정**한다.
+    """현재의 사이징 성격을 **테스트로 고정**하는 래칫.
 
-    지금은 '역전이 존재한다'가 참이다. 나중에 리스크를 0.0075로 내리면
-    이 테스트들이 실패하며 "결함이 해소됐으니 문서를 갱신하라"고 알린다.
+    지금은 '전형 SL 구간에서 배분 상한이 사이징을 결정한다'가 참이다.
+    누가 리스크나 상한을 바꾸면 이 테스트들이 먼저 실패해서,
+    config 사이징 주석(판단 기준·소액 구간 위험)을 함께 갱신하도록 만든다.
+    실패 = 버그가 아니라 "문서도 같이 고쳐라"는 신호다.
     """
 
     def test_currently_all_buckets_are_capped(self):
@@ -90,6 +91,25 @@ class TestDetectsTheInversion:
             if r['capped']:
                 assert r['risk_pct'] == pytest.approx(
                     cfg.SPOT_MAX_ALLOC_PCT * r['sl_pct'])
+
+    def test_cap_binds_exactly_below_risk_over_alloc(self):
+        """상한이 걸리는 문턱 = 리스크 ÷ 배분상한. config 주석의 13.3%가
+        이 식에서 나온 값임을 고정한다(둘 중 하나가 바뀌면 문턱도 바뀐다)."""
+        threshold = cfg.SPOT_BASE_RISK_PCT / cfg.SPOT_MAX_ALLOC_PCT
+        eq = 1000.0
+        for sl_pct, expect_capped in ((threshold * 0.9, True),
+                                      (threshold * 1.1, False)):
+            _, _, cost = sm._size_position(eq, 100.0 * sl_pct, 100.0)
+            want = eq * cfg.SPOT_BASE_RISK_PCT / sl_pct
+            assert (cost < want - 1e-9) is expect_capped, (
+                f'SL {sl_pct*100:.2f}%에서 상한 적용 여부가 예상과 다르다 '
+                f'(문턱 {threshold*100:.1f}%)')
+
+    def test_effective_risk_never_exceeds_the_setting(self):
+        """상한은 리스크를 **줄이기만** 한다 — 설정값이 천장이다.
+        (config 주석이 SPOT_BASE_RISK_PCT를 '상한'이라 부르는 근거)"""
+        for r in sm._risk_profile(1000.0):
+            assert r['risk_pct'] <= cfg.SPOT_BASE_RISK_PCT + 1e-12
 
 
 class TestReportedRiskIsEffective:
@@ -124,7 +144,9 @@ class TestMaxPositionsIsHonest:
         거짓이 된다 — config 주석에 그 사실이 적혀 있어야 한다."""
         real = (1 - cfg.SPOT_RESERVE_PCT) / cfg.SPOT_MAX_ALLOC_PCT
         if real < cfg.SPOT_MAX_POSITIONS:
-            src = Path(cfg.__file__).read_text()
+            # encoding 명시: config에 한글 주석이 있어 Windows 기본
+            # 로케일(cp949)로 읽으면 UnicodeDecodeError가 난다.
+            src = Path(cfg.__file__).read_text(encoding='utf-8')
             assert '실제 한계는' in src, (
                 f'설정 {cfg.SPOT_MAX_POSITIONS}개 vs 실제 {real:.0f}개 — '
                 f'그 사실이 config에 적혀 있어야 한다')
