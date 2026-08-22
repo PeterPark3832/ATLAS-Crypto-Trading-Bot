@@ -37,6 +37,8 @@ ATLAS Spot — 라이브 트레이딩 엔진
 
 import argparse
 import logging
+import math
+import numbers
 from logging.handlers import RotatingFileHandler
 import queue
 import shutil
@@ -194,6 +196,29 @@ def _prefetch_prices(ccxt_syms: list) -> int:
         return 0
 
 
+def _fmt_px(v: float) -> str:
+    """가격을 자릿수에 맞춰 문자열로. 고정 `:,.4f`는 저단가 코인을 0으로 만든다.
+
+    SHIBUSDT(6.12e-06)는 `{:,.4f}`가 "0.0000"이라 매수/청산 알림과 슬리피지
+    경고가 전부 "0.0000 → 0.0000"으로 찍혔다 — 체결가를 확인할 수 없었다.
+    큰 가격은 종전과 같은 4자리, 작은 가격은 유효숫자를 살린다.
+    """
+    # try/except로 삼키지 않는다 (조용한 예외 삼킴 래칫 — test_error_handling)
+    if isinstance(v, bool) or not isinstance(v, numbers.Real):
+        return '0'
+    f = float(v)
+    a = abs(f)
+    if a == 0 or not math.isfinite(f):
+        return '0'
+    if a >= 1:
+        return f'{f:,.4f}'
+    if a >= 0.01:
+        return f'{f:,.6f}'
+    if a >= 0.0001:
+        return f'{f:,.8f}'
+    return f'{f:,.10f}'
+
+
 def _get_price(ccxt_sym: str) -> float:
     """현재가 조회. 배치 프리페치 캐시 → 개별 조회 → 최대 2분 캐시 폴백."""
     hit = _price_cache.get(ccxt_sym)
@@ -215,7 +240,7 @@ def _get_price(ccxt_sym: str) -> float:
     # 캐시 폴백
     cached = _last_known_price.get(ccxt_sym)
     if cached and (time.time() - cached[1]) < _PRICE_CACHE_TTL:
-        log.warning(f'[{ccxt_sym}] 캐시 가격 사용: {cached[0]:.4f} (age {time.time()-cached[1]:.0f}s)')
+        log.warning(f'[{ccxt_sym}] 캐시 가격 사용: {_fmt_px(cached[0])} (age {time.time()-cached[1]:.0f}s)')
         return cached[0]
     return 0.0
 
@@ -671,7 +696,7 @@ def _place_stop_loss_order(strategy: str, symbol: str, ccxt_sym: str,
             params={'stopPrice': sl_price, 'timeInForce': 'GTC'})
         order_id = str(order.get('id', '') or '')
         log.info(f'[{strategy}] {symbol} 거래소 스탑주문 등록: id={order_id} '
-                 f'trigger={sl_price:,.4f} limit={limit_price:,.4f}')
+                 f'trigger={_fmt_px(sl_price)} limit={_fmt_px(limit_price)}')
         return order_id
     except Exception as e:
         log.warning(f'[{strategy}] {symbol} 스탑주문 등록 실패(소프트웨어 SL로 폴백): {e}')
@@ -748,8 +773,8 @@ def _place_protective_orders(strategy: str, symbol: str, ccxt_sym: str,
                 elif otype in ('LIMIT_MAKER', 'LIMIT'):
                     tp_id = oid
             if sl_id:
-                log.info(f'[{strategy}] {symbol} OCO 등록: SL#{sl_id}@{sl_price:,.4f} '
-                         f'/ TP#{tp_id}@{tp_price:,.4f}')
+                log.info(f'[{strategy}] {symbol} OCO 등록: SL#{sl_id}@{_fmt_px(sl_price)} '
+                         f'/ TP#{tp_id}@{_fmt_px(tp_price)}')
                 return sl_id, tp_id
             # ID를 못 읽었는데 주문은 살아있다 → 추적 불가능한 고아가 된다.
             # (수량을 잠가 이후 매도를 막고, 다른 포지션의 청산 판정까지 흔든다)
@@ -2238,7 +2263,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     adj_risk, qty, cost_usdt, sl_dist, tp = gates
     entry_price = price
 
-    log.info(f'[{strategy}] {symbol} 매수 시도 | {qty:.6f}개 @ {entry_price:,.4f} | '
+    log.info(f'[{strategy}] {symbol} 매수 시도 | {qty:.6f}개 @ {_fmt_px(entry_price)} | '
              f'비용 ${cost_usdt:.2f} | 리스크 {adj_risk*100:.2f}%')
 
     if _state['dry_run']:
@@ -2286,7 +2311,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
     entry_slip = (fill_price - entry_price) / entry_price if entry_price > 0 else 0.0
     if abs(entry_slip) > 0.002:
         log.warning(f'[{strategy}] {symbol} 진입 슬리피지 {entry_slip*100:+.3f}% '
-                    f'(신호 {entry_price:,.4f} → 체결 {fill_price:,.4f})')
+                    f'(신호 {_fmt_px(entry_price)} → 체결 {_fmt_px(fill_price)})')
     try:
         _save_position(
             strategy, symbol, fill_price, sl_final, tp_final,
@@ -2334,7 +2359,7 @@ def _spot_buy_locked(strategy: str, symbol: str, ccxt_sym: str,
             _update_position_order_id(strategy, symbol, sl_id, tp_id)
 
     msg = (f'✅ [{strategy}] {symbol} 매수\n'
-           f'   체결가: {fill_price:,.4f} | SL: {sl_final:,.4f}\n'
+           f'   체결가: {_fmt_px(fill_price)} | SL: {_fmt_px(sl_final)}\n'
            f'   수량: {qty:.6f} | 비용: ${cost_usdt:.2f}\n'
            f'   리스크: {adj_risk*100:.2f}% | 레짐: {regime}')
     log.info(msg)
@@ -2500,7 +2525,7 @@ def _spot_sell(strategy: str, symbol: str, ccxt_sym: str,
 
     emoji = '✅' if pnl_usdt > 0 else '❌'
     msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason})\n'
-           f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
+           f'   진입: {_fmt_px(entry_price)} → 청산: {_fmt_px(exit_price)}\n'
            f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)\n'
            f'   보유: {hold_hours:.1f}시간')
     log.info(msg)
@@ -2553,7 +2578,7 @@ def _handle_stop_order_state(strategy: str, symbol: str, ccxt_sym: str,
                 _cancel_stop_order(strategy, symbol, ccxt_sym, other_id)
         emoji = '✅' if pnl_usdt > 0 else '❌'
         msg = (f'{emoji} [{strategy}] {symbol} 청산 ({reason} — 거래소 주문 체결)\n'
-               f'   진입: {entry_price:,.4f} → 청산: {exit_price:,.4f}\n'
+               f'   진입: {_fmt_px(entry_price)} → 청산: {_fmt_px(exit_price)}\n'
                f'   PnL: ${pnl_usdt:+.2f} ({pnl_pct*100:+.2f}%)')
         log.info(msg)
         _tg(msg)
@@ -2957,8 +2982,8 @@ def _manage_position(strategy: str, symbol: str, ccxt_sym: str, df, i: int) -> N
         new_sl = trailing_sl(entry, sl, peak, abs(entry - float(pos['sl'])))
         _update_position_sl(strategy, symbol, new_sl, peak)
         if new_sl > sl:
-            log.info(f'[{strategy}] {symbol} 추적 손절 {sl:,.4f} → {new_sl:,.4f} '
-                     f'(최고 {peak:,.4f})')
+            log.info(f'[{strategy}] {symbol} 추적 손절 {_fmt_px(sl)} → {_fmt_px(new_sl)} '
+                     f'(최고 {_fmt_px(peak)})')
             _rearm_trailing_stop(strategy, symbol, ccxt_sym, pos, new_sl)
 
 
@@ -3362,8 +3387,8 @@ def _handle_tg_cmd(cmd: str) -> None:
         for p in all_pos:
             price = _get_price(to_ccxt(p['symbol']))
             pnl_pct = (price - p['entry_price']) / p['entry_price'] * 100 if price > 0 else 0
-            lines.append(f"  {p['strategy']}/{p['symbol']}: {p['entry_price']:.4f} → "
-                         f"{price:.4f} ({pnl_pct:+.1f}%)")
+            lines.append(f"  {p['strategy']}/{p['symbol']}: {_fmt_px(p['entry_price'])} → "
+                         f"{_fmt_px(price)} ({pnl_pct:+.1f}%)")
         _tg('\n'.join(lines))
 
     elif '/equity' in cmd:
