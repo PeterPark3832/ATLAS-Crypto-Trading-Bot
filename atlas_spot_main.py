@@ -152,9 +152,12 @@ def _get_ex_futures() -> ccxt.binance:
     if _ex_futures is None:
         with _ex_futures_lock:
             if _ex_futures is None:
+                # **공개 데이터 전용 커넥션 — 자격증명을 싣지 않는다.**
+                # 이 클라이언트의 유일한 용도는 fetch_funding_rate(공개
+                # 엔드포인트)이고 인증이 필요 없다. 키를 붙여두면 거래소
+                # 키에 Futures 권한을 열어둬야 하는데, 그 권한은 키가
+                # 유출됐을 때 레버리지 포지션을 열 수 있게 한다.
                 _ex_futures = ccxt.binance({
-                    'apiKey':  BINANCE_API_KEY,
-                    'secret':  BINANCE_API_SECRET,
                     'options': {'defaultType': 'future'},
                     'enableRateLimit': True,
                 })

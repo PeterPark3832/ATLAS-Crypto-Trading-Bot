@@ -45,9 +45,16 @@ jobs:
         run: mypy atlas_indicators.py atlas_learning.py atlas_regime.py capital_plan.py
 
       - name: 보안 스캔 (HIGH만 차단)
-        # MEDIUM 이하는 대부분 오탐이라 리포트만 남긴다.
+        # MEDIUM 이하는 오탐 비중이 커서 차단하지 않는다.
         # (FastAPI가 int로 강제 변환하는 쿼리 파라미터를 SQL 주입으로 보는 등)
         run: bandit -r . -x ./tests -lll
+
+      - name: 보안 스캔 리포트 (MEDIUM 이상, 차단 안 함)
+        # 위 게이트는 HIGH만 본다. MEDIUM이 통째로 안 보이면 '스캔 통과'가
+        # 실제보다 넓게 읽힌다. 차단하지 않고 로그로만 남겨 실태를 본다.
+        # 오탐을 걷어낸 뒤 게이트를 -ll로 조이는 것이 다음 단계다.
+        continue-on-error: true
+        run: bandit -r . -x ./tests -ll
 
       - name: 테스트 + 커버리지
         env:

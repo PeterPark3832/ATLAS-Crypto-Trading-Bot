@@ -421,6 +421,56 @@ CI(`.github/workflows/ci.yml`)가 강제하는 게이트:
 
 ---
 
+## 보안
+
+실계좌를 다루므로 **접근 통제가 전략보다 먼저**다. 2026-08 점검 기준 현황.
+
+### 거래소 API 키 (가장 중요한 방어선)
+
+키가 유출돼도 자산을 빼갈 수 없게 만드는 것이 핵심이다. Binance API 관리에서 확인:
+
+| 항목 | 설정 | 이유 |
+|------|------|------|
+| 출금(Withdrawals) | **해제** | 키가 새도 출금 불가 — 이 한 줄이 최악을 막는다 |
+| IP 제한 | **서버 IP만 허용** | 키만으로는 다른 곳에서 못 쓴다 |
+| 현물/마진 거래 | 현물만 허용 | 마진은 레버리지 손실 위험 |
+| 선물(Futures) | **해제** | 봇은 펀딩비를 **공개 endpoint**로만 읽는다 (인증 불필요) |
+| 내부이체·유니버설전송 | 해제 | 계정 간 자산 이동 차단 |
+
+### 대시보드
+
+봇 중지·재시작과 **전량 시장가 매도(패닉)** 를 할 수 있으므로 노출 범위를 좁게 유지한다.
+
+- **접속 IP 제한** — ufw에서 특정 IP만 8080 허용:
+  ```bash
+  ufw allow from <내-IP> to any port 8080 proto tcp
+  ```
+  집 IP가 바뀌면 대시보드만 안 열린다. SSH로 들어가 이전 규칙을 지우고 새 IP로 다시 걸면 된다:
+  ```bash
+  ufw status numbered          # 기존 8080 규칙 번호 확인
+  ufw delete <번호>
+  ufw allow from <새-IP> to any port 8080 proto tcp
+  ```
+- 토큰 인증(TTL 24h), 비밀번호 상수시간 비교, 로그인 IP당 15분 5회 실패 시 429
+- 접근 로그의 토큰 마스킹, CSV 인젝션 이스케이프, Swagger 비활성
+- 보안 헤더: CSP(`frame-ancestors 'none'`으로 클릭재킹 차단, `connect-src 'self'`로 토큰 외부 전송 차단), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`
+- 외부 스크립트(chart.js)는 **SRI 해시로 고정** — 버전을 올릴 때 `integrity` 값도 반드시 함께 갱신할 것
+
+### 시크릿
+
+- `.env`는 커밋하지 않는다(`.gitignore`가 `.env.*`까지 차단). 권한은 `600`.
+- remote URL에 토큰을 넣지 말 것 — 아래 설치 항목의 경고 참조
+
+### 아직 열려 있는 항목
+
+| 항목 | 상태 | 비고 |
+|------|------|------|
+| 대시보드 TLS | 미적용 | IP 제한으로 무차별 스캔은 막았으나 **통신은 평문**이다. 같은 네트워크(카페 WiFi 등)에서의 도청은 못 막는다. 도메인 + Caddy 자동 TLS가 다음 단계 |
+| SSH 하드닝 | 미적용 | `PermitRootLogin yes` + `PasswordAuthentication yes`. 적용 절차: 키 접속 확인 → `PasswordAuthentication no`, `PermitRootLogin prohibit-password` → **현재 세션을 열어둔 채** 다른 세션으로 접속 검증 → `systemctl reload sshd`. fail2ban도 함께 |
+| 서버 동거 | 구조적 | 같은 서버에서 다른 프로젝트가 root로 공개 포트를 열고 있다. 그쪽이 뚫리면 이 봇의 `.env`도 함께 노출된다 |
+
+---
+
 ## 운영 가이드
 
 ### 모니터링 기준
