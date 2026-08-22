@@ -106,6 +106,36 @@ if not os.getenv('DASH_PASSWORD'):
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
+# ── 보안 응답 헤더 ────────────────────────────────────────────────
+# UI에 인라인 스크립트/핸들러/스타일이 많아 'unsafe-inline'은 남긴다
+# (제거하려면 UI 전면 개편이 필요하다). 그래도 아래 둘이 실질 방어를 한다:
+#   · frame-ancestors 'none' — 이 대시보드에는 **전량 시장가 매도** 버튼이
+#     있다. 남의 페이지에 iframe으로 얹어 클릭을 유도하는 것을 막는다.
+#   · connect-src 'self'     — 주입된 스크립트가 토큰을 외부로 못 보낸다.
+SECURITY_HEADERS = {
+    'Content-Security-Policy': (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "connect-src 'self'; "
+        "img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    ),
+    'X-Frame-Options': 'DENY',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+}
+
+
+@app.middleware('http')
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    return resp
+
+
 # ── 인증 ──────────────────────────────────────────────────────────
 _tokens: dict[str, float] = {}
 
@@ -113,6 +143,7 @@ _tokens: dict[str, float] = {}
 _login_failures: dict[str, list[float]] = {}
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SEC   = 900   # 15분
+LOG_MAX_LINES      = 2000  # /api/logs 한 번에 반환할 최대 행수
 
 def _new_token() -> str:
     tok = secrets.token_hex(32)
@@ -876,6 +907,9 @@ def dashboard(token: str, period: int = 0):
 @app.get('/api/logs')
 def get_logs(token: str, lines: int = 200, filter: str = ''):
     _auth(token)
+    # 상한이 없으면 요청 한 번이 로그 파일 전체(회전 상한 20MB)를 읽어
+    # 리스트로 만든다. RAM 951MB 서버라 그 자체가 사고다.
+    lines = max(1, min(int(lines), LOG_MAX_LINES))
     try:
         if not LOG_FILE.exists():
             return {'lines': [], 'file': '로그 없음'}
