@@ -216,12 +216,13 @@ class TestBacktestRsGateApplied:
     """게이트가 실제로 진입을 막고 리스크를 키우는지 — 행동 검증."""
 
     @staticmethod
-    def _run(strategy_id, rank_map, monkeypatch=None):
+    def _run(strategy_id, rank_map, monkeypatch=None, risk_pct=None):
         import atlas_spot_backtest as bt
         ohlcv = _breakout_series()
+        kw = {} if risk_pct is None else {'risk_pct': risk_pct}
         return bt.backtest_strategy(
             strategy_id, 'AUSDT', ohlcv,
-            {}, '2021-01-01', '2022-12-31', rank_map=rank_map)
+            {}, '2021-01-01', '2022-12-31', rank_map=rank_map, **kw)
 
     def test_gate_blocks_bottom_ranked(self):
         import atlas_spot_backtest as bt
@@ -236,6 +237,16 @@ class TestBacktestRsGateApplied:
             bt.MOMENTUM_RS_GATE_PCT = gate
 
     def test_top_tier_gets_risk_boost(self):
+        """주도주 부스트가 사이징에 실제로 도달하는가.
+
+        ⚠️ 기본 설정에서는 **배분 상한이 부스트를 흡수**한다. 부스트를
+        받든 안 받든 주문이 상한(자본 × SPOT_MAX_ALLOC_PCT)에 걸리면
+        기록되는 risk_pct가 같아진다. 상한이 사이징을 지배하는 구간에서는
+        1.3배든 1.2배든 **모든 상향 스케일이 무효**라는 뜻이다.
+        (하향 스케일 — Kelly·레짐·건강도 — 만 실제로 작동한다.)
+
+        그래서 상한 아래 구간에서 부스트가 반영되는지를 함께 확인한다.
+        """
         import atlas_spot_backtest as bt
         top = {d: {'AUSDT': 0.01} for d in _date_keys()}
         trades, diag = self._run('S6', top)
@@ -243,9 +254,19 @@ class TestBacktestRsGateApplied:
             pytest.skip('합성 데이터에서 S6 진입 없음')
         assert diag.get('rs_top_tier', 0) > 0
         base, _ = self._run('S6', None)
-        if base:
-            assert trades[0].risk_pct > base[0].risk_pct, (
-                f'주도주 부스트({bt.MOMENTUM_TOP_RISK_MULT}배)가 반영되지 않았다')
+        if not base:
+            return
+        if trades[0].risk_pct > base[0].risk_pct:
+            return                       # 부스트가 그대로 반영됨
+
+        # 같다면 상한이 둘 다 흡수한 것 — 상한 아래에서 다시 확인한다.
+        small = 0.002
+        t2, _ = self._run('S6', top, risk_pct=small)
+        b2, _ = self._run('S6', None, risk_pct=small)
+        assert t2 and b2, '축소 리스크에서 진입이 사라졌다'
+        assert t2[0].risk_pct > b2[0].risk_pct, (
+            f'배분 상한 아래에서도 주도주 부스트'
+            f'({bt.MOMENTUM_TOP_RISK_MULT}배)가 반영되지 않았다')
 
     def test_non_gate_strategy_unaffected(self):
         """RS Gate는 추세돌파 계열만 — S4(평균회귀)는 영향받지 않아야 한다."""
