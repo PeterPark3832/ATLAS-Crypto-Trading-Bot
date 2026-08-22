@@ -3,6 +3,8 @@ ATLAS Web Dashboard — FastAPI backend
 uvicorn atlas_web_dashboard:app --host 0.0.0.0 --port 8080
 """
 import io
+import math
+import numbers
 import os
 import re
 import time
@@ -128,6 +130,30 @@ def _auth(token: str):
         raise HTTPException(401, 'Unauthorized')
 
 # ── 가격 배치 조회 ────────────────────────────────────────────────
+def _round_px(v) -> float:
+    """가격을 **유효숫자** 기준으로 반올림한다.
+
+    고정 4자리(round(x, 4))는 저단가 코인을 0으로 만든다. SHIBUSDT
+    진입가 6.12e-06은 round(...,4)가 정확히 0.0이라 entry/sl/tp가 전부
+    0으로 나갔고, UI가 (현재가 - 0) x 수량을 미실현 손익으로 계산해
+    **포지션 원금 전체를 수익으로** 표시했다(+$14.55). SL/TP 거리도
+    0%가 되고 진행 바는 중앙에 붙박였다.
+
+    큰 가격은 종전대로 소수 4자리, 작은 가격은 유효숫자 6자리를 보장한다.
+    """
+    # try/except로 삼키지 않는다 — 이 저장소는 '조용한 예외 삼킴' 래칫을
+    # 두고 있고, 표시 헬퍼라도 예외는 늘리지 않는 편이 낫다.
+    if isinstance(v, bool) or not isinstance(v, numbers.Real):
+        return 0.0
+    f = float(v)
+    if not math.isfinite(f) or f == 0:
+        return 0.0
+    a = abs(f)
+    if a >= 1:
+        return round(f, 4)                       # 기존 동작 그대로
+    return round(f, max(4, 5 - math.floor(math.log10(a))))
+
+
 def _fetch_prices(symbols) -> dict:
     """여러 심볼 현재가를 단일 요청으로 조회 (Binance batch ticker)."""
     syms = [str(s) for s in symbols if s]
@@ -791,8 +817,8 @@ def dashboard(token: str, period: int = 0):
             open_pos.append({
                 'strategy': STRAT_LABEL.get(str(p['strategy']), str(p['strategy'])),
                 'symbol':   p['symbol'], 'direction': 'LONG',
-                'entry':    round(entry, 4), 'sl': round(sl, 4),
-                'tp':       round(float(p['tp']), 4),
+                'entry':    _round_px(entry), 'sl': _round_px(sl),
+                'tp':       _round_px(p['tp']),
                 'qty':      round(float(p['qty']), 6), 'leverage': 1,
                 'entry_ts': str(p['entry_ts']), 'hold': hold_str, 'sl_dist': sl_dist,
                 'cost_usdt': round(float(p['risk_usd']), 2),
@@ -807,8 +833,8 @@ def dashboard(token: str, period: int = 0):
                 'ts':        r['exit_ts'].strftime('%m-%d %H:%M') if pd.notna(r['exit_ts']) else '-',
                 'strategy':  STRAT_LABEL.get(str(r['strategy']), str(r['strategy'])),
                 'symbol':    r['symbol'], 'direction': 'LONG',
-                'entry':     round(float(r['entry_price']), 4),
-                'exit':      round(float(r['exit_price']), 4),
+                'entry':     _round_px(r['entry_price']),
+                'exit':      _round_px(r['exit_price']),
                 'pnl':       round(float(r['pnl_usd']), 2),
                 'r':         round(float(r['pnl_r']), 2),
                 'reason':    r['reason'], 'regime': r['regime'] or '',
