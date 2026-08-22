@@ -329,6 +329,10 @@ def _opt_col(table: str, col: str, default: str = '0') -> str:
 
 
 def _trades(days: int = 9999) -> pd.DataFrame:
+    # SQL 문자열에 넣기 전에 int로 못박는다. 호출부(FastAPI period: int)가
+    # 이미 검증하지만, 경계에서 한 번 더 캐스팅하는 편이 낫다 —
+    # weekly_report.load_trades / mcp.get_trade_history 도 같은 방식이다.
+    days = int(days)
     w = '' if days >= 9999 else f"WHERE exit_ts >= datetime('now','-{days} days')"
     df = _q(f"""SELECT strategy, symbol,
                        entry_price, exit_price, qty_tokens AS qty,
