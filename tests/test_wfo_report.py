@@ -19,7 +19,10 @@ import pytest
 import monthly_wfo_report as mr
 import reoptimize as ro
 import atlas_spot_strategies as strat
-from atlas_spot_config import WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE
+from atlas_spot_config import (
+    WF_OOS_MIN_PF, WF_OOS_MIN_SHARPE,
+    SPOT_MAX_POSITIONS, SPOT_EQUITY_PER_SLOT,
+)
 
 
 def _m(pf, sharpe, pnl, trades, cagr=5.0, wr=55.0):
@@ -191,19 +194,26 @@ class TestPortfolioCaveat:
         msg = mr.format_message(rows, datetime.now(timezone.utc), '2026-08-13', 564.0)
         assert '낙관적' in msg, '결과를 상한선으로 읽어야 한다는 단서가 없다'
 
+    # 슬롯 수 = min(SPOT_MAX_POSITIONS, 자산 // SPOT_EQUITY_PER_SLOT).
+    # 숫자를 박으면 설정을 바꿀 때마다 테스트가 깨지므로 상수에서 유도한다
+    # (실제로 SPOT_MAX_POSITIONS 15 → 6 변경에서 이 세 건이 깨졌다).
+
     def test_slots_computed_from_equity(self):
         """추상적 경고가 아니라 **현재 한도**를 숫자로 보여야 판단에 쓸 수 있다."""
-        txt = mr.portfolio_caveat(564.0)
-        assert '15슬롯' in txt, txt      # min(15, 564//20=28) = 15 (상한)
+        rich = SPOT_MAX_POSITIONS * SPOT_EQUITY_PER_SLOT * 10   # 자본은 넉넉
+        txt = mr.portfolio_caveat(rich)
+        assert f'{SPOT_MAX_POSITIONS}슬롯' in txt, txt          # 설정 상한이 걸린다
 
     def test_small_account_slots_are_capital_bound(self):
-        txt = mr.portfolio_caveat(217.0)
-        assert '10슬롯' in txt, txt      # min(15, 217//20=10) = 10
+        """자본이 상한을 못 지탱하면 슬롯 수가 자본에 따라 줄어야 한다."""
+        want = max(1, SPOT_MAX_POSITIONS - 1)
+        txt = mr.portfolio_caveat(want * SPOT_EQUITY_PER_SLOT)
+        assert f'{want}슬롯' in txt, txt
 
     def test_unknown_equity_falls_back_to_config_limit(self):
         """자산 조회가 실패해도 단서 자체는 남아야 한다."""
         txt = mr.portfolio_caveat(None)
-        assert '낙관적' in txt and '15슬롯' in txt
+        assert '낙관적' in txt and f'{SPOT_MAX_POSITIONS}슬롯' in txt
 
     def test_zero_equity_does_not_crash(self):
         assert '낙관적' in mr.portfolio_caveat(0.0)
