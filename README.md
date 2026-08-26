@@ -391,7 +391,7 @@ ATLAS-Crypto-Trading-Bot/
 ├── capital_plan.py             ← 수익성 설계 계산기
 ├── check_protection.py         ← 보호주문 점검·교정
 │
-├── deploy/                     ← systemd 유닛 + logrotate
+├── deploy/                     ← systemd 유닛 + logrotate + allow-my-ip.sh
 ├── .github/workflows/ci.yml
 ├── requirements.txt / pyproject.toml / .env.example
 └── tests/                      ← 54개 모듈, 1,200개+ 테스트
@@ -443,16 +443,15 @@ CI(`.github/workflows/ci.yml`)가 강제하는 게이트:
 
 봇 중지·재시작과 **전량 시장가 매도(패닉)** 를 할 수 있으므로 노출 범위를 좁게 유지한다.
 
-- **접속 IP 제한** — ufw에서 특정 IP만 8080 허용:
+- **접속 IP 제한** — ufw에서 특정 IP만 8080 허용.
+
+  가정용 인터넷은 IP가 주기적으로 바뀌고, 바뀌면 **대시보드만** 안 열린다(SSH는 계속 열려 있으므로 복구는 항상 가능하다). 그때는 SSH로 접속해 아래 한 줄이면 된다 — 지금 접속한 IP로 규칙을 갈아끼운다:
+
   ```bash
-  ufw allow from <내-IP> to any port 8080 proto tcp
+  ssh root@<서버> 'bash /root/atlas_spot/deploy/allow-my-ip.sh'
   ```
-  집 IP가 바뀌면 대시보드만 안 열린다. SSH로 들어가 이전 규칙을 지우고 새 IP로 다시 걸면 된다:
-  ```bash
-  ufw status numbered          # 기존 8080 규칙 번호 확인
-  ufw delete <번호>
-  ufw allow from <새-IP> to any port 8080 proto tcp
-  ```
+
+  이전 IP 규칙은 남기지 않고 지운다. 동적 IP는 통신사가 다른 사람에게 재할당하므로, 남겨두면 모르는 사람에게 대시보드를 열어두는 셈이 된다 — **이 대시보드에는 전량 시장가 매도 버튼이 있다.**
 - 토큰 인증(TTL 24h), 비밀번호 상수시간 비교, 로그인 IP당 15분 5회 실패 시 429
 - 접근 로그의 토큰 마스킹, CSV 인젝션 이스케이프, Swagger 비활성
 - 보안 헤더: CSP(`frame-ancestors 'none'`으로 클릭재킹 차단, `connect-src 'self'`로 토큰 외부 전송 차단), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`
