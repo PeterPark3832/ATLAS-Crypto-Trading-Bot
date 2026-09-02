@@ -338,10 +338,16 @@ python check_protection.py                  # 보호주문 점검 (읽기전용,
 |------|------|
 | `/status` | 열린 포지션 전체 — 전략/심볼/진입가→현재가/손익% |
 | `/equity` | 총자산 + USDT 잔고 |
+| `/pnl` | 손익 요약 — 오늘/최근 7일/전체, 승률·PF·평균 R (수수료 차감 net) |
+| `/trades` | 최근 거래 8건 — 전략/심볼/사유/손익/R |
+| `/health` | 전략별 표본수·평균 R·Kelly·건강도 상태, 보유 종목 수 |
 | `/regime` | 현재 레짐 + ADX |
 | `/pause` | 신규 진입 일시 중단 |
 | `/resume` | 진입 재개 |
 | `/stop` | 킬 스위치 생성 → 봇 안전 종료 (포지션 유지) |
+| `/help` | 명령 목록 |
+
+> 대시보드는 접속 IP 제한이 걸려 있어 외부(특히 폰)에서 못 열릴 때가 있습니다. `/pnl` · `/trades` · `/health` 는 그때도 같은 숫자를 볼 수 있도록 만든 것입니다.
 
 ---
 
@@ -391,7 +397,7 @@ ATLAS-Crypto-Trading-Bot/
 ├── capital_plan.py             ← 수익성 설계 계산기
 ├── check_protection.py         ← 보호주문 점검·교정
 │
-├── deploy/                     ← systemd 유닛 + logrotate + allow-my-ip.sh
+├── deploy/                     ← systemd 유닛 + 운영 스크립트(IP 갱신·접속복구)
 ├── .github/workflows/ci.yml
 ├── requirements.txt / pyproject.toml / .env.example
 └── tests/                      ← 54개 모듈, 1,200개+ 테스트
@@ -449,6 +455,12 @@ CI(`.github/workflows/ci.yml`)가 강제하는 게이트:
 
   ```bash
   ssh root@<서버> 'bash /root/atlas_spot/deploy/allow-my-ip.sh'
+  ```
+
+  Windows에서는 `deploy/fix-dashboard-access.bat` 을 **더블클릭**하면 같은 일을 하고 브라우저까지 열어줍니다. 서버 주소는 한 번만 등록해두면 됩니다:
+
+  ```
+  setx ATLAS_SERVER "<서버IP>"
   ```
 
   이전 IP 규칙은 남기지 않고 지운다. 동적 IP는 통신사가 다른 사람에게 재할당하므로, 남겨두면 모르는 사람에게 대시보드를 열어두는 셈이 된다 — **이 대시보드에는 전량 시장가 매도 버튼이 있다.**

@@ -3380,6 +3380,37 @@ def _tg_cmd_loop(stop_event: threading.Event) -> None:
         stop_event.wait(3)
 
 
+def _trade_summary(days: int = 0) -> dict:
+    """실거래 요약 통계. days=0이면 전체 기간.
+
+    대시보드를 열지 못하는 상황(접속 IP 제한 등)에서도 텔레그램으로 같은
+    숫자를 볼 수 있어야 해서 뽑았다. 승률·PF는 **수수료 차감 net** 기준이다
+    — gross로 보면 실제보다 좋아 보인다.
+    """
+    where = 'WHERE COALESCE(dry_run,0)=0'
+    args: tuple = ()
+    if days > 0:
+        where += " AND exit_ts >= datetime('now', ?)"
+        args = (f'-{int(days)} days',)
+    with _db_lock, _db_conn() as conn:
+        rows = conn.execute(
+            'SELECT pnl_usdt, COALESCE(fee_usdt,0) AS fee, pnl_r '
+            f'FROM spot_trades {where}', args).fetchall()
+    nets = [float(r['pnl_usdt'] or 0) - float(r['fee'] or 0) for r in rows]
+    rs   = [float(r['pnl_r'] or 0) for r in rows]
+    wins = [v for v in nets if v > 0]
+    gl   = abs(sum(v for v in nets if v < 0))
+    return {
+        'n': len(nets),
+        'net': sum(nets),
+        'wr': (len(wins) / len(nets) * 100) if nets else 0.0,
+        'pf': (sum(wins) / gl) if gl > 0 else 0.0,
+        'avg_r': (sum(rs) / len(rs)) if rs else 0.0,
+        'best': max(nets) if nets else 0.0,
+        'worst': min(nets) if nets else 0.0,
+    }
+
+
 def _handle_tg_cmd(cmd: str) -> None:
     if '/status' in cmd:
         all_pos = _load_all_positions()
@@ -3417,6 +3448,56 @@ def _handle_tg_cmd(cmd: str) -> None:
             _tg(f'[Spot] 레짐: {rs.regime} | ADX: {rs.adx:.1f}')
         else:
             _tg('[Spot] 레짐 정보 없음')
+
+    elif '/pnl' in cmd:
+        a, w = _trade_summary(), _trade_summary(7)
+        _tg(f'[Spot] 손익 요약\n'
+            f'  총자산 ${_state["equity"]:,.2f} | 오늘 ${_state.get("day_pnl", 0.0):+.2f}\n'
+            f'  ── 최근 7일 ({w["n"]}건)\n'
+            f'  순손익 ${w["net"]:+.2f} | 승률 {w["wr"]:.0f}% | PF {w["pf"]:.2f}\n'
+            f'  ── 전체 ({a["n"]}건)\n'
+            f'  순손익 ${a["net"]:+.2f} | 승률 {a["wr"]:.0f}% | PF {a["pf"]:.2f}\n'
+            f'  평균 {a["avg_r"]:+.3f}R | 최고 ${a["best"]:+.2f} / 최저 ${a["worst"]:+.2f}')
+
+    elif '/trades' in cmd:
+        with _db_lock, _db_conn() as conn:
+            rows = conn.execute(
+                'SELECT strategy, symbol, reason, pnl_usdt, COALESCE(fee_usdt,0) AS fee, '
+                'pnl_r, exit_ts FROM spot_trades WHERE COALESCE(dry_run,0)=0 '
+                'ORDER BY id DESC LIMIT 8').fetchall()
+        if not rows:
+            _tg('[Spot] 거래 내역 없음')
+            return
+        lines = ['[Spot] 최근 거래']
+        for r in rows:
+            net = float(r['pnl_usdt'] or 0) - float(r['fee'] or 0)
+            lines.append(f'  {"✅" if net > 0 else "❌"} {r["strategy"]}/{r["symbol"]} '
+                         f'{r["reason"]} ${net:+.2f} ({float(r["pnl_r"] or 0):+.2f}R) '
+                         f'{str(r["exit_ts"])[5:16]}')
+        _tg('\n'.join(lines))
+
+    elif '/health' in cmd:
+        lines = ['[Spot] 전략별 상태']
+        for sid in LIVE_STRATEGIES:
+            avg_r, n, _ = _get_realized_avg_r(sid)
+            health = _get_strategy_health_scale(sid)
+            tag = '⛔차단' if health <= 0 else ('⚠️감봉' if health < 1.0 else '정상')
+            lines.append(f'  {sid}: {n}건 | 평균 {avg_r:+.3f}R | '
+                         f'Kelly {_get_kelly_scale(sid):.2f} | {tag}')
+        lines.append(f'  보유 {len(_load_all_positions())}/{SPOT_MAX_POSITIONS}종목')
+        _tg('\n'.join(lines))
+
+    elif '/help' in cmd:
+        _tg('[Spot] 명령어\n'
+            '  /status  열린 포지션\n'
+            '  /equity  총자산\n'
+            '  /pnl     손익 요약 (7일/전체)\n'
+            '  /trades  최근 거래 8건\n'
+            '  /health  전략별 성과·Kelly·건강도\n'
+            '  /regime  현재 장세\n'
+            '  /pause   신규 진입 정지\n'
+            '  /resume  진입 재개\n'
+            '  /stop    봇 종료')
 
 
 # ══════════════════════════════════════════════════════════════
