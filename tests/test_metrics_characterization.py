@@ -80,11 +80,14 @@ def _run_all() -> dict:
 class TestMetricsCharacterization:
     def test_matches_snapshot(self):
         current = _run_all()
-        if os.getenv('ATLAS_UPDATE_SNAPSHOT') == '1' or not SNAPSHOT.exists():
+        if os.getenv('ATLAS_UPDATE_SNAPSHOT') == '1':
             SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
-            SNAPSHOT.write_text(json.dumps(current, indent=1, sort_keys=True))
-            pytest.skip('스냅샷 생성 — 다시 실행하면 비교한다')
-        saved = json.loads(SNAPSHOT.read_text())
+            SNAPSHOT.write_text(json.dumps(current, indent=1, sort_keys=True), encoding='utf-8')
+            pytest.skip('스냅샷 갱신 — 바뀐 내용을 리뷰에서 확인할 것')
+        # 없을 때 자동으로 만들면 '지금 동작'이 기준이 되어 회귀를 놓친다
+        if not SNAPSHOT.exists():
+            pytest.fail(f'{SNAPSHOT.name} 이 없다 — 저장소에서 되살리거나 ATLAS_UPDATE_SNAPSHOT=1 로 만들 것')
+        saved = json.loads(SNAPSHOT.read_text(encoding='utf-8'))
         diffs = []
         for k in sorted(set(saved) | set(current)):
             a, b = saved.get(k, {}), current.get(k, {})

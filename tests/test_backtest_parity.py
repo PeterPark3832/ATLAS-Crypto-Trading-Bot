@@ -255,7 +255,7 @@ class TestKnownGaps:
     def test_portfolio_constraints_are_documented_as_missing(self):
         """백테스트는 (전략×심볼) 단위라 포트폴리오 제약을 모델링할 수 없다.
         이 사실이 코드에 명시돼 있어야 결과를 오해하지 않는다."""
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert '포트폴리오 제약' in src, (
             '백테스트가 모델링하지 못하는 제약(동시 포지션 수, 슬롯당 자본, '
             'USDT 예비금)이 문서화돼 있어야 한다')

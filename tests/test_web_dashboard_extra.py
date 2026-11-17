@@ -126,7 +126,8 @@ class TestParseRegimeMetrics:
         f.write_text(
             '🟢 장세: TRENDING_UP\n'
             '  ADX(1D)=30.5↗  ADX(4H)=22.1  ATR%=2.34%\n'
-            '  BTC=65,432  EMA200=60,123\n'
+            '  BTC=65,432  EMA200=60,123\n',
+            encoding='utf-8',
         )
         monkeypatch.setattr(wd, 'LOG_FILE', f)
         result = wd._parse_regime_metrics()

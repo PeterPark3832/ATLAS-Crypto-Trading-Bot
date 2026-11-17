@@ -111,7 +111,7 @@ class TestReplacesNotStacks:
     """
 
     def test_health_is_bypassed_when_learning(self):
-        src = Path(sm.__file__).read_text()
+        src = Path(sm.__file__).read_text(encoding='utf-8')
         assert '1.0 if SPOT_LEARN_ENABLED else _get_strategy_health_scale' in src
 
     # SL 거리를 넓게 잡아 **배분 상한에 걸리지 않는** 구간에서 본다.
@@ -152,7 +152,7 @@ class TestReplacesNotStacks:
             assert sm._size_position(*args) == (0.0, 0.0, 0.0)
 
     def test_backtest_replaces_too(self):
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert 'kelly_scale, health_scale = learn_scale, 1.0' in src, (
             '백테스트가 대체하지 않으면 라이브와 사이징이 갈라진다')
 
@@ -291,12 +291,12 @@ class TestKnownLimits:
         다르므로 수치가 정확히 일치하지 않는다 — 포트폴리오 제약을 모델링
         못하는 것과 같은 계열의 한계다. 결과를 상한선으로 읽어야 한다.
         """
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert '포트폴리오 제약은 모델링하지 못한다' in src
 
     def test_min_notional_interaction_is_documented(self):
         """미검증 배분 0.25는 소액 계좌에서 주문을 최소액 아래로 내릴 수 있다."""
-        src = Path(cfg.__file__).read_text()
+        src = Path(cfg.__file__).read_text(encoding='utf-8')
         assert 'capital_plan' in src and 'SPOT_LEARN_UNPROVEN_SCALE' in src
 
 
@@ -321,5 +321,5 @@ class TestRefreshThrottle:
             f'진입 {len(trades)}건에 학습 {len(calls)}회 — 스로틀이 걸리고 있다')
 
     def test_throttle_exists_for_future_intraday_strategies(self):
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert 'SPOT_LEARN_REFRESH_MIN' in src

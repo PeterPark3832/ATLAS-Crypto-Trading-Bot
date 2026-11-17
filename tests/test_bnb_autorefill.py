@@ -288,7 +288,7 @@ class TestExecution:
 class TestWiring:
     def test_refill_is_attempted_before_alerting(self):
         """충전에 성공하면 경고가 자연히 멎어야 한다 — 순서가 중요하다."""
-        src = Path(sm.__file__).read_text()
+        src = Path(sm.__file__).read_text(encoding='utf-8')
         body = src[src.index('def _check_bnb_fee_balance'):]
         body = body[:body.index('def _estimate_monthly_bnb_usd')] \
             if 'def _estimate_monthly_bnb_usd' in body else body[:2000]

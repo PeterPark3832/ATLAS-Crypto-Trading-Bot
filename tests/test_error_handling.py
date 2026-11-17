@@ -64,7 +64,7 @@ def _leaves_trace(handler: ast.ExceptHandler) -> bool:
 
 
 def _handlers(path: Path):
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding='utf-8'))
     for node in ast.walk(tree):
         if isinstance(node, ast.ExceptHandler):
             yield node
@@ -113,7 +113,7 @@ class TestLiveOrderPathIsLoud:
 
     @pytest.mark.parametrize('fname', LIVE_PATH)
     def test_risky_functions_leave_a_trace(self, fname):
-        tree = ast.parse((ROOT / fname).read_text())
+        tree = ast.parse((ROOT / fname).read_text(encoding='utf-8'))
         offenders = []
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
