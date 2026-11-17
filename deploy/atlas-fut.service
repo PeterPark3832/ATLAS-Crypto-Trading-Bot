@@ -1,0 +1,37 @@
+# ATLAS Futures Bot (롱·숏) — systemd 유닛
+# ==========================================
+# 설치:
+#   sudo cp deploy/atlas-fut.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-fut
+#
+# 모드는 .env 의 FUT_MODE 로 정한다 (observe → testnet → live 순서로만 올릴 것).
+#   observe : 주문 없이 매일 판정만 기록 (키 불필요)
+#   testnet : 바이낸스 선물 데모(demo-fapi.binance.com) — 키는 demo.binance.com 에서 발급
+#   live    : 실계좌 — FUT_LIVE_CONFIRM 확인 문구가 있어야만 켜진다
+#
+# 현물 봇(atlas-spot)과 같은 서버에서 따로 돈다. 이 봇은 pandas를 쓰지 않아
+# 메모리가 작지만(수십 MB), 현물 봇을 밀어내지 않도록 상한을 건다.
+#
+# 정지: systemctl stop atlas-fut   또는   touch /tmp/ATLAS_FUT_STOP (보유 포지션·보호주문은 유지)
+# 점검: cd /root/atlas_spot && python3 atlas_fut_main.py --check
+# 로그: /root/atlas_spot/logs/atlas_fut.log
+
+[Unit]
+Description=ATLAS Futures Bot (long/short, regime-routed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/atlas_spot
+ExecStart=/usr/bin/python3 -u atlas_fut_main.py
+Restart=on-failure
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+MemoryMax=250M
+StandardOutput=append:/root/atlas_spot/logs/atlas_fut_stdout.log
+StandardError=append:/root/atlas_spot/logs/atlas_fut_stdout.log
+
+[Install]
+WantedBy=multi-user.target

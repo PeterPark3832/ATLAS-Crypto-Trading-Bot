@@ -1,0 +1,119 @@
+{
+ "_설명": "FUTURES.md 백테스트 수치의 재현 기준. 데이터: python atlas_fut_backtest.py --data-dir data/futures --fetch 후 아래 now_ms 로 실행",
+ "command": "python atlas_fut_backtest.py --data-dir data/futures --now-ms 1794902400000",
+ "data_cutoff_utc": "2026-11-17 08:00 (그 시각까지 끝난 4시간봉만 사용)",
+ "now_ms": 1794902400000,
+ "start_ms": 1609459200000,
+ "risk": 0.005,
+ "expect": {
+  "final": 17196.37,
+  "trades": 473,
+  "max_dd": 0.1166,
+  "cagr": 0.0967,
+  "pf": 1.48,
+  "win_rate": 0.43
+ },
+ "params": {
+  "ATR_PERIOD": 14,
+  "ATR_SL_MULT": 2.0,
+  "DON_ENTRY": 20,
+  "DON_EXIT": 10,
+  "ENTRY_LIMIT_SEC": 14400,
+  "ENTRY_POST_OFFSET": 0.0002,
+  "FUND_LONG_BLOCK": 0.0005,
+  "FUND_LONG_BOOST": -0.0001,
+  "FUND_LONG_BOOST_MULT": 1.2,
+  "FUND_SHORT_BLOCK": -0.0005,
+  "FUT_BTC_HISTORY_START_MS": 1567900800000,
+  "FUT_DAILY_LOSS_LIMIT": -0.04,
+  "FUT_DD_HALF": 0.15,
+  "FUT_DD_STOP": 0.2,
+  "FUT_LEVERAGE": 3,
+  "FUT_MAKER_FEE": 0.0002,
+  "FUT_MARGIN_TYPE": "ISOLATED",
+  "FUT_MAX_COST_PER_R": 0.2,
+  "FUT_MAX_POSITIONS": 6,
+  "FUT_MAX_SL_PCT": 0.2,
+  "FUT_MMR": 0.005,
+  "FUT_NOTIONAL_CAP_MULT": 25.0,
+  "FUT_REGIME_SYMBOL": "BTCUSDT",
+  "FUT_RISK_PCT": 0.005,
+  "FUT_SLIP_BY_TIER": [
+   0.0003,
+   0.0008,
+   0.0015
+  ],
+  "FUT_SLIP_TIER1": [
+   "BTCUSDT",
+   "ETHUSDT"
+  ],
+  "FUT_SLIP_TIER2": [
+   "BNBUSDT",
+   "SOLUSDT",
+   "XRPUSDT",
+   "ADAUSDT",
+   "DOGEUSDT",
+   "AVAXUSDT",
+   "LINKUSDT",
+   "DOTUSDT",
+   "UNIUSDT"
+  ],
+  "FUT_STRATEGIES": [
+   "S6",
+   "SX"
+  ],
+  "FUT_TAKER_FEE": 0.0005,
+  "FUT_UNIVERSE": [
+   "BTCUSDT",
+   "ETHUSDT",
+   "BNBUSDT",
+   "SOLUSDT",
+   "XRPUSDT",
+   "ADAUSDT",
+   "DOGEUSDT",
+   "LINKUSDT",
+   "AVAXUSDT",
+   "DOTUSDT",
+   "LTCUSDT",
+   "BCHUSDT",
+   "TRXUSDT",
+   "ATOMUSDT",
+   "ETCUSDT",
+   "FILUSDT",
+   "UNIUSDT",
+   "NEARUSDT",
+   "XLMUSDT",
+   "AAVEUSDT"
+  ],
+  "LIMIT_THROUGH": 0.0005,
+  "REGIME_ADX_LOOKBACK": 50,
+  "REGIME_ADX_TREND": 25.0,
+  "REGIME_ADX_WEAK": 20.0,
+  "REGIME_ATR_PERIOD": 14,
+  "REGIME_CRISIS_ATR": 0.07,
+  "REGIME_EMA_SPAN": 200,
+  "REGIME_MICRO_ADX4H": 20.0,
+  "REGIME_ROUTE": {
+   "TRENDING_UP": [
+    "S6"
+   ],
+   "RANGING": [
+    "S6"
+   ],
+   "WEAK_TREND": [
+    "SX"
+   ],
+   "TRENDING_DOWN": [
+    "SX"
+   ]
+  },
+  "RR_FALLBACK": 2.0,
+  "RR_MAX": 3.0,
+  "RR_MIN": 1.5,
+  "S6_VOL_MULT": 2.0,
+  "SIGNAL_WARMUP": 45,
+  "SL_WORKING_TYPE": "MARK_PRICE",
+  "STOP_SLIP_MULT": 1.5,
+  "VOL_MA": 20
+ }
+}
