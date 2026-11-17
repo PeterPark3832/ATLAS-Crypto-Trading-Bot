@@ -227,7 +227,7 @@ class TestReadOnlyByDefault:
 
     def test_never_places_orders(self):
         """이 도구는 주문을 내지 않는다 — 자가복구는 봇의 일이다."""
-        src = Path(cp.__file__).read_text()
+        src = Path(cp.__file__).read_text(encoding='utf-8')
         assert 'create_order' not in src and 'privatePost' not in src
 
 

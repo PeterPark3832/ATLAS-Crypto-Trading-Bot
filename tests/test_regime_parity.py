@@ -195,7 +195,7 @@ class TestFormingBarExcluded:
 
     def test_update_regime_uses_it(self):
         """호출되지 않으면 헬퍼만 있고 동작은 그대로다."""
-        src = Path(__import__('atlas_regime').__file__).read_text()
+        src = Path(__import__('atlas_regime').__file__).read_text(encoding='utf-8')
         body = src[src.index('def update_regime'):]
         assert '_drop_forming_bar(ohlcv)' in body
 
@@ -251,7 +251,7 @@ class TestAdxWindowParity:
     def test_backtest_uses_named_constant(self):
         """매직넘버 50이 남아 있으면 상수를 바꿔도 한쪽만 움직인다."""
         import atlas_spot_backtest as bt
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         body = src[src.index('def build_regime_map'):src.index('def _bt_exit_decision')]
         assert 'i - 50' not in body and 'j - 50' not in body
         assert 'REGIME_BTC_LOOKBACK' in body

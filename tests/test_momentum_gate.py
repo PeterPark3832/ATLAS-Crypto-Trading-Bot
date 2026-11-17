@@ -32,7 +32,7 @@ class TestRsGate:
     def test_threshold_is_named_constant(self):
         """인라인 `* 3` 대신 이름 있는 상수여야 의도가 드러나고 튜닝된다."""
         assert hasattr(cfg, 'MOMENTUM_RS_GATE_PCT')
-        src = Path(sm.__file__).read_text()
+        src = Path(sm.__file__).read_text(encoding='utf-8')
         assert 'MOMENTUM_TOP_TIER_PCT * 3' not in src
 
     def test_current_threshold_blocks_nothing(self):
@@ -132,7 +132,7 @@ class TestUniverseParityGap:
 
     def test_gap_is_documented(self):
         """이 한계가 코드에 적혀 있어야 결과를 오해하지 않는다."""
-        src = Path(uni.__file__).read_text()
+        src = Path(uni.__file__).read_text(encoding='utf-8')
         assert '선행편향' in src or '생존' in src
 
     def test_symbol_selection_still_unvalidated(self):
@@ -143,7 +143,7 @@ class TestUniverseParityGap:
         '라이브 그대로'로 읽으면 안 된다.
         """
         import atlas_spot_backtest as bt
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert 'get_backtest_universe' in src or 'BT_TIER1_SYMBOLS' in src
 
 

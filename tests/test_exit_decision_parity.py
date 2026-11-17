@@ -132,7 +132,7 @@ class TestKnownParityGaps:
 
     def test_s5_live_tp_update_is_live_only(self):
         """라이브는 매 폴링마다 TP를 bb_upper로 옮긴다. 백테스트는 정적 TP."""
-        assert 'bb_upper' not in Path(bt.__file__).read_text(), (
+        assert 'bb_upper' not in Path(bt.__file__).read_text(encoding='utf-8'), (
             '백테스트가 실시간 TP 갱신을 구현했다면 격차가 해소된 것이다')
 
     def test_gap_is_documented(self):
@@ -146,7 +146,7 @@ class TestSharedReasonVocabulary:
 
     def test_backtest_reasons_are_subset(self):
         live = {'SL', 'TP', 'CROSS', 'TIME', 'BB_MID'}
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         bt_body = src[src.index('def _bt_exit_decision'):src.index('def _bt_kelly_scale')]
         used = {r for r in ('SL', 'TP', 'CROSS', 'TIME') if f"'{r}'" in bt_body}
         assert used <= live and used == {'SL', 'TP', 'CROSS', 'TIME'}

@@ -375,6 +375,6 @@ class TestBacktestParity:
     def test_backtest_keeps_orig_sl(self):
         """백테스트 포지션도 원본 SL을 따로 보존해야 R이 부풀지 않는다."""
         import atlas_spot_backtest as bt
-        src = Path(bt.__file__).read_text()
+        src = Path(bt.__file__).read_text(encoding='utf-8')
         assert "'orig_sl':" in src
         assert "position.get('orig_sl', position['sl'])" in src

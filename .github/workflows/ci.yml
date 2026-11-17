@@ -42,7 +42,9 @@ jobs:
         # 전면 strict는 노이즈가 압도하므로 금액·수량이 흐르는 모듈부터
         # 조인다. 실제로 여기서 `int | None`에 단항 마이너스를 적용하던
         # 도달 불가 분기를 찾았다.
-        run: mypy atlas_indicators.py atlas_learning.py atlas_regime.py capital_plan.py
+        # 선물 모듈(atlas_fut_*)은 처음부터 전부 넣는다 — 빠져 있는 동안 백테스트의 Optional 대입
+        # 오류 1건이 CI에 보이지 않았다(tests/test_fut_ci_gates.py 가 목록 누락을 막는다).
+        run: mypy atlas_indicators.py atlas_learning.py atlas_regime.py capital_plan.py atlas_fut_config.py atlas_fut_core.py atlas_fut_exchange.py atlas_fut_backtest.py atlas_fut_main.py
 
       - name: 보안 스캔 (HIGH만 차단)
         # MEDIUM 이하는 오탐 비중이 커서 차단하지 않는다.
@@ -86,7 +88,9 @@ jobs:
           # atlas_rules.py: atlas_spot_main 에서 빠져나간 공유 규칙(trailing_sl 등)의
           # 새 거처. 코드가 게이트 대상 파일을 떠날 때 include 를 같이 늘리지 않으면
           # 게이트가 그 코드를 조용히 놓친다 — 이동 PR에서 원자적으로 추가한다.
-          coverage report --include='atlas_spot_main.py,atlas_learning.py,atlas_indicators.py,atlas_regime.py,atlas_rules.py' \
+          # atlas_fut_main/exchange/core.py: 선물 봇의 주문·사이징 경로. 현물과 별개 프로세스지만 실계좌에
+          # 주문을 낸다는 점은 같다 — 빠지면 tests/test_fut_ci_gates.py 가 실패한다.
+          coverage report --include='atlas_spot_main.py,atlas_learning.py,atlas_indicators.py,atlas_regime.py,atlas_rules.py,atlas_fut_main.py,atlas_fut_exchange.py,atlas_fut_core.py' \
                           --fail-under=88
         # 주문을 내는 경로는 전체 평균(78%)보다 높은 88%를 요구한다.
         # 실측 90% — 여기가 무너지면 '테스트 통과'가 실계좌 안전을

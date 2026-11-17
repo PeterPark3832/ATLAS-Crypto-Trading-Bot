@@ -10,7 +10,7 @@ ATLAS — 백테스트 특성화(characterization) 테스트
 
 (골든값은 코드에 박지 않고 **같은 실행 안에서 두 경로를 비교**하지 않는다.
  대신 파일에 저장된 스냅샷과 비교한다 — 그래야 '리팩터링 후'에도 의미가
- 있다. 스냅샷이 없으면 처음 실행에서 만들고 통과시킨다)
+ 있다. 스냅샷이 없으면 실패한다 — 만들거나 갱신할 때만 ATLAS_UPDATE_SNAPSHOT=1)
 
 실행:
   pytest tests/test_backtest_characterization.py -v
@@ -135,13 +135,18 @@ class TestCharacterization:
     def test_matches_snapshot(self):
         """리팩터링 전후로 **완전히 동일한 결과**여야 한다."""
         current = _run_all()
-        if os.getenv('ATLAS_UPDATE_SNAPSHOT') == '1' or not SNAPSHOT.exists():
+        if os.getenv('ATLAS_UPDATE_SNAPSHOT') == '1':
             SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
             SNAPSHOT.write_text(
-                json.dumps(current, indent=1, sort_keys=True, ensure_ascii=False))
-            pytest.skip(f'스냅샷 생성: {SNAPSHOT.name} — 다시 실행하면 비교한다')
+                json.dumps(current, indent=1, sort_keys=True, ensure_ascii=False), encoding='utf-8')
+            pytest.skip(f'스냅샷 갱신: {SNAPSHOT.name} — 바뀐 내용을 리뷰에서 확인할 것')
+        # 없을 때 여기서 새로 만들면 '지금 동작'이 기준이 되어 회귀를 놓친다. 이 테스트가 존재 검사
+        # (TestSnapshotIsVersioned)보다 먼저 돌아서, 방금 만든 파일로 존재 검사까지 통과했다.
+        if not SNAPSHOT.exists():
+            pytest.fail(f'{SNAPSHOT.name} 이 없다 — 병합 등으로 빠졌으면 저장소에서 되살리고, '
+                        f'처음 만드는 것이면 ATLAS_UPDATE_SNAPSHOT=1 로 의도적으로 만들 것')
 
-        saved = json.loads(SNAPSHOT.read_text())
+        saved = json.loads(SNAPSHOT.read_text(encoding='utf-8'))
         if _digest(saved) == _digest(current):
             return
 
@@ -205,5 +210,5 @@ class TestSnapshotIsVersioned:
 
     def test_snapshot_file_exists(self):
         assert SNAPSHOT.exists(), (
-            '스냅샷이 없으면 test_matches_snapshot 이 생성 후 skip 한다 — '
-            '동작 변화를 감지하지 못한다')
+            '스냅샷이 없다 — test_matches_snapshot 도 실패한다. 저장소에서 되살리거나 '
+            'ATLAS_UPDATE_SNAPSHOT=1 로 의도적으로 만들 것')

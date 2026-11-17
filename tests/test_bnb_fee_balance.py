@@ -112,7 +112,7 @@ class TestFailSafe:
 class TestWiring:
     def test_called_from_balance_poller_path(self):
         """`_get_spot_equity`가 이미 전 잔고를 가져오므로 추가 API 호출이 없다."""
-        src = Path(sm.__file__).read_text()
+        src = Path(sm.__file__).read_text(encoding='utf-8')
         body = src[src.index('def _get_spot_equity'):]
         assert '_check_bnb_fee_balance(bal)' in body[:800]
 

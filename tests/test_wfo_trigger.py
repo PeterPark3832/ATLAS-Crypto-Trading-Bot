@@ -89,20 +89,20 @@ class TestDeployUnits:
             '메모리 피크가 중복된다(RAM 951MB 서버)')
 
     def test_reopt_runs_after_report(self):
-        unit = (self.ROOT / 'atlas-wfo-reopt.service').read_text()
+        unit = (self.ROOT / 'atlas-wfo-reopt.service').read_text(encoding='utf-8')
         assert 'After=' in unit and 'atlas-wfo-report.service' in unit, (
             '리포트와 동시에 돌면 메모리 피크가 겹친다(RAM 951MB 서버)')
 
     def test_always_option_documented(self):
         """운영자가 이 스위치의 존재와 트레이드오프를 알 수 있어야 한다."""
-        unit = (self.ROOT / 'atlas-wfo-report.service').read_text()
+        unit = (self.ROOT / 'atlas-wfo-report.service').read_text(encoding='utf-8')
         assert 'WFO_REOPT_ALWAYS' in unit
         assert '분기' in unit or '수동' in unit, '권장 운용법이 적혀 있어야 한다'
 
     def test_memory_isolation_present(self):
         """라이브 봇을 지키기 위한 cgroup 상한이 두 잡 모두에 있어야 한다."""
         for name in ('atlas-wfo-report.service', 'atlas-wfo-reopt.service'):
-            assert 'MemoryMax=' in (self.ROOT / name).read_text(), name
+            assert 'MemoryMax=' in (self.ROOT / name).read_text(encoding='utf-8'), name
 
 
 class TestLogRotation:

@@ -63,7 +63,7 @@ class TestInsufficientData:
 
     def test_regime_guard_matches_adx_requirement(self):
         """가드가 ADX 요구치보다 낮으면 그 사이 구간이 조용히 오분류된다."""
-        src = Path(R.__file__).read_text()
+        src = Path(R.__file__).read_text(encoding='utf-8')
         assert 'adx_min_bars' in src, (
             'update_regime 가드가 calc_adx 요구 봉수를 참조해야 한다')
         assert 'len(ohlcv) < 30' not in src, '30봉 하드코딩 가드가 남아 있다'

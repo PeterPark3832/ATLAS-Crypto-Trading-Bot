@@ -146,7 +146,7 @@ class TestStrategyWiring:
 
     @classmethod
     def setup_class(cls):
-        cls.SRC = Path(st.__file__).read_text()
+        cls.SRC = Path(st.__file__).read_text(encoding='utf-8')
 
     @pytest.mark.parametrize('sid', ['S3', 'S6', 'S7'])
     def test_passes_own_bounds(self, sid):
@@ -155,7 +155,7 @@ class TestStrategyWiring:
 
     def test_no_hardcoded_range_left(self):
         """함수 안에 1.5~3.0이 다시 박히면 상수가 또 죽는다."""
-        src = Path(ind.__file__).read_text()
+        src = Path(ind.__file__).read_text(encoding='utf-8')
         body = src[src.index('def calc_dynamic_rr_ma'):]
         assert 'min(3.0,' not in body and 'max(1.5,' not in body
 

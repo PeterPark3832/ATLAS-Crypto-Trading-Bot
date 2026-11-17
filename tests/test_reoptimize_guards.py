@@ -48,8 +48,8 @@ class TestGridEffectiveness:
         """
         import atlas_spot_backtest as bt
         import atlas_spot_strategies as st
-        return set(Path(bt.__file__).read_text().split()) | \
-               set(Path(st.__file__).read_text().split())
+        return set(Path(bt.__file__).read_text(encoding='utf-8').split()) | \
+               set(Path(st.__file__).read_text(encoding='utf-8').split())
 
     @pytest.mark.parametrize('sid', sorted(ro.GRIDS))
     def test_every_axis_is_known_to_backtest(self, sid):
