@@ -693,17 +693,34 @@ class FuturesBot:
         self.store.del_entry(symbol)
         self.notify(f'· {symbol} {e.get("strategy", "")} 주문을 보내기 전에 멈춰 이번 진입은 건너뜁니다')
 
+    def _order_fill(self, symbol: str, o: dict) -> tuple[dict, Decimal, float]:
+        """주문의 (최신 상태, 체결 수량, 평균 체결가). 평균가는 믿을 수 있는 곳에서만 읽는다.
+
+        바이낸스 선물 데모는 주문·취소 응답(POST/DELETE /fapi/v1/order)에 avgPrice·cumQuote를 넣지 않고
+        조회(GET)에만 넣는다(2026-11-18 실측, 실계좌도 같은지는 모른다 — 어느 쪽이든 견디게 한다).
+        응답의 avgPrice를 그대로 믿으면 체결가가 0이 되고 손절가가 음수로 계산돼 거래소가 손절을 거부한다 —
+        보호주문 없는 포지션이 남는다. 체결분이 있는데 평균가가 없으면 주문을 다시 조회한다.
+        """
+        q = Decimal(str(o.get('executedQty') or '0'))
+        if q > 0 and _f(o.get('avgPrice')) <= 0 and o.get('orderId') is not None:
+            o = self.ex.query_order(symbol, o.get('orderId'))
+            q = Decimal(str(o.get('executedQty') or '0'))
+        avg = _f(o.get('avgPrice'))
+        if q > 0 and avg <= 0 and _f(o.get('cumQuote')) > 0:
+            avg = _f(o.get('cumQuote')) / float(q)
+        return o, q, avg
+
     def _finish_market(self, symbol: str, e: dict, o: dict) -> None:
         """시장가 전환 주문의 결과로 진입을 마무리한다 (보낸 직후 멈췄다가 재시작한 경우도 여기로 온다)."""
         if str(o.get('status', '')) in ('NEW', 'PARTIALLY_FILLED'):
             return                      # 시장가는 곧 끝난다 — 다음 점검에서 다시 본다
         part = Decimal(str(e.get('limit_filled') or '0'))
-        q = Decimal(str(o.get('executedQty') or '0'))
+        o, q, mavg = self._order_fill(symbol, o)       # 주문 응답엔 평균가가 없다 — 조회로 받는다
         total = part + q
         if total <= 0:
             self.store.del_entry(symbol)
             return
-        avg = (Decimal(str(_f(e.get('limit_avg')))) * part + Decimal(str(_f(o.get('avgPrice')))) * q) / total
+        avg = (Decimal(str(_f(e.get('limit_avg')))) * part + Decimal(str(mavg)) * q) / total
         self._entry_done(symbol, e, float(avg), total, maker=(q == 0))
 
     def poll_entries(self) -> None:
@@ -727,9 +744,8 @@ class FuturesBot:
             if not e.get('order_id') and o.get('orderId'):
                 e['order_id'] = o.get('orderId')
                 self.store.put_entry(s, e)
+            o, filled, avg = self._order_fill(s, o)
             st = str(o.get('status', ''))
-            filled = Decimal(str(o.get('executedQty') or '0'))
-            avg = _f(o.get('avgPrice'))
             if st == 'FILLED':
                 self._entry_done(s, e, avg, filled, maker=True)
                 continue
@@ -742,8 +758,7 @@ class FuturesBot:
                 except BinanceAPIError as err:
                     log.warning(f'[진입] {s} 취소 실패(체결됐을 수 있음): {err}')
                     o = self.ex.query_order(s, e.get('order_id'))
-                filled = Decimal(str(o.get('executedQty') or '0'))
-                avg = _f(o.get('avgPrice'))
+                o, filled, avg = self._order_fill(s, o)    # 취소 응답엔 평균가가 없다 — 체결분이 있으면 조회로
                 if str(o.get('status')) == 'FILLED':
                     self._entry_done(s, e, avg, filled, maker=True)
                 else:
@@ -859,6 +874,15 @@ class FuturesBot:
 
     def on_filled(self, symbol: str, e: dict, fill: float, qty: Decimal, maker: bool) -> None:
         side = int(e['side'])
+        if not fill > 0:
+            # 체결가를 모르면 손절가를 계산할 수 없다 — 0으로 두면 손절가가 음수가 돼 거래소가 거부하고 보호주문
+            # 없는 포지션이 남는다(2026-11-18 데모에서 재현). 거래소 포지션의 평균 진입가로 대신하고, 그것도 없으면
+            # 아무것도 기록하지 않고 예외를 올린다 — 진입 기록이 남아 있어 다음 점검에서 다시 마무리한다.
+            held = self.exchange_positions().get(symbol)
+            if held is None or not held[1] > 0:
+                raise RuntimeError(f'{symbol} 체결가를 알 수 없어 손절가를 계산할 수 없음 — 다음 점검에서 다시 시도')
+            log.warning(f'[진입] {symbol} 체결가 없음({fill}) → 거래소 포지션 진입가 {held[1]:g}로 대신함')
+            fill = held[1]
         sl_dist = float(e['sl_dist'])
         pos = {'strategy': e['strategy'], 'side': side, 'qty': fmt_dec(qty), 'entry': fill,
                'sl': core.stop_price(side, fill, sl_dist), 'sl_dist': sl_dist, 'rr': float(e['rr']),
