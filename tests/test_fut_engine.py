@@ -22,6 +22,13 @@ class Clock:
         return self.ms / 1000
 
 
+def _wire(o: dict) -> dict:
+    """주문·취소 응답(POST/DELETE)의 실제 모양 — 바이낸스 선물 데모는 avgPrice·cumQuote를 넣지 않는다.
+    평균 체결가는 조회(GET)에만 있다 (2026-11-18 demo-fapi 실측). 문서대로 응답에 평균가를 넣어 주던 예전
+    가짜 거래소는, 봇이 체결가를 0으로 읽어 손절이 음수가 되는 결함을 통과시켰다."""
+    return {k: v for k, v in o.items() if k not in ('avgPrice', 'cumQuote')}
+
+
 class FakeEx:
     base_url = 'fake://'
 
@@ -111,7 +118,7 @@ class FakeEx:
         fee = px * qty * (0.0002 if o['type'] == 'LIMIT' else 0.0005)
         self.fills.append({'symbol': s, 'side': o['side'], 'price': str(px), 'qty': str(qty),
                            'realizedPnl': str(realized), 'commission': str(fee), 'time': int(self.clock.ms)})
-        o.update(status='FILLED', executedQty=str(qty), avgPrice=str(px))
+        o.update(status='FILLED', executedQty=str(qty), avgPrice=str(px), cumQuote=str(px * qty))
 
     def new_order(self, symbol, side, order_type, quantity, *, price=None, time_in_force=None,
                   reduce_only=False, client_id=None):
@@ -132,7 +139,7 @@ class FakeEx:
         if self.crash_after_send:
             self.crash_after_send = False
             raise RuntimeError('응답을 받기 전에 프로세스가 죽음 (시뮬레이션)')
-        return dict(o)
+        return _wire(o)
 
     def fill(self, oid, px=None):
         o = self.orders[oid]
@@ -151,12 +158,14 @@ class FakeEx:
         if o['status'] not in ('NEW', 'PARTIALLY_FILLED'):
             raise BinanceAPIError(400, -2011, 'Unknown order sent.', '/fapi/v1/order')
         o['status'] = 'CANCELED'
-        return dict(o)
+        return _wire(o)
 
     def open_orders(self, symbol=None):
         return [dict(o) for o in self.orders.values() if o['status'] in ('NEW', 'PARTIALLY_FILLED')]
 
     def new_stop_market(self, symbol, side, quantity, trigger, *, working_type='MARK_PRICE', client_algo_id=None):
+        if trigger <= 0:                  # 실제 거래소 응답 (2026-11-18 demo-fapi 실측)
+            raise BinanceAPIError(400, -4006, 'Stop price less than zero.', '/fapi/v1/algoOrder')
         aid = self._id()
         self.algos[aid] = {'algoId': aid, 'symbol': symbol, 'side': side, 'quantity': str(quantity),
                            'triggerPrice': str(trigger), 'algoStatus': 'NEW', 'workingType': working_type,
@@ -1103,3 +1112,72 @@ def test_market_fallback_rounding_to_zero_leaves_no_position():
     clock.ms += cfg.ENTRY_LIMIT_SEC * 1000 + 1
     bot.poll_entries()
     assert store.entries() == {} and store.positions() == {}
+
+
+# ── 체결가 누락 (2026-11-18 demo-fapi 실측: 주문·취소 응답에 avgPrice·cumQuote가 없다) ─────────────
+# 봇이 응답의 avgPrice를 믿으면 체결가 0 → 손절가 음수 → 거래소 거부(-4006) → 보호주문 없는 포지션.
+# 예전 가짜 거래소는 응답에 평균가를 넣어 줘서, 손절이 '있는지'만 보던 테스트가 이 결함을 통과시켰다.
+# 여기서는 손절·익절 가격이 실제 체결가 기준인지까지 본다.
+
+def _assert_protected_at(ex, pos, fill):
+    """포지션이 실제 체결가로 기록되고, 손절·익절이 그 가격 기준으로 걸려 있는가 (롱)."""
+    assert abs(pos['entry'] - fill) < 1e-6 * fill, f'기록된 체결가 {pos["entry"]} ≠ 실제 {fill}'
+    trig = float(ex.algos[pos['sl_algo_id']]['triggerPrice'])
+    assert 0 < trig < fill and abs(trig - (fill - pos['sl_dist'])) < 0.0101      # tick 0.01 올림
+    tp = ex.orders[pos['tp_order_id']]
+    assert tp['status'] == 'NEW' and float(tp['price']) > fill
+
+
+def test_market_fallback_reads_fill_price_by_query_not_from_order_response():
+    bot, ex, store, _, clock = _bot()
+    _with_breakout(ex)
+    bot.on_day_close()
+    clock.ms += cfg.ENTRY_LIMIT_SEC * 1000 + 1
+    bot.poll_entries()
+    _assert_protected_at(ex, store.positions()['ETHUSDT'], ex.book['ETHUSDT'][1])     # 시장가 매수 = 매도호가
+
+
+def test_partial_limit_fill_then_expiry_averages_both_parts_at_real_prices():
+    """지정가 일부 체결 → 만료로 취소(취소 응답에도 평균가 없음) → 나머지 시장가."""
+    bot, ex, store, _, clock = _bot()
+    _with_breakout(ex)
+    bot.on_day_close()
+    o = ex.orders[store.entries()['ETHUSDT']['order_id']]
+    limit_px, half = float(o['price']), round(float(o['origQty']) / 2, 3)
+    ex._fill(o, limit_px, half)
+    o['status'] = 'PARTIALLY_FILLED'
+    clock.ms += cfg.ENTRY_LIMIT_SEC * 1000 + 1
+    bot.poll_entries()
+    pos = store.positions()['ETHUSDT']
+    total, ask = float(pos['qty']), ex.book['ETHUSDT'][1]
+    assert total > half                                                  # 나머지를 시장가로 채웠다
+    _assert_protected_at(ex, pos, (limit_px * half + ask * (total - half)) / total)
+
+
+def test_on_filled_never_sends_a_negative_stop_when_fill_price_is_unknown():
+    """마지막 방어선: 체결가 0이 들어와도 음수 손절을 보내지 않는다."""
+    bot, ex, store, msgs, _ = _bot()
+    e = {'side': 1, 'strategy': 'S6', 'sl_dist': 5.0, 'rr': 2.0, 'regime': 'TRENDING_UP'}
+    ex.book['ETHUSDT'] = (111.99, 112.01)
+    try:                                         # 거래소 포지션도 없다 → 아무것도 기록하지 않고 예외 (진입 기록이 남아 재시도)
+        bot.on_filled('ETHUSDT', e, 0.0, Decimal('1'), maker=False)
+        raise AssertionError('체결가를 모르면 예외여야 한다')
+    except RuntimeError:
+        pass
+    assert store.positions() == {} and ex.algos == {} and ex.orders == {}
+    ex.positions['ETHUSDT'] = (1.0, 112.0)       # 거래소 포지션이 있으면 그 평균 진입가로 대신한다
+    bot.on_filled('ETHUSDT', e, 0.0, Decimal('1'), maker=False)
+    _assert_protected_at(ex, store.positions()['ETHUSDT'], 112.0)
+
+
+def test_order_fill_trusts_response_price_only_when_present():
+    bot, ex, _, _, _ = _bot()
+    calls = []
+    real = {'orderId': 7, 'status': 'FILLED', 'executedQty': '2', 'avgPrice': '10.5', 'cumQuote': '21'}
+    ex.query_order = lambda s, oid=None, client_id=None: (calls.append(oid), dict(real))[1]
+    assert bot._order_fill('X', dict(real))[1:] == (Decimal('2'), 10.5) and calls == []       # 평균가 있음 → 조회 안 함
+    assert bot._order_fill('X', {'orderId': 7, 'executedQty': '2'})[1:] == (Decimal('2'), 10.5) and calls == [7]
+    real = {'orderId': 7, 'status': 'FILLED', 'executedQty': '2', 'avgPrice': '0', 'cumQuote': '21'}
+    assert bot._order_fill('X', {'orderId': 7, 'executedQty': '2'})[2] == 10.5                # 조회에도 없으면 금액 ÷ 수량
+    calls.clear()
+    assert bot._order_fill('X', {'orderId': 7, 'executedQty': '0'})[1:] == (Decimal('0'), 0.0) and calls == []  # 체결 없음
